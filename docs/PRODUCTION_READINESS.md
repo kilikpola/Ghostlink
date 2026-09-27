@@ -3,7 +3,7 @@
 Status of the release-engineering audit of GhostLink (web, desktop, mobile,
 gmp-core), what was changed, how to verify it, and what is still open.
 
-_Last updated: 2026-09-25 — branch `chore/production-readiness`._
+_Last updated: 2026-09-27._
 
 ## Baseline (verified, unchanged)
 
@@ -27,14 +27,14 @@ No cryptographic code, CSP directive or Electron sandbox flag was changed.
 |---|---------|--------|
 | 1 | Fresh clone → `npm test` fails (gmp-core `dist/` not built; `@noble/hashes` / `@noble/ciphers` not declared at the root) | **Fixed** |
 | 2 | Root `.gitignore` ignores every `*.md` / `*.txt`, so new docs are silently skipped by `git add` | **Fixed** |
-| 3 | No CI/CD (`.github/workflows/` empty) | **Fixed, then withdrawn** — workflows kept locally but removed from the repo on request (see §3) |
+| 3 | No CI/CD (`.github/workflows/` empty) | **Fixed** (briefly unpublished, restored 2026-09-27) |
 | 4 | Root `repository.url` wrong (`ghostlink/ghostlink`) | **Fixed** |
 | 5 | Version drift (root 2.0.0, others 1.0.0) and no CHANGELOG | **Fixed** |
 | 6 | Electron packaging: `../index.html` / `../src/**` in `build.files` | **Fixed** (verified on Linux; Windows/macOS not yet run — see remaining work) |
-| 7 | *New:* `engines.node >=18` is false — nothing runs on Node 18 | **Fixed** (`>=20.19.0`, verified: 20.0–20.18 also fail) |
+| 7 | *New:* `engines.node >=18` is false — nothing runs on Node 18 | **Fixed** (now `>=22.12.0`) |
 | 8 | *New:* flaky mobile test (~3.5% failure rate) | **Fixed** |
 | 9 | *New:* `.deb` target could not build (missing `author.email` / `homepage`) | **Fixed** |
-| 10 | *New:* desktop mesh node calls the global `crypto`, which Electron 28's main process does not have | **Not fixed** — needs a decision, see below |
+| 10 | *New:* desktop mesh node calls the global `crypto`, which Electron 28's main process does not have | **Fixed** (Electron 44) |
 | 11 | *New:* LAN-discovered peers were never resolvable or dialable — caught by CI, where multicast works | **Fixed** |
 | 12 | *New:* mobile test imported gmp-core from a hardcoded `/home/shadow/...` path | **Fixed** |
 | 13 | *New:* claim-checkpoint Test 7 timed a by-design inline write; flaky on slow runners | **Fixed** |
@@ -65,15 +65,12 @@ The blanket `*.md` / `*.txt` rules are replaced with `docs/archive/*.md` and
 
 ### 3. CI/CD
 
-> **Status (2026-09-26):** after merging, the maintainer removed
-> `.github/workflows/` from the repository (the files are kept locally and
-> gitignored). Nothing below runs on GitHub until they are re-added with
-> `git add -f .github/workflows`. Until then `npm run ci` is the only gate.
-> In its short life CI caught three real defects the local runs missed
-> (findings 11, 12 and 13), which is the case for turning it back on.
+> **History:** the workflows were unpublished on 2026-09-26 and restored on
+> 2026-09-27. Before that, CI had caught three real defects that local runs
+> missed (findings 11, 12 and 13). The test matrix is now Node 22 and 24.
 
 - **`.github/workflows/ci.yml`** runs on every push and PR to `main`.
-  - **test** (Node 20 and 22): `npm ci`, `install:gmp`, `build:gmp`, `build`,
+  - **test** (Node 22 and 24): `npm ci`, `install:gmp`, `build:gmp`, `build`,
     then the bundle-sync gate (`git diff --exit-code app.bundle.js`), then the
     web, gmp-core and mobile suites.
   - **desktop-package**: `electron-builder --dir` on Ubuntu. It asserts that
@@ -107,10 +104,12 @@ does `homepage` in `electron/package.json`.
 
 ### 5. Versions and changelog
 
-`electron/`, `mobile/` and `gmp-core/` are now `2.0.0`, the same as the root.
-`CHANGELOG.md` follows Keep a Changelog, with `[Unreleased]` and `[2.0.0]`
-sections. The release workflow refuses a tag that does not match all four
-versions.
+All four packages share one version, and it follows the GitHub release tags.
+They are `0.0.3`; they said `2.0.0` until 2026-09-27, while the tags were
+already `0.0.x`. The Android build follows too (`versionName` 0.0.3,
+`versionCode` 8). `CHANGELOG.md` follows Keep a Changelog, with `[Unreleased]`
+and `[0.0.3]` sections. The release workflow refuses a tag that does not match
+all four versions.
 
 ### 6. Electron packaging
 
@@ -162,8 +161,10 @@ the root and gmp-core — verified empirically: 18.20 fails on
 to >= 20.19 automatically. Fixing Node 18 would mean editing crypto code for
 an EOL runtime, which is not worth it.
 
-Node 20 itself reached end-of-life in April 2026. Consider moving the floor to
-22 at the next minor release.
+**Update (2026-09-27):** Node 20 reached end-of-life in April 2026, so the
+floor is now `>=22.12.0` and CI tests Node 22 and 24. On a fresh clone, with
+the original checkout hidden and multicast enabled, all suites pass on 22.23
+and 24.21. `npm ci` succeeds with both npm 10.9 and npm 11.19.
 
 ### 8. Flaky mobile test
 
@@ -182,7 +183,7 @@ email. `electron/package.json` now has
 `author: { name: "GhostLink", email: "ghostlink@proton.me" }` (the contact
 already published in `SECURITY.md`), `homepage` and `license`.
 
-### 10. Desktop mesh node and Electron 28 — NOT FIXED
+### 10. Desktop mesh node and Electron 28 — FIXED
 
 Electron 28 embeds Node 18.18. In its **main process**, `globalThis.crypto` is
 `undefined`, as checked with a probe script under `electron/dist/electron`.
@@ -203,6 +204,26 @@ code. There are two options:
 
 A desktop smoke test should cover this whichever way it is fixed (see
 remaining work).
+
+**Fixed 2026-09-27** by upgrading Electron 28.3.3 → **44.4.5** (Node 24.21
+inside) and electron-builder 24 → 26. The binary was downloaded from the
+Electron release and checked against its published SHA-256. No crypto code
+changed. Evidence:
+
+- A probe script that starts two `GMPNodeManager`s in the Electron main
+  process and dials one from the other. On Electron 28 it fails with
+  `ReferenceError: crypto is not defined` at `identity.js:61` and the dial
+  hangs. On Electron 44 the handshake completes and the authenticated peer ID
+  matches.
+- The same probe succeeds against an isolated copy of the packaged
+  `resources/gmp-core` from `electron-builder --dir`.
+- `main.js` uses no API removed between 28 and 44. The permission handlers,
+  `setWindowOpenHandler`, `will-navigate`, `nativeImage` and the tray are
+  unchanged.
+
+The packaged app itself has not been launched. Launching it registers the
+`ghostlink://` protocol handler on the desktop it runs on, so that stays in
+the manual end-to-end checklist below.
 
 ### 11. LAN discovery was never wired in — FIXED
 
@@ -259,8 +280,8 @@ To rule out any other machine-specific dependency, the full CI sequence was
 re-run from a clone with the original checkout hidden by a tmpfs mount
 (`unshare -rm`). All three suites pass that way, and the unfixed test fails
 with the same error CI showed. `git grep /home/` finds no other hardcoded
-paths in code. `gmp-core/PROTOCOL_SPEC.md` still has dead `file:///home/killer/...`
-links in its threat table, which is cosmetic.
+paths in code. The dead `file:///home/...` links in the docs (`gmp-core/PROTOCOL_SPEC.md`,
+`gmp-core/test/MANUAL_NAT_TEST.md` and others) now point at relative paths.
 
 ### 13. Claim-checkpoint timing test measured the wrong thing — FIXED
 
@@ -303,12 +324,12 @@ Results of this sequence on a fresh `git clone` with these changes applied
 - gmp-core: 33 suites, 474 assertions, 0 failing.
 - Mobile: all pass.
 - `app.bundle.js` diff: empty.
-- The same suites pass on Node 20.20 and 22.23.
+- The same suites later passed on Node 22.23 and 24.21 (see finding 7).
 
-After merging, go to **Settings → Branches** and make the `CI / Test (Node 20)`,
-`CI / Test (Node 22)` and `CI / Desktop packaging sanity` checks required on
-`main`. Enable **Private vulnerability reporting** under
-**Settings → Security**, because `SECURITY.md` points to it.
+Repository settings, done 2026-09-27: **private vulnerability reporting** is
+enabled, because `SECURITY.md` points to it. Branch protection on `main`
+requires the `Test (Node 22)`, `Test (Node 24)` and
+`Desktop packaging sanity (linux --dir)` checks.
 
 ## Remaining work
 
@@ -345,16 +366,32 @@ Release process:
    Restrict the job to a protected `release` environment that requires
    approval.
 
-### `npm audit` in CI
+### `npm audit`
 
-The `audit` job runs but does not block. To finish:
+**Triaged 2026-09-27.** gmp-core has 0 advisories. The root tree went from 28
+advisories (1 critical, 14 high) to **16 (0 critical, 6 high, 10 moderate)**
+through non-breaking updates only. Those included `electron-updater`, which
+ships in the desktop app, and the critical `shell-quote`. The run used
+`npm audit fix --legacy-peer-deps`, because the tree already carries a peer
+conflict (`react-native-gesture-handler` 2.14.1 against React Native 0.73.4).
+The resulting lockfile installs with a plain `npm ci` on both npm 10 and 11.
 
-1. Triage the current `npm audit --omit=dev` output. Most advisories in a
-   React Native tree are in build tooling, not shipped code.
-2. Fix or document each high/critical finding.
-3. Remove the `|| echo "::warning::…"` fallbacks from the audit steps.
-4. Add Dependabot (`.github/dependabot.yml`) for `npm` (root and `/gmp-core`)
-   and `github-actions`.
+All 16 remaining advisories need a breaking upgrade:
+
+| Advisories | Needs | Ships to users? |
+|---|---|---|
+| `@react-native-community/cli*`, `ip`, `image-size`, `fast-xml-parser` (and `react-native` itself, flagged through them) | React Native 0.73 → 0.87 | **No.** Dev-server and build tooling (Metro, the CLI). Not in the APK. |
+| `@react-navigation/*`, `query-string`, `decode-uri-component` | React Navigation 6 → 7 | **Yes, in the Android app.** Moderate, denial-of-service class (malformed URI decoding). They are reached through navigation's deep-link parsing. |
+
+To finish:
+
+1. Plan the React Navigation 7 migration: an API change across the mobile
+   screens, then device testing.
+2. Plan a React Native upgrade: large, with native Gradle and iOS changes.
+3. Remove the `|| echo "::warning::…"` fallbacks from the audit steps once
+   the remainder is fixed.
+4. Add Dependabot (`.github/dependabot.yml`) for `npm` (root and
+   `/gmp-core`) and `github-actions`.
 
 ### Versioning policy
 
@@ -366,7 +403,8 @@ The `audit` job runs but does not block. To finish:
   2. Bump the Android `versionName` to match, and `versionCode` by one
      (monotonic, never reused).
   3. Move `[Unreleased]` in `CHANGELOG.md` to a dated version heading.
-  4. Tag `vX.Y.Z` on `main`.
+  4. Tag `X.Y.Z` on `main` (no `v` prefix, matching `0.0.0`–`0.0.3`). The
+     release workflow accepts both forms.
 - MAJOR: incompatible changes to the wire protocol, identity/recovery-phrase
   format, or stored-data format. MINOR: features. PATCH: fixes. Security fixes
   get a PATCH release even when nothing else is ready.
@@ -381,7 +419,8 @@ and Linux:
 2. Launch it, create an identity, and confirm the UI loads with no CSP
    violations in DevTools.
 3. Confirm the mesh node starts (bridge on `127.0.0.1:3002`) and completes a
-   handshake with a second node. This is where finding 10 would show.
+   handshake with a second node. Finding 10 would show here; it is fixed
+   and probe-tested, but not yet exercised in an installed build.
 4. Confirm state is written under the per-user data dir, not the install dir.
 5. Open a `ghostlink://` deep link.
 6. Quit and relaunch, and confirm the identity persists.

@@ -275,16 +275,16 @@ HANDSHAKE_TIMEOUT_MS = 10000
 
 | Attack Scenario              | Protection                                                                          | Status      |
 |-----------------------------|-------------------------------------------------------------------------------------|-------------|
-| Passive Eavesdropping        | AES-256-GCM encryption on `DATA`/`PING`/`PONG` frames                                | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Replay (HELLO/HELLO_ACK)    | Timestamp ±2 min window checks and strict signature verification                    | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Timestamp Replay (stale)    | Timestamp tolerance checks reject old requests                                     | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Impersonation (no priv key) | Ed25519 signature checks bind static keys to the session                           | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js), [identity.js](file:///home/killer/Downloads/Ghostlink/gmp-core/identity.js)) |
-| Man-in-the-Middle           | Ephemeral key exchange and GCM encryptedProof authentication check                  | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Reflection (reflected HELLO)| NodeID self-check prevents self-connection                                          | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Pubkey Replacement          | SHA-512 NodeID derivation verification check                                        | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Desynchronization           | GCM auth tag check on payload decryption                                            | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
-| Nonce reuse via key collision | Ephemeral key LRU check + persisted nonce high-water mark validation               | MITIGATED (Ref: [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js), [nonce-store.js](file:///home/killer/Downloads/Ghostlink/gmp-core/nonce-store.js)) |
-| Connection flood             | Per-IP rate limiting + global connection limiters + timeout hooks                   | MITIGATED (Ref: [rate-limiter.js](file:///home/killer/Downloads/Ghostlink/gmp-core/rate-limiter.js), [link.js](file:///home/killer/Downloads/Ghostlink/gmp-core/link.js)) |
+| Passive Eavesdropping        | AES-256-GCM encryption on `DATA`/`PING`/`PONG` frames                                | MITIGATED (Ref: [link.js](src/link.js)) |
+| Replay (HELLO/HELLO_ACK)    | Timestamp ±2 min window checks and strict signature verification                    | MITIGATED (Ref: [link.js](src/link.js)) |
+| Timestamp Replay (stale)    | Timestamp tolerance checks reject old requests                                     | MITIGATED (Ref: [link.js](src/link.js)) |
+| Impersonation (no priv key) | Ed25519 signature checks bind static keys to the session                           | MITIGATED (Ref: [link.js](src/link.js), [identity.js](src/identity.ts)) |
+| Man-in-the-Middle           | Ephemeral key exchange and GCM encryptedProof authentication check                  | MITIGATED (Ref: [link.js](src/link.js)) |
+| Reflection (reflected HELLO)| NodeID self-check prevents self-connection                                          | MITIGATED (Ref: [link.js](src/link.js)) |
+| Pubkey Replacement          | SHA-512 NodeID derivation verification check                                        | MITIGATED (Ref: [link.js](src/link.js)) |
+| Desynchronization           | GCM auth tag check on payload decryption                                            | MITIGATED (Ref: [link.js](src/link.js)) |
+| Nonce reuse via key collision | Ephemeral key LRU check + persisted nonce high-water mark validation               | MITIGATED (Ref: [link.js](src/link.js), [nonce-store.js](src/nonce-store.ts)) |
+| Connection flood             | Per-IP rate limiting + global connection limiters + timeout hooks                   | MITIGATED (Ref: [rate-limiter.js](src/rate-limiter.ts), [link.js](src/link.js)) |
 | Symmetric NAT Traversal      | Cannot traverse symmetric-to-symmetric NAT directly                                 | ACCEPTED (Requires mesh relay forwarding) |
 | Real-network NAT Traversal   | TCP hole punching classification and connection coordination                        | UNVERIFIED IN PRODUCTION (Loopback-verified, deferred VPS verification) |
 

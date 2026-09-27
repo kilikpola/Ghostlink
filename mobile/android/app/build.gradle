@@ -101,9 +101,12 @@ android {
         // is only a label. Increment versionCode on EVERY release build you hand
         // to anyone, and never reuse a number — a build that reuses one cannot
         // install over its predecessor, and Play rejects it outright. It moves
-        // independently of versionName: several builds of "2.0.0" are fine, each
+        // independently of versionName: several builds of "0.0.3" are fine, each
         // with its own versionCode.
         //
+        //   8  — 0.0.3 versionName now follows the GitHub release tags (0.0.x);
+        //        builds 2-7 were labelled "2.0.0". Unencrypted key storage and
+        //        the QR-scan crash loop fixed, guardian recovery gated off.
         //   7  — 2.0.0 PBKDF2 moved into a native module: identity setup and
         //        restore took 4-5 minutes on a Galaxy S10+ with the JS thread
         //        pinned, and looked like a crash. Same parameters, same bytes.
@@ -120,8 +123,8 @@ android {
         //        arm64-only. See MOBILE_BUILD.md.
         //   2  — 2.0.0 (first shippable build; versionCode 1 was the unshipped
         //        pair of APKs built on 2026-09-13)
-        versionCode 7
-        versionName "2.0.0"
+        versionCode 8
+        versionName "0.0.3"
 
         // Opt-in ABI filtering, for producing a phone-sized APK:
         //

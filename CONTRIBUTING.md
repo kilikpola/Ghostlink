@@ -27,9 +27,9 @@ React Native hoists to the root).
 
 ## Setup
 
-Requires **Node.js 20.19 or newer** (CI runs the latest 20 and 22). Node 18 is
-not supported: gmp-core uses the global `crypto` object, and the tests rely on
-Node's ESM syntax detection (unflagged in 20.19 / 22.7).
+Requires **Node.js 22.12 or newer** (CI runs Node 22 and 24). Older versions
+are end-of-life and unsupported: gmp-core uses the global `crypto` object, and
+the tests rely on Node's ESM syntax detection.
 
 ```bash
 git clone https://github.com/kilikpola/Ghostlink.git
@@ -62,9 +62,11 @@ npm run mobile:android          # React Native, needs the Android SDK
 | `npm run test:mobile` | Mobile (plain Node, no device needed) | |
 | `npm run ci` | Everything CI runs, in CI's order | install:gmp → build:gmp → build → web → gmp → mobile |
 
-All of it must pass before a PR is merged. `npm run ci` is the gate: the
-GitHub Actions workflows are not published in the repository at the moment, so
-nothing runs these checks for you — run them locally before opening a PR.
+All of it must pass before a PR is merged. CI runs the same commands on
+Node 22 and 24 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), plus
+an `electron-builder --dir` packaging check. `main` is protected, so a PR
+cannot merge until those checks pass. Run `npm run ci` locally first to catch
+failures before you push.
 
 ## The committed web bundle
 

@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    # This project tags releases without a prefix (0.0.3); `v0.0.3` also works.
+    tags: ['[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify web bundle and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gmp-core/package-lock.json
+
+      - name: Tag matches package versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for f in package.json electron/package.json mobile/package.json gmp-core/package.json; do
+            v=$(node -p "require('./$f').version")
+            if [ "$v" != "$tag" ]; then
+              echo "::error file=$f::version $v does not match tag $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run install:gmp
+      - run: npm run build:gmp
+      - run: npm run build
+
+      - name: Bundle-sync gate
+        run: |
+          if ! git diff --exit-code --stat app.bundle.js; then
+            echo "::error file=app.bundle.js::Tagged app.bundle.js does not match the source. Rebuild, commit, and re-tag."
+            exit 1
+          fi
+
+      - run: npm run test:web
+      - run: npm run test:gmp
+      - run: npm run test:mobile
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: build:linux
+            artifacts: |
+              electron/dist/*.AppImage
+              electron/dist/*.deb
+          - os: windows-latest
+            script: build:win
+            artifacts: |
+              electron/dist/*.exe
+              electron/dist/*.exe.blockmap
+          - os: macos-latest
+            script: build:mac
+            artifacts: |
+              electron/dist/*.dmg
+              electron/dist/*.dmg.blockmap
+    env:
+      # No signing identities are configured yet (see
+      # docs/PRODUCTION_READINESS.md). Don't let electron-builder go looking
+      # for one in the runner keychain.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gmp-core/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run install:gmp
+      - run: npm run build:gmp
+      - run: npm run build
+
+      # --publish never: electron-builder otherwise auto-publishes from tag
+      # builds whenever it finds a token. Publishing is done (or not) by the
+      # release job below, in one place.
+      - name: electron-builder
+        working-directory: electron
+        run: npm run ${{ matrix.script }} -- --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghostlink-desktop-${{ matrix.os }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+
+  release:
+    name: Collect release artifacts
+    needs: desktop
+    runs-on: ubuntu-latest
+    # Lets the (currently disabled) publish step below create a GitHub
+    # Release. Scoped to this job; the build jobs only read.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd release
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghostlink-release-${{ github.ref_name }}
+          path: release/
+          if-no-files-found: error
+
+      # ── Publishing to GitHub Releases: DISABLED ────────────────────────
+      # Installers are currently unsigned (no Windows Authenticode cert, no
+      # Apple Developer ID / notarization). Uncomment once signing is in
+      # place — or deliberately, to ship unsigned builds as a draft release
+      # for testers. The job already has `contents: write`.
+      #
+      # - name: Publish GitHub Release (draft)
+      #   uses: softprops/action-gh-release@v2
+      #   with:
+      #     draft: true
+      #     generate_release_notes: true
+      #     files: release/*

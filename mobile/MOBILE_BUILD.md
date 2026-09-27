@@ -8,7 +8,15 @@ wired up, so this remains a **development build**, not a shippable messenger.
 
 ## The build that exists
 
-`app-release.apk`, 98 MB, built 2026-09-10. Verified:
+Latest: `ghostlink-v0.0.3-vc8-arm64.apk`, 33 MB, arm64-v8a only, built
+2026-09-27 with `./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a`.
+SHA-256 `00b0a7b612dc5e78345d149754efdd7f5a67dae6841b186625183ffc16277705`.
+Verified with `aapt` and `apksigner`: `versionCode='8' versionName='0.0.3'`,
+signed `CN=GhostLink` with the certificate fingerprint recorded in
+`android/KEYSTORE.md`.
+
+The description below is of the earlier full five-ABI build
+(`app-release.apk`, 98 MB, built 2026-09-10). Verified:
 
 - `package: name='io.ghostlink.app' versionCode='5' versionName='2.0.0'`
 - `application-label: 'GhostLink'`, launcher activity `io.ghostlink.app.MainActivity`
@@ -52,16 +60,21 @@ never falls back to the public Android debug key. Debug builds do not need it.
 
 `versionCode` in `android/app/build.gradle` is the only number Android compares
 when deciding whether one build may replace another — Play Store uploads and
-plain sideload upgrades both key off it. `versionName` ("2.0.0") is a label and
+plain sideload upgrades both key off it. `versionName` ("0.0.3") is a label and
 has no effect on upgrades.
 
 The rule is: **increment `versionCode` on every release build that leaves this
 machine, and never reuse a value.** It moves independently of `versionName`, so
-several builds of 2.0.0 each get their own code. Reusing one means the new APK
-cannot install over the old, and Play rejects the upload.
+several builds of 0.0.3 each get their own code. Reusing a value means the new
+APK cannot install over the old, and Play rejects the upload.
 
-Current value: `2`. (`1` belonged to the two APKs built on 2026-09-13, which
-were never shipped.)
+`versionName` follows the GitHub release tag (no `v` prefix). Builds 2–7 were
+labelled 2.0.0.
+
+Current value: `8` (0.0.3). The next release build must use `9` or higher.
+The full history is in the comment above `versionCode` in
+`android/app/build.gradle`. (`1` belonged to the two APKs built on 2026-09-13,
+which were never shipped.)
 
 ## Installing (sideload)
 
@@ -90,7 +103,7 @@ $ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs \
 |---|---|
 | Package name | `io.ghostlink.app` |
 | App name | GhostLink |
-| Version | 2.0.0 (versionCode 5) |
+| Version | 0.0.3 (versionCode 8) |
 | Min SDK | 24 (Android 7.0) |
 | Target / compile SDK | 34 |
 | Architectures | armeabi-v7a, arm64-v8a, x86, x86_64 |

@@ -91,8 +91,5 @@ mobile/android/app/src/main/res/drawable-*/
 mobile/.crypto-under-test-*.mjs
 mobile/.roundtrip-*.mjs
 
-# Kept locally, not published: AI agent skill files and the GitHub Actions
-# workflows (removed from the repo on request — re-add with `git add -f` to
-# turn CI back on).
+# AI agent skill files — kept locally, not published.
 .agents/
-.github/workflows/

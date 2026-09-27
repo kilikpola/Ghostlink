@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines.node is ">=22.12.0": gmp-core relies on the global `crypto`
+        # and the web/mobile tests on ESM syntax detection. Node 18 and 20 are
+        # end-of-life.
+        node: [22, 24]
+    env:
+      # The test job never launches Electron; skip the ~100 MB binary download.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gmp-core/package-lock.json
+
+      - name: Install workspaces (root, mobile, electron)
+        run: npm ci --no-audit --no-fund
+
+      # gmp-core is not a workspace — it has its own lockfile and must build
+      # against its own @types/node, not the copy hoisted for React Native.
+      - name: Install gmp-core
+        run: npm run install:gmp
+
+      - name: Build gmp-core (tsc)
+        run: npm run build:gmp
+
+      - name: Build web bundle
+        run: npm run build
+
+      - name: Bundle-sync gate
+        run: |
+          if ! git diff --exit-code --stat app.bundle.js; then
+            echo "::error file=app.bundle.js::Committed app.bundle.js does not match the source. Run 'npm run build' and commit the result — never hand-edit the bundle."
+            exit 1
+          fi
+
+      - name: Web / root tests
+        run: npm run test:web
+
+      - name: gmp-core tests
+        run: npm run test:gmp
+
+      - name: Mobile tests
+        run: npm run test:mobile
+
+  desktop-package:
+    name: Desktop packaging sanity (linux --dir)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gmp-core/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run install:gmp
+      - run: npm run build:gmp
+      - run: npm run build
+
+      # `npm run build:dir` is `electron-builder --dir` preceded by
+      # scripts/prepare-packaging.cjs (stops electron-builder pruning the
+      # hoisted workspace devDependencies mid-build).
+      - name: electron-builder --dir
+        working-directory: electron
+        run: npm run build:dir
+
+      - name: Verify packaged resources
+        run: |
+          res=electron/dist/linux-unpacked/resources
+          for f in app.asar webapp/index.html webapp/app.bundle.js webapp/vendor webapp/assets \
+                   gmp-core/dist/gmp-node-manager.js gmp-core/dist/gmp-bridge.js \
+                   gmp-core/node_modules/ws gmp-core/node_modules/@noble/curves gmp-core/node_modules/@noble/hashes; do
+            if [ ! -e "$res/$f" ]; then
+              echo "::error::packaged app is missing resources/$f"
+              exit 1
+            fi
+          done
+          # The packaged mesh core must load from its own bundled node_modules,
+          # not from the checkout's — copy it out of the tree before importing.
+          tmp=$(mktemp -d)
+          cp -r "$res/gmp-core" "$tmp/"
+          (cd "$tmp/gmp-core" && node --input-type=module -e \
+            "await import('./dist/gmp-node-manager.js'); await import('./dist/gmp-bridge.js'); console.log('packaged gmp-core imports OK')")
+
+  audit:
+    name: npm audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Advisory until the existing backlog is triaged (see
+    # docs/PRODUCTION_READINESS.md): findings are reported as warnings and the
+    # check stays green. To enforce, drop the `|| echo ::warning` fallbacks.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Audit production dependencies (root + workspaces)
+        run: npm audit --omit=dev --audit-level=high || echo "::warning::npm audit found high/critical advisories in root/workspace dependencies"
+      - name: Audit gmp-core
+        run: npm audit --prefix gmp-core --omit=dev --audit-level=high || echo "::warning::npm audit found high/critical advisories in gmp-core"

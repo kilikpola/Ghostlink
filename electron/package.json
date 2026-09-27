@@ -1,8 +1,11 @@
 {
   "name": "ghostlink-desktop",
-  "version": "2.0.0",
+  "version": "0.0.3",
   "description": "GhostLink — Zero Trust, Zero Trace, Zero Servers",
-  "author": { "name": "GhostLink", "email": "ghostlink@proton.me" },
+  "author": {
+    "name": "GhostLink",
+    "email": "ghostlink@proton.me"
+  },
   "homepage": "https://github.com/kilikpola/Ghostlink",
   "license": "GPL-3.0",
   "main": "src/main.js",
@@ -23,21 +26,63 @@
   "build": {
     "appId": "com.ghostlink.desktop",
     "productName": "GhostLink",
-    "directories": { "output": "dist" },
-    "files": ["src/**/*", "assets/**/*", "package.json"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
     "extraResources": [
-      { "from": "../index.html", "to": "webapp/index.html" },
-      { "from": "../app.bundle.js", "to": "webapp/app.bundle.js" },
-      { "from": "../vendor", "to": "webapp/vendor" },
-      { "from": "../src", "to": "webapp/src" },
-      { "from": "../shared", "to": "webapp/shared" },
-      { "from": "../assets", "to": "webapp/assets" },
-      { "from": "../gmp-core/dist", "to": "gmp-core/dist" },
-      { "from": "../gmp-core/package.json", "to": "gmp-core/package.json" },
-      { "from": "../gmp-core/data/public-peers.example.json", "to": "gmp-core/data/public-peers.example.json" },
-      { "from": "../node_modules/ws", "to": "gmp-core/node_modules/ws" },
-      { "from": "../node_modules/@noble/curves", "to": "gmp-core/node_modules/@noble/curves" },
-      { "from": "../node_modules/@noble/hashes", "to": "gmp-core/node_modules/@noble/hashes" }
+      {
+        "from": "../index.html",
+        "to": "webapp/index.html"
+      },
+      {
+        "from": "../app.bundle.js",
+        "to": "webapp/app.bundle.js"
+      },
+      {
+        "from": "../vendor",
+        "to": "webapp/vendor"
+      },
+      {
+        "from": "../src",
+        "to": "webapp/src"
+      },
+      {
+        "from": "../shared",
+        "to": "webapp/shared"
+      },
+      {
+        "from": "../assets",
+        "to": "webapp/assets"
+      },
+      {
+        "from": "../gmp-core/dist",
+        "to": "gmp-core/dist"
+      },
+      {
+        "from": "../gmp-core/package.json",
+        "to": "gmp-core/package.json"
+      },
+      {
+        "from": "../gmp-core/data/public-peers.example.json",
+        "to": "gmp-core/data/public-peers.example.json"
+      },
+      {
+        "from": "../node_modules/ws",
+        "to": "gmp-core/node_modules/ws"
+      },
+      {
+        "from": "../node_modules/@noble/curves",
+        "to": "gmp-core/node_modules/@noble/curves"
+      },
+      {
+        "from": "../node_modules/@noble/hashes",
+        "to": "gmp-core/node_modules/@noble/hashes"
+      }
     ],
     "win": {
       "target": "nsis",
@@ -49,7 +94,10 @@
       "category": "public.app-category.social-networking"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "assets/icon.png",
       "category": "Network"
     }
@@ -59,7 +107,7 @@
     "electron-updater": "^6.1.7"
   },
   "devDependencies": {
-    "electron": "28.3.3",
-    "electron-builder": "^24.9.1"
+    "electron": "44.4.5",
+    "electron-builder": "^26.15.3"
   }
 }

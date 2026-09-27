@@ -9,7 +9,62 @@ number (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md#versioni
 
 ## [Unreleased]
 
+### Changed
+- Desktop: Electron 28.3.3 → 44.4.5 and electron-builder 24 → 26. Electron 28
+  (out of support since 2024) embedded Node 18, whose main process has no
+  global `crypto`, so the desktop app's mesh node threw on every handshake.
+  Electron 44 embeds Node 24; a two-node handshake in the main process, and
+  against the packaged gmp-core, now completes.
+- Versions follow the release tags: every package is `0.0.3` (they said
+  `2.0.0`); Android `versionName` 0.0.3, `versionCode` 8.
+- Minimum Node.js is 22 (Node 20 reached end-of-life in April 2026); CI runs
+  Node 22 and 24.
+- GitHub links point at `kilikpola/Ghostlink`.
+
 ### Added
+- CI and release workflows are published again. The release workflow now
+  triggers on this project's un-prefixed tags (`0.0.4`) as well as `v*`.
+
+### Removed
+- `CODEBASE_AUDIT.md` (an outdated report that contradicted the code) moved
+  to `docs/archive/`, which is not published.
+
+## [0.0.3] - 2026-09-26
+
+Production-readiness and security-audit release. Package manifests and the
+Android build still said 2.0.0 in this release; see [Unreleased].
+
+### Security
+- Mesh handshake: fingerprints bound to public keys; impersonation during the
+  handshake blocked; ECDH failures fail closed instead of deriving keys from
+  public peer IDs.
+- Replay protection: the `NonceStore` replay guard is actually constructed and
+  wired in, backed by an append-only, individually authenticated session-key
+  claim log with atomic, durable writes.
+- Topology announcements are authenticated with Ed25519 — a peer can no longer
+  poison mesh-wide routing.
+- Local bridge: CSRF identity takeover via `/rotate-key` blocked, `Origin: null`
+  refused by default, rotate-key uses a CSPRNG and the full BIP-39 list.
+- File transfer is encrypted; workspace key spoofing fixed.
+- `start_https.sh` no longer serves the whole repository.
+- Web: `escapeHTML` fixed (was a no-op), HKDF-based v2 at-rest encryption.
+- Desktop: CSP and permission-request hardening; seed phrase stored in the OS
+  keychain.
+- Mobile: keys no longer stored unencrypted,
+  `storeKeyPair` throws on keystore failure, wiping the app clears the keystore
+  identity, QR-scan crash loop fixed.
+- Removed misleading UI: a false "Double Ratchet ACTIVE" panel and false
+  end-to-end labels. Security labels are now derived from real session state.
+- Guardian (social) recovery disabled until a real fragment transport exists.
+- Client-side licensing documented as an accepted limitation (`SECURITY.md`).
+
+### Added
+- Ghost Address: short, stable identifiers for every identity, shared by web
+  and mobile.
+- Real mobile transport with app-layer AES-GCM over direct WebRTC.
+- Shared BIP-39 wordlist, so phrases created on the web restore on mobile.
+- LAN discovery, NAT detection, hole punching and public-peer support in
+  gmp-core.
 - CI (`.github/workflows/ci.yml`): on every push and PR to `main`, on Node 20
   and 22 — workspace install, gmp-core build, web bundle build, a
   bundle-sync gate that fails if the committed `app.bundle.js` differs from a
@@ -79,49 +134,10 @@ number (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md#versioni
 - Electron pinned to `28.3.3` for reproducible desktop builds.
 
 ### Removed
+- Non-functional Signal / KeyManager code and 31 dead files (~13k lines).
 - `.github/workflows/` (CI and release) and `.agents/skills/` are no longer
   published in the repository. Both are kept locally and gitignored.
   `npm run ci` runs the full check locally.
 
-## [2.0.0] - 2026-09-25
-
-The first release after a full security audit of every component. Summarised
-from the commit history; see `git log` for detail.
-
-### Security
-- Mesh handshake: fingerprints bound to public keys; impersonation during the
-  handshake blocked; ECDH failures fail closed instead of deriving keys from
-  public peer IDs.
-- Replay protection: the `NonceStore` replay guard is actually constructed and
-  wired in, backed by an append-only, individually authenticated session-key
-  claim log with atomic, durable writes.
-- Topology announcements are authenticated with Ed25519 — a peer can no longer
-  poison mesh-wide routing.
-- Local bridge: CSRF identity takeover via `/rotate-key` blocked, `Origin: null`
-  refused by default, rotate-key uses a CSPRNG and the full BIP-39 list.
-- File transfer is encrypted; workspace key spoofing fixed.
-- `start_https.sh` no longer serves the whole repository.
-- Web: `escapeHTML` fixed (was a no-op), HKDF-based v2 at-rest encryption.
-- Desktop: CSP and permission-request hardening; seed phrase stored in the OS
-  keychain.
-- Mobile: keys no longer stored unencrypted,
-  `storeKeyPair` throws on keystore failure, wiping the app clears the keystore
-  identity, QR-scan crash loop fixed.
-- Removed misleading UI: a false "Double Ratchet ACTIVE" panel and false
-  end-to-end labels. Security labels are now derived from real session state.
-- Guardian (social) recovery disabled until a real fragment transport exists.
-- Client-side licensing documented as an accepted limitation (`SECURITY.md`).
-
-### Added
-- Ghost Address: short, stable identifiers for every identity, shared by web
-  and mobile.
-- Real mobile transport with app-layer AES-GCM over direct WebRTC.
-- Shared BIP-39 wordlist, so phrases created on the web restore on mobile.
-- LAN discovery, NAT detection, hole punching and public-peer support in
-  gmp-core.
-
-### Removed
-- Non-functional Signal / KeyManager code and 31 dead files (~13k lines).
-
-[Unreleased]: https://github.com/kilikpola/Ghostlink/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/kilikpola/Ghostlink/releases/tag/v2.0.0
+[Unreleased]: https://github.com/kilikpola/Ghostlink/compare/0.0.3...HEAD
+[0.0.3]: https://github.com/kilikpola/Ghostlink/releases/tag/0.0.3

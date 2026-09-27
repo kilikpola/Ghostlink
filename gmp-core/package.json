@@ -1,6 +1,6 @@
 {
   "name": "@ghostlink/gmp-core",
-  "version": "2.0.0",
+  "version": "0.0.3",
   "description": "Ghost Mesh Protocol — GhostLink's peer-to-peer encrypted mesh networking stack",
   "type": "module",
   "main": "dist/gmp-node-manager.js",
@@ -15,7 +15,7 @@
     "gmp": "./dist/cli.js"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

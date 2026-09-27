@@ -9,6 +9,14 @@ number (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md#versioni
 
 ## [Unreleased]
 
+### Fixed
+- `claim-checkpoint-test.js` failed again on a Node 24 runner (one claim took
+  70 ms). This was noise, not an inline checkpoint: the structural check
+  passed in the same run. The timing sanity bound now uses the 99.9th
+  percentile (< 20 ms) instead of the single slowest of 60,000 calls. With
+  every CPU core busy, p99.9 stays under 3.5 ms while the worst single call
+  reaches 31 ms. Inline writes are still caught structurally.
+
 ### Changed
 - Desktop: Electron 28.3.3 → 44.4.5 and electron-builder 24 → 26. Electron 28
   (out of support since 2024) embedded Node 18, whose main process has no
@@ -22,6 +30,10 @@ number (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md#versioni
 - GitHub links point at `kilikpola/Ghostlink`.
 
 ### Added
+- GitLab mirror (`gitlab.com/shadow_dancers/Ghostlink`) with its own pipeline
+  (`.gitlab-ci.yml`). It runs the same test, bundle-sync, packaging and
+  advisory audit jobs as GitHub CI, and deploys the web app to GitLab Pages
+  from the default branch. Pages publishes only the files the app loads.
 - CI and release workflows are published again. The release workflow now
   triggers on this project's un-prefixed tags (`0.0.4`) as well as `v*`.
 

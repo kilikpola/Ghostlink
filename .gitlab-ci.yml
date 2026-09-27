@@ -1,0 +1,126 @@
+# GitLab CI for the GitLab mirror (gitlab.com/shadow_dancers/Ghostlink).
+#
+# Mirrors .github/workflows/ci.yml — same commands, same gates — and adds a
+# GitLab Pages deploy of the web app. GitHub stays the primary: releases and
+# desktop installers are built by .github/workflows/release.yml only.
+
+workflow:
+  rules:
+    # Merge requests get one pipeline; branch pushes don't duplicate it.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - test
+  - package
+  - deploy
+
+default:
+  interruptible: true
+
+variables:
+  npm_config_cache: "$CI_PROJECT_DIR/.npm"
+  npm_config_audit: "false"
+  npm_config_fund: "false"
+
+.npm-cache:
+  cache:
+    key:
+      files: [package-lock.json, gmp-core/package-lock.json]
+    paths: [.npm/]
+    policy: pull-push
+
+# ── Tests ─────────────────────────────────────────────────────────────────
+# engines.node is ">=22.12.0"; test the floor and the current LTS.
+test:
+  stage: test
+  extends: .npm-cache
+  image: node:${NODE_VERSION}
+  parallel:
+    matrix:
+      - NODE_VERSION: ["22", "24"]
+  variables:
+    # The test job never launches Electron; skip the ~100 MB binary download.
+    ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  timeout: 30m
+  script:
+    - npm ci
+    # gmp-core is not a workspace — it has its own lockfile.
+    - npm run install:gmp
+    - npm run build:gmp
+    - npm run build
+    # Bundle-sync gate: the committed app.bundle.js is what Pages serves, so it
+    # must match the source exactly.
+    - |
+      if ! git diff --exit-code --stat app.bundle.js; then
+        echo "Committed app.bundle.js does not match the source. Run 'npm run build' and commit the result — never hand-edit the bundle."
+        exit 1
+      fi
+    - npm run test:web
+    - npm run test:gmp
+    - npm run test:mobile
+
+# Advisory until the remaining React Native / React Navigation advisories are
+# fixed (see docs/PRODUCTION_READINESS.md).
+audit:
+  stage: test
+  image: node:22
+  allow_failure: true
+  timeout: 10m
+  script:
+    - npm audit --omit=dev --audit-level=high
+    - npm audit --prefix gmp-core --omit=dev --audit-level=high
+
+# ── Desktop packaging sanity ──────────────────────────────────────────────
+desktop-package:
+  stage: package
+  extends: .npm-cache
+  image: node:22
+  needs: []
+  timeout: 30m
+  script:
+    - npm ci
+    - npm run install:gmp
+    - npm run build:gmp
+    - npm run build
+    # build:dir = electron-builder --dir, preceded by prepare-packaging.cjs.
+    - (cd electron && npm run build:dir)
+    - |
+      res=electron/dist/linux-unpacked/resources
+      for f in app.asar webapp/index.html webapp/app.bundle.js webapp/vendor webapp/assets \
+               gmp-core/dist/gmp-node-manager.js gmp-core/dist/gmp-bridge.js \
+               gmp-core/node_modules/ws gmp-core/node_modules/@noble/curves gmp-core/node_modules/@noble/hashes; do
+        if [ ! -e "$res/$f" ]; then
+          echo "packaged app is missing resources/$f"
+          exit 1
+        fi
+      done
+      # The packaged mesh core must load from its own bundled node_modules,
+      # not from the checkout's — copy it out of the tree before importing.
+      tmp=$(mktemp -d)
+      cp -r "$res/gmp-core" "$tmp/"
+      (cd "$tmp/gmp-core" && node --input-type=module -e \
+        "await import('./dist/gmp-node-manager.js'); await import('./dist/gmp-bridge.js'); console.log('packaged gmp-core imports OK')")
+
+# ── GitLab Pages: the web app ─────────────────────────────────────────────
+# Publishes only what index.html loads (the same set the desktop app ships),
+# never the whole repository. Runs on the default branch after tests pass.
+pages:
+  stage: deploy
+  image: alpine:3.20
+  needs: [test]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mkdir -p public
+    - cp -r index.html app.bundle.js vendor src shared assets public/
+    - cp LICENSE public/
+    - ls -R public | head -50
+  artifacts:
+    paths: [public]
+  environment:
+    name: pages
+    url: $CI_PAGES_URL

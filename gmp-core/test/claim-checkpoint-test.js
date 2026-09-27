@@ -273,13 +273,17 @@ async function testCheckpointDoesNotStallClaims() {
   timings.sort((x, y) => x - y);
   const median = timings[Math.floor(timings.length / 2)];
   const worst = timings[timings.length - 1];
-  console.log(`      median ${median.toFixed(3)} ms   worst ${worst.toFixed(1)} ms   over 60,000 claims`);
+  const p999 = timings[Math.floor(timings.length * 0.999)];
+  console.log(`      median ${median.toFixed(3)} ms   p99.9 ${p999.toFixed(2)} ms   worst ${worst.toFixed(1)} ms   over 60,000 claims`);
 
   assert(deferredCheckpoint, 'A checkpoint was written while claims continued');
   assertEqual(inlineWrites, 0, 'No claimSessionKey() call wrote the checkpoint itself');
-  // A checkpoint of tens of thousands of fingerprints takes tens of
-  // milliseconds. Inline, it would land on one unlucky claim.
-  assert(worst < 50, `No claim paid for the checkpoint write (worst ${worst.toFixed(1)} ms)`);
+  // Whether a claim wrote the checkpoint is settled structurally above. The
+  // timing bound is only a sanity check that claims stay cheap. It uses the
+  // 99.9th percentile, not the single worst claim: on shared CI runners one
+  // GC pause or CPU-steal hiccup in 60,000 calls hit 70-96 ms and failed the
+  // old max-based bound while no checkpoint was anywhere near the claim path.
+  assert(p999 < 20, `Claims stay cheap: 99.9% finish under 20 ms (p99.9 ${p999.toFixed(2)} ms)`);
   dropDir();
 }
 

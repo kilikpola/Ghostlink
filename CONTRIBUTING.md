@@ -64,7 +64,9 @@ npm run mobile:android          # React Native, needs the Android SDK
 
 All of it must pass before a PR is merged. CI runs the same commands on
 Node 22 and 24 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), plus
-an `electron-builder --dir` packaging check. `main` is protected, so a PR
+an `electron-builder --dir` packaging check. The GitLab mirror runs the same
+jobs from [`.gitlab-ci.yml`](.gitlab-ci.yml). Keep the two in step when you
+change either. `main` is protected, so a PR
 cannot merge until those checks pass. Run `npm run ci` locally first to catch
 failures before you push.
 

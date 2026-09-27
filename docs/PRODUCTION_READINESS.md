@@ -97,6 +97,31 @@ hand.
 
 The Node matrix is 20 and 22, not 18 and 20; see finding 7.
 
+### GitLab mirror
+
+`gitlab.com/shadow_dancers/Ghostlink` mirrors GitHub. `origin` has two push
+URLs, so one `git push` updates both. GitHub stays the primary: `SECURITY.md`,
+package metadata, releases and the desktop installer workflow all live there.
+
+`.gitlab-ci.yml` runs the same `test` (Node 22 and 24), bundle-sync,
+`desktop-package` and advisory `audit` jobs as GitHub CI. A `pages` job then
+publishes the web app to GitLab Pages from the default branch, after the tests
+pass. Pages gets only what `index.html` loads (`index.html`,
+`app.bundle.js`, `vendor/`, `src/`, `shared/`, `assets/` and `LICENSE`), not
+the whole repository.
+
+Verified locally:
+
+- The YAML parses, and every stage, `needs` and `extends` reference resolves.
+- The `pages` script, run on a clean `git archive` of `HEAD`, produces 57
+  files (1.7 MB).
+- All 105 relative references inside the published files resolve.
+- Served over HTTP, every file loads with status 200. In a hidden Electron
+  window the app renders its onboarding screen with 0 console errors.
+
+Not verified: a run on GitLab's own runners. GitLab's lint needs an
+authenticated API call, and there has been no pipeline run yet.
+
 ### 4. Repository URL
 
 `package.json` now points at `https://github.com/kilikpola/Ghostlink`, as
@@ -299,6 +324,14 @@ Timing alone could not catch an inline write on a fast machine; a mutation that
 forces inline checkpoints (37 ms, under the bound) passed the old check.
 It now fails with "expected 0, got 2". On the real code the worst claim is
 7–12 ms. The claim-log code is unchanged.
+
+**Follow-up (2026-09-28):** the remaining timing bound (worst claim < 50 ms)
+still failed once on a Node 24 runner, at 70.4 ms. The structural check passed
+in the same run, so it was runner noise. A bound on the single slowest of
+60,000 calls measures the machine, not the code, so it now asserts the 99.9th
+percentile is under 20 ms. With every CPU core busy locally, p99.9 stayed
+between 2.2 and 3.4 ms while the worst single call reached 31 ms. The
+inline-write mutation still fails the test.
 
 ## How to apply and verify
 

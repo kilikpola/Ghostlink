@@ -488,5 +488,5 @@ GPL-3.0 — see <LICENSE> for details.
 <p align="center">
   <strong>👻 GhostLink</strong><br>
   <em>Your conversations. Your keys. Your rules.</em><br><br>
-  Built by <a href="https://github.com/kilikpola">kilikpola</a>
+  Built by <a href="https://github.com/kilikpola">Shadow Dancer</a>
 </p>

@@ -375,12 +375,12 @@ Layer 3: P2P recovery
 
 ### Web (recommended for testing)
 
-The app is live at: **https://kidus1234b.github.io/Ghostlink/**
+The app is live at: **https://kilikpola.github.io/Ghostlink/**
 
 Or run locally:
 
 ```bash
-git clone https://github.com/kidus1234b/Ghostlink.git
+git clone https://github.com/kilikpola/Ghostlink.git
 cd Ghostlink
 python3 -m http.server 8000
 # visit http://localhost:8000
@@ -414,7 +414,7 @@ npx react-native run-ios
 
 ```bash
 # Clone on server
-git clone https://github.com/kidus1234b/Ghostlink.git
+git clone https://github.com/kilikpola/Ghostlink.git
 
 # Web app via Nginx (the page needs its bundle and vendor files alongside it)
 sudo mkdir -p /var/www/html/ghostlink
@@ -488,5 +488,5 @@ GPL-3.0 — see <LICENSE> for details.
 <p align="center">
   <strong>👻 GhostLink</strong><br>
   <em>Your conversations. Your keys. Your rules.</em><br><br>
-  Built by <a href="https://github.com/kidus1234b">Kidus</a>
+  Built by <a href="https://github.com/kilikpola">Kidus</a>
 </p>

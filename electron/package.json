@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "GhostLink — Zero Trust, Zero Trace, Zero Servers",
   "author": { "name": "GhostLink", "email": "ghostlink@proton.me" },
-  "homepage": "https://github.com/kidus1234b/Ghostlink",
+  "homepage": "https://github.com/kilikpola/Ghostlink",
   "license": "GPL-3.0",
   "main": "src/main.js",
   "scripts": {

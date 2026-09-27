@@ -32,7 +32,7 @@ not supported: gmp-core uses the global `crypto` object, and the tests rely on
 Node's ESM syntax detection (unflagged in 20.19 / 22.7).
 
 ```bash
-git clone https://github.com/kidus1234b/Ghostlink.git
+git clone https://github.com/kilikpola/Ghostlink.git
 cd Ghostlink
 npm ci                  # root + mobile + electron workspaces
 npm run install:gmp     # gmp-core's own dependencies

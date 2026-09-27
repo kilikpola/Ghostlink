@@ -6,7 +6,7 @@ Because real-network NAT hole punching requires a public rendezvous peer, testin
 
 ## Step 1: Spin up a Codespace
 
-1. Go to your repository on GitHub: `https://github.com/kidus1234b/Ghostlink`.
+1. Go to your repository on GitHub: `https://github.com/kilikpola/Ghostlink`.
 2. Click the green **Code** button.
 3. Select the **Codespaces** tab, then click **Create codespace on main**.
 

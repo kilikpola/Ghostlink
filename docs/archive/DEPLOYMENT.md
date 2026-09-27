@@ -18,7 +18,7 @@ Run the following commands to clone the repository, install dependencies, config
 
 ```bash
 # Clone the repository
-git clone https://github.com/kidus1234b/Ghostlink
+git clone https://github.com/kilikpola/Ghostlink
 cd Ghostlink/gmp-core
 
 # Install dependencies

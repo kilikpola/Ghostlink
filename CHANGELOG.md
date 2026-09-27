@@ -123,5 +123,5 @@ from the commit history; see `git log` for detail.
 ### Removed
 - Non-functional Signal / KeyManager code and 31 dead files (~13k lines).
 
-[Unreleased]: https://github.com/kidus1234b/Ghostlink/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/kidus1234b/Ghostlink/releases/tag/v2.0.0
+[Unreleased]: https://github.com/kilikpola/Ghostlink/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/kilikpola/Ghostlink/releases/tag/v2.0.0

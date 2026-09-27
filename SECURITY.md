@@ -60,7 +60,7 @@ problem.** Report it privately, by either:
 
 - email to **ghostlink@proton.me**, or
 - GitHub's private vulnerability reporting: *Security → Report a
-  vulnerability* on <https://github.com/kidus1234b/Ghostlink>.
+  vulnerability* on <https://github.com/kilikpola/Ghostlink>.
 
 Please include:
 

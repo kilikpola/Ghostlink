@@ -102,7 +102,7 @@ The Node matrix is 20 and 22, not 18 and 20; see finding 7.
 
 ### 4. Repository URL
 
-`package.json` now points at `https://github.com/kidus1234b/Ghostlink`, as
+`package.json` now points at `https://github.com/kilikpola/Ghostlink`, as
 does `homepage` in `electron/package.json`.
 
 ### 5. Versions and changelog

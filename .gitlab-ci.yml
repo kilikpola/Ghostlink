@@ -64,15 +64,16 @@ test:
     - npm run test:mobile
 
 # Advisory until the remaining React Native / React Navigation advisories are
-# fixed (see docs/PRODUCTION_READINESS.md).
+# fixed (see docs/PRODUCTION_READINESS.md): findings are printed as warnings
+# and the job stays green, like the GitHub audit job. To enforce, drop the
+# `|| echo` fallbacks.
 audit:
   stage: test
   image: node:22
-  allow_failure: true
   timeout: 10m
   script:
-    - npm audit --omit=dev --audit-level=high
-    - npm audit --prefix gmp-core --omit=dev --audit-level=high
+    - npm audit --omit=dev --audit-level=high || echo "WARNING - npm audit found high/critical advisories (advisory, see docs/PRODUCTION_READINESS.md)"
+    - npm audit --prefix gmp-core --omit=dev --audit-level=high || echo "WARNING - npm audit found high/critical advisories in gmp-core"
 
 # ── Desktop packaging sanity ──────────────────────────────────────────────
 desktop-package:

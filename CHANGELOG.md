@@ -10,6 +10,14 @@ number (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md#versioni
 ## [Unreleased]
 
 ### Fixed
+- gmp-core tests timed out on GitLab CI: `claim-log-test.js` makes 100,000
+  claims, each fsynced before it counts, which took 185 s on a disk-backed
+  temp dir, past the runner's 180 s per-suite limit. `test/run-all.mjs` now
+  gives suites a RAM-backed scratch directory (`/dev/shm` when writable, or
+  `GMP_TEST_TMPDIR`). Every fsync still runs; the product code is unchanged.
+  A suite killed by the limit now says so, instead of just stopping mid-output.
+- GitLab `audit` job reports advisories as a warning and stays green, like the
+  GitHub job.
 - `claim-checkpoint-test.js` failed again on a Node 24 runner (one claim took
   70 ms). This was noise, not an inline checkpoint: the structural check
   passed in the same run. The timing sanity bound now uses the 99.9th

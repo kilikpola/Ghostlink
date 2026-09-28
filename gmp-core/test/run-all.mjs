@@ -6,13 +6,40 @@
  * suites were being skipped because an early one broke. This runs each suite
  * regardless and fails at the end if any did.
  */
-import {readdirSync, mkdtempSync, rmSync} from 'fs';
+import {readdirSync, mkdtempSync, rmSync, accessSync, constants} from 'fs';
 import os from 'os';
 import {spawnSync} from 'child_process';
 import {fileURLToPath} from 'url';
 import path from 'path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+const SUITE_TIMEOUT_MS = 180000;
+
+/**
+ * Where suites keep their scratch files.
+ *
+ * The claim log fsyncs every record before a claim counts, and some suites
+ * make 100,000 claims. On a disk-backed temp dir that is dominated by fsync:
+ * claim-log-test took 185 s on btrfs, over the per-suite limit, and GitLab CI
+ * (disk-backed /tmp) killed it mid-run. A RAM-backed directory makes fsync
+ * cheap without changing what the code does: every fsync still runs, the
+ * suites still exercise the same write, flush and recovery paths.
+ *
+ * GMP_TEST_TMPDIR overrides the choice; otherwise /dev/shm when it is writable
+ * (Linux, including Docker, whose default 64 MB is ample — peak use is ~24 MB),
+ * else the OS temp dir.
+ */
+function scratchRoot() {
+  if (process.env.GMP_TEST_TMPDIR) return process.env.GMP_TEST_TMPDIR;
+  try {
+    accessSync('/dev/shm', constants.W_OK);
+    return '/dev/shm';
+  } catch {
+    return os.tmpdir();
+  }
+}
+const scratch = scratchRoot();
 
 // The run-manual-* and simulate-* scripts are interactive or long-running
 // demonstrations, not assertion suites.
@@ -30,14 +57,21 @@ for (const suite of suites) {
   // it every suite that builds a node wrote nonce claim logs, nonce-state.json
   // and peer-cache.json into the developer's real gmp-core/data (one new claim
   // log pair per identity per run), and suites could see each other's state.
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'gmp-suite-'));
+  //
+  // TMPDIR sends the suite's own os.tmpdir() scratch files to the same place.
+  const dataDir = mkdtempSync(path.join(scratch, 'gmp-suite-'));
   const r = spawnSync(process.execPath, [path.join(here, suite)], {
     encoding: 'utf8',
-    timeout: 180000,
-    env: {...process.env, NODE_ENV: 'test', GMP_DATA_DIR: dataDir},
+    timeout: SUITE_TIMEOUT_MS,
+    env: {...process.env, NODE_ENV: 'test', GMP_DATA_DIR: dataDir, TMPDIR: scratch},
   });
   rmSync(dataDir, {recursive: true, force: true});
-  const out = (r.stdout || '') + (r.stderr || '');
+  let out = (r.stdout || '') + (r.stderr || '');
+  // A suite killed by the timeout otherwise shows only the output it had
+  // printed so far, which reads like a crash with no error.
+  if (r.error && r.error.code === 'ETIMEDOUT') {
+    out += `\n  ✗ killed: suite exceeded the ${SUITE_TIMEOUT_MS / 1000} s limit (scratch dir: ${scratch})`;
+  }
   const m = out.match(/Results: (\d+) passed, (\d+) failed/) || out.match(/=== (\d+)\/(\d+) passed/);
   const skipped = /=== skipped ===/.test(out);
   results.push({
@@ -58,7 +92,7 @@ for (const r of results) {
   console.log(`  ${label}  ${r.suite.padEnd(34)} ${r.passed ? r.passed + ' assertions' : ''}`);
 }
 
-console.log(`\n  ${results.length} suites, ${total} assertions, ${failed.length} failing`);
+console.log(`\n  ${results.length} suites, ${total} assertions, ${failed.length} failing   (scratch: ${scratch})`);
 for (const f of failed) {
   console.log(`\n──── ${f.suite} ────`);
   console.log(f.out.split('\n').filter(l => !l.includes('"component":')).slice(-14).join('\n'));

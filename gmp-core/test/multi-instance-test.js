@@ -21,6 +21,8 @@ import path from 'path';
 import { createGMPNode } from '../dist/node-factory.js';
 import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -142,7 +144,13 @@ async function run() {
 
   const globalDir = process.env.GMP_DATA_DIR;
   const leaked = fs.readdirSync(globalDir).filter((f) => /nonce|peer-cache/.test(f));
-  assert(leaked.length === 0, `nothing was written to the process-wide GMP_DATA_DIR${leaked.length ? ' — found ' + leaked.join(', ') : ''}`);
+  assertAbsent({
+    channel: 'state filenames in a data dir',
+    control: () => fs.readdirSync(B.dataDir).filter((f) => /nonce|peer-cache/.test(f)),
+    controlMessage: 'the pattern matches the state files B wrote in its own dataDir',
+    absent: () => leaked.length === 0,
+    message: `nothing was written to the process-wide GMP_DATA_DIR${leaked.length ? ' — found ' + leaked.join(', ') : ''}`,
+  });
 
   A2.close(); B.close(); C.close();
 

@@ -324,6 +324,18 @@ allocations must not share a bucket); requesterKey stays /48. A second,
 much higher per-/48 rate ceiling would bound one /48 holder minting 65,536
 fresh /64 buckets; today only the global cap bounds that.
 
+## LAN discovery controls: never run (M6-1c-fix-6e)
+
+**Status:** open; needs a host with working multicast loopback.
+
+Two assertAbsent controls in test/lan-discovery-test.js ([3] empty peer list
+before connecting; [6] stale peer expiry) sit past the multicast check. The
+development host skips there ("no beacons received": the group is joined but
+nothing is delivered), so they have never executed. Needs: UDP 49698, group
+239.255.42.98, delivered back to the sending host's own sockets — a desktop
+Linux on a multicast-capable interface with no firewall rule dropping it.
+Run `node gmp-core/test/lan-discovery-test.js` there and record the result.
+
 ## Interop baseline: move it when the new build is deployed (M6-1c-fix-6c)
 
 **Status:** open; one-line change after the deploy.
@@ -334,8 +346,10 @@ Against it: 24/24 checks; the relay pairing is N/A (that build has no relay
 code). Once the current build is deployed, set INTEROP_OLD_REF to that
 commit in its own diff: the relay pairing then applies (a new node
 reserving on an old relay and the reverse; the relay must see the hop's
-identity and never the reserver's real one) and the run is 28. Exercised
-already with GMP_INTEROP_OLD_DIR=<this tree>: 28/28.
+identity and never the reserver's real one) and the run is 30 (each relay
+pairing: reservation, positive control, absence — the control became its own
+line with assertAbsent, M6-1c-fix-6e). Exercised with
+GMP_INTEROP_OLD_DIR=<this tree>: 30/30.
 
 ## Membership: what the sample does and does not stop (GM-M5-1b)
 
@@ -345,9 +359,14 @@ Guaranteed: a peer learns at most 8 member NodeIDs per address key per epoch
 (24 h) through topology, and no inbound client through peer exchange; route
 queries only confirm NodeIDs the asker already has; reconnecting with fresh
 identities from one address adds nothing. Not stopped: an attacker with many
-addresses. Measured (N = 540, sample 8): 10 address keys see ~65 members,
-50 see ~half, 100 ~74 %, 200 ~94 %; all of them after a median of ~447 keys
-(330-675 over secrets). One address alone needs a median of ~466 daily epochs.
+addresses. Measured (N = 540, sample 8, medians over 100 secrets; restated
+2026-10-11, M6-1c-fix-6e): 10 address keys see 75 members (58-80), 50 see
+278 (51.5 %), 100 see 406 (75.2 %), 200 see 504 (93.3 %); all of them after a
+median of 474 keys (298-886). One address alone needs a median of 484 daily
+epochs (282-1063). "No inbound client through peer exchange" was first
+measured through a dead channel (one shared in-memory address, PX rate limit);
+re-measured with the channel live: still none (WORK_REPORT, "M5 disclosure
+figures, restated").
 An IPv6 /48 holds 65,536 /64 keys. Also still open: key-rotation certificates
 are flooded mesh-wide (key-rotation.ts), which reveals a rotating node's old and
 new NodeID to every node; pre-M5 nodes still flood their own topology

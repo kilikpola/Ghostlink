@@ -25,6 +25,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createGMPNode } from '../dist/node-factory.js';
+import { NonceStore } from '../dist/nonce-store.js';
 import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
 import { generateEphemeralIdentity, deriveIdentityFromSeedPhrase, generateEphemeralKeyPair } from '../dist/identity.js';
@@ -34,6 +35,8 @@ import { encodeFrame, MESSAGETYPES } from '../dist/link/frame.js';
 import { EphemeralNonceState } from '../dist/link/ephemeral-nonce-state.js';
 import { RelayHop } from '../dist/relay/relay-client.js';
 import { withSource } from './helpers/ephemeral-source.mjs';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -209,7 +212,22 @@ async function testRelay() {
     const outE = E.getLinkByNodeId(R2.identity.nodeId);
     await outE.send('must never be dispatched');
     await delay(50);
-    assert(re.state === 'closed' && got.length === 0, `refused claim: link closed (${re.state}), frame never dispatched (${got.length} messages)`);
+    const refusedClosed = re.state === 'closed';
+    const dispatchedRefused = got.length;
+    assert(refusedClosed, `refused claim: link closed (${re.state})`);
+    // Control: the same kind of listener on a relay whose store accepts the
+    // claim does receive the frame.
+    const R3 = await makeNode(net2, 'accepting relay');
+    await R3.listen();
+    const got3 = [];
+    R3.on('message', (e) => got3.push(e.msg));
+    const F = await makeNode(net2, 'accepted peer');
+    F.peerExchange.close();
+    await F.dial('memory', R3.port);
+    await delay(30);
+    await F.getLinkByNodeId(R3.identity.nodeId).send('control frame');
+    await delay(50);
+    assertAbsent({ channel: "relay 'message' event", control: () => got3.filter((m) => m === 'control frame'), controlMessage: "an accepted session's frame is dispatched", absent: () => dispatchedRefused === 0, message: `refused claim: frame never dispatched (${dispatchedRefused} messages)` });
   }
 
   console.log('\n=== 6. a link observed as a hop carries relay frames only ===');
@@ -384,7 +402,20 @@ function testEphemeralStore() {
   s.close();
   assert(s.size === 0, 'evicted on close');
   assert(s.claimSessionKey(peer, 'fp-2').valid === false, 'a closed store refuses further claims (fails closed)');
-  assert(fs.readdirSync(tmp).length === before, 'never touched the filesystem');
+  const afterEph = fs.readdirSync(tmp).length;
+  assertAbsent({
+    channel: 'directory entry count',
+    control: () => {
+      const durable = new NonceStore({ stateFile: path.join(tmp, 'control-state.json'), seedPhrase: 'relay ephemeral control seed' });
+      durable.load();
+      durable.claimSessionKey(peer, 'fp-control');
+      durable.close();
+      return fs.readdirSync(tmp).length - afterEph;
+    },
+    controlMessage: 'the count rises when a durable store claims there',
+    absent: () => afterEph === before,
+    message: 'never touched the filesystem',
+  });
 }
 
 async function run() {

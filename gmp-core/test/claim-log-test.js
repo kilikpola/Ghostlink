@@ -9,6 +9,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const SEED = 'claim log seed';
 let testsRun = 0, testsPassed = 0, testsFailed = 0;
@@ -75,7 +77,14 @@ function testLatencyIsFlat() {
   // And a repeat claim is refused without touching the disk at all.
   const sizeBefore = fs.statSync(claimsOf(stateFile)).size;
   assertEqual(store.claimSessionKey(peer, fp(42)).valid, false, 'An already-claimed fingerprint is refused');
-  assertEqual(fs.statSync(claimsOf(stateFile)).size, sizeBefore, 'A refused claim writes nothing');
+  const sizeAfterRefusal = fs.statSync(claimsOf(stateFile)).size;
+  assertAbsent({
+    channel: 'claim log file size',
+    control: () => { const b = fs.statSync(claimsOf(stateFile)).size; return store.claimSessionKey(peer, fp(200_001)).valid && fs.statSync(claimsOf(stateFile)).size - b; },
+    controlMessage: 'an accepted claim grows the file (bytes)',
+    absent: () => sizeAfterRefusal === sizeBefore,
+    message: 'A refused claim writes nothing',
+  });
 
   store.close();
   dropDir();

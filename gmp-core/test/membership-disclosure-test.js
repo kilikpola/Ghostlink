@@ -18,9 +18,11 @@ import { createGMPNode } from '../dist/node-factory.js';
 import { PeerSampler } from '../dist/topology-sample.js';
 import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const N = Number(process.env.DISCLOSURE_PEERS || 30);
@@ -42,7 +44,13 @@ async function mk(seed, extra = {}) {
   return n;
 }
 
-const hub = await mk('disclosure hub');
+// Every MemoryTransport node arrives from one address ('memory.local'), so
+// the hub's per-address PEER_REQUEST rate limit would answer only the first
+// requester and drop every later one — the stranger's included. That made
+// "peer exchange gives a stranger nothing" pass without peer exchange ever
+// answering (M6-1c-fix-6d). The interval is lifted on the hub so what is
+// measured is the per-requester SAMPLE, which is the property claimed.
+const hub = await mk('disclosure hub', { config: { ...cfg, GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS: 1 } });
 await hub.listen();
 let signatures = 0;
 {
@@ -81,20 +89,34 @@ async function visit(tag) {
     for (const id of [announcer, ...edges.keys()]) if (members.has(id)) viaTopology.add(id);
   }
   const viaPx = new Set([...s.peerExchange.candidatePool.keys()].filter((id) => members.has(id)));
+  const pxAll = new Set(s.peerExchange.candidatePool.keys());
   const reached = link.state === 'connected';
   if (process.env.DISCLOSURE_DEBUG) console.log(`    [debug] hub connections ${[...hub.connections.values()].filter((l) => l.state === "connected").length}, hub links ${hub.links.size}, members still connected ${peers.filter((p) => [...p.links.values()].some((l) => l.state === "connected")).length}; lsdb ${s.topologyManager.lsdb.size} announcers, hub edges ${s.topologyManager.lsdb.get(hub.identity.nodeIdHex)?.size}, pool ${s.peerExchange.candidatePool.size}, link ${link.state}`);
   link.destroy();
   s.close();
   await delay(50);
-  return { viaTopology, viaPx, reached };
+  return { viaTopology, viaPx, pxAll, reached };
 }
 
 console.log('\n=== one stranger, one connection ===');
+// Positive control for the peer-exchange channel (M6-1c-fix-6d): the hub
+// also holds one OUTBOUND link, to a listening node that is not a member. If
+// peer exchange reaches the stranger at all, that is what it may name.
+const outbound = await mk('disclosure outbound peer');
+await outbound.listen();
+await hub.dial('memory', outbound.port);
+await delay(500);
 const first = await visit('first');
 console.log(`  learned ${first.viaTopology.size}/${N} member NodeIDs via topology, ${first.viaPx.size}/${N} via peer exchange`);
 assert(first.reached, 'the stranger\'s connection stayed up for the whole visit (the hub was not too busy to serve it)');
 assert(first.viaTopology.size <= SAMPLE, `topology gives a stranger at most ${SAMPLE} members (${first.viaTopology.size})`);
-assert(first.viaPx.size === 0, `peer exchange gives a stranger no inbound client at all (${first.viaPx.size})`);
+assertAbsent({
+  channel: 'peer exchange candidate pool',
+  control: () => first.pxAll.has(outbound.identity.nodeIdHex) && first.pxAll,
+  controlMessage: 'peer exchange reached the stranger: it named the hub\'s outbound peer',
+  absent: () => first.viaPx.size === 0,
+  message: `peer exchange gives a stranger no inbound client at all (${first.viaPx.size})`,
+});
 
 console.log('\n=== the same address reconnects 5 times with fresh identities ===');
 const union = new Set([...first.viaTopology, ...first.viaPx]);
@@ -148,7 +170,7 @@ console.log('\n=== the bound over time and across addresses (sampler, N=540, sam
     days++;
   }
   console.log(`  one address: ${days} daily epochs to see all 540 (coupon collector: ~(N/8)·ln N = ${Math.round((540 / 8) * Math.log(540))})`);
-  assert(days >= 540 / 8, `one address cannot see all 540 in fewer than N/8 = 68 epochs (${days} daily epochs here; median over secrets ~466)`);
+  assert(days >= 540 / 8, `one address cannot see all 540 in fewer than N/8 = 68 epochs (${days} daily epochs here; median over 100 secrets 484)`);
   // Many addresses in one epoch. The guarantee is per key: at most 8 new
   // NodeIDs each. It is NOT a defence against an attacker with many
   // addresses: coverage grows ~8 per key until it saturates (an IPv6 /48 is

@@ -13,9 +13,11 @@ import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 // paths.ts reads these at import time: set them before any dist module loads.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-rolemerge-'));
@@ -71,7 +73,7 @@ console.log('\n=== 1. one file lists R as relay (relay-a) and bootstrap (relay-b
   const before = accepted();
   const e = await rejection(N.dial('relay-b.example', R.port));
   assert(e instanceof RoleSeparationError && e.code === 'BOOTSTRAP_VIA_RELAY_HOST', `dial to R's bootstrap name refused: ${e && e.code}`);
-  assert(accepted() === before, `before connecting (${accepted() - before} new connections at R)`);
+  assertAbsent({ channel: 'accept counter at R', control: () => before, controlMessage: 'it counted the reservation\'s own connection', absent: () => accepted() === before, message: `before connecting (${accepted() - before} new connections at R)` });
   assert(!N.exposure.hasSeen(null, id), 'R never saw the real identity');
 }
 
@@ -82,7 +84,7 @@ console.log('\n=== 2. the two names come from different files (shipped: bootstra
   const before = accepted();
   const e = await rejection(N.dial('relay-b.example', R.port));
   assert(e instanceof RoleSeparationError && e.code === 'BOOTSTRAP_VIA_RELAY_HOST', `dial to R's shipped bootstrap name refused: ${e && e.code}`);
-  assert(accepted() === before, `before connecting, although .local replaced R's shipped entry (${accepted() - before} new connections at R)`);
+  assertAbsent({ channel: 'accept counter at R', control: () => before, controlMessage: 'it counted the reservation\'s own connection', absent: () => accepted() === before, message: `before connecting, although .local replaced R's shipped entry (${accepted() - before} new connections at R)` });
   assert(!N.exposure.hasSeen(null, id), 'R never saw the real identity');
 }
 

@@ -17,9 +17,11 @@ import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
 import { admissionKey } from '../dist/rate-limiter.js';
 import { requesterKey } from '../dist/topology-sample.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent } = absenceAsserter(assert);
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const CAP = DEFAULTS.GMP_RATE_LIMIT_MAX_GLOBAL;
@@ -137,7 +139,13 @@ console.log('\n=== 6. running out of tokens refuses new connections — it bans 
   const stillOpen = admitted.filter((c) => !c.closed).length;
   console.log(`  ${conns.length} from one address: ${stillOpen}/${BURST} admitted still open, ${conns.slice(BURST).filter((c) => c.closed).length}/20 over budget refused`);
   assert(stillOpen === BURST, `every admitted connection stays open when the address runs out of tokens (${stillOpen}/${BURST})`);
-  assert(!server.reputation.isBanned(null, 'memory.local'), 'the address is not banned');
+  assertAbsent({
+    channel: 'reputation.isBanned',
+    control: () => { server.reputation.ban(null, '198.51.100.9', 'positive control'); return server.reputation.isBanned(null, '198.51.100.9'); },
+    controlMessage: 'isBanned reports an address that IS banned',
+    absent: () => !server.reputation.isBanned(null, 'memory.local'),
+    message: 'the address is not banned',
+  });
   clock += 60_000; // a minute of refill
   const later = await client.dial({ host: 'memory', port: server.port });
   later.closed = false;

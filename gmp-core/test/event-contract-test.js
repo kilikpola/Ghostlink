@@ -96,6 +96,9 @@ function testCensus() {
     .map(([name, files]) => `${name} (${[...files].join(', ')})`);
   assert(unknown.length === 0, `every emitted event is in the contract${unknown.length ? ' — missing: ' + unknown.join('; ') : ''}`);
 
+  // Positive control (M6-1c-fix-6d): both scans found something, so an empty
+  // difference is a comparison of two real sets.
+  assert(contract.size > 20 && sites.size > 20, `control: the contract (${contract.size} names) and the emit-site scan (${sites.size}) are both populated`);
   const phantom = [...contract].filter((name) => !sites.has(name));
   assert(phantom.length === 0, `every contract event has an emit site${phantom.length ? ' — none for: ' + phantom.join(', ') : ''}`);
   console.log(`    (${Object.keys(maps).length} event maps, ${contract.size} distinct event names, ${sites.size} emitted names)`);

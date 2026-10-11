@@ -25,6 +25,8 @@ import { resolveConfig, readConfigFile, DEFAULTS } from '../dist/config.js';
 import { createGMPNode } from '../dist/node-factory.js';
 import { GMPNodeManager } from '../dist/gmp-node-manager.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(here, '..', 'dist');
@@ -320,7 +322,13 @@ async function testOptionMatrix() {
 
   const classified = new Set([...Object.keys(consumers), ...Object.keys(APP_LEVEL), ...Object.keys(DEAD)]);
   const unclassified = Object.keys(DEFAULTS).filter((k) => !classified.has(k));
-  assert(unclassified.length === 0, `every DEFAULTS key is classified${unclassified.length ? ' — missing: ' + unclassified.join(', ') : ''}`);
+  assertAbsent({
+    channel: 'DEFAULTS key classification',
+    control: () => Object.keys(DEFAULTS).length > 50 && [...Object.keys(DEFAULTS), 'GMP_CONTROL_UNCLASSIFIED'].filter((k) => !classified.has(k)),
+    controlMessage: `a synthetic unclassified key is caught among ${Object.keys(DEFAULTS).length} DEFAULTS keys`,
+    absent: () => unclassified.length === 0,
+    message: `every DEFAULTS key is classified${unclassified.length ? ' — missing: ' + unclassified.join(', ') : ''}`,
+  });
   assertEqual(classified.size, Object.keys(DEFAULTS).length, `classification has no stray keys (${Object.keys(DEFAULTS).length} keys)`);
 
   node.close();
@@ -435,7 +443,14 @@ function testConfigImports() {
     }
   };
   walk(DIST);
-  assert(offenders.length === 0, `no node-level module imports config.js${offenders.length ? ' — found ' + offenders.join(', ') : ''}`);
+  assertAbsent({
+    channel: 'config.js import regex',
+    control: () => [...allowed].filter((f) => f !== 'config.js' && fs.existsSync(path.join(DIST, f))
+      && /from\s+['"](?:\.\.?\/)+config\.js['"]/.test(fs.readFileSync(path.join(DIST, f), 'utf8'))),
+    controlMessage: 'the pattern finds the allowed modules that DO import config.js',
+    absent: () => offenders.length === 0,
+    message: `no node-level module imports config.js${offenders.length ? ' — found ' + offenders.join(', ') : ''}`,
+  });
 }
 
 async function runTests() {

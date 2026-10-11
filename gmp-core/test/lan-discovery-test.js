@@ -4,12 +4,28 @@
  *   2. discovery does not make a peer connected (privacy)
  *
  * Skips where UDP multicast is blocked (some CI sandboxes and containers).
+ *
+ * What it needs to run past [1]: two sockets in this process bound to UDP
+ * 49698, joined to 239.255.42.98, and the host delivering a datagram sent to
+ * that group back to its own sockets (multicast loopback) — a desktop Linux
+ * with a multicast-capable interface up does; a host whose firewall drops
+ * multicast, or a container on a bridge without multicast, does not. It
+ * prints which: "multicast unavailable" (join failed) or "no beacons
+ * received" (joined, nothing delivered).
+ *
+ * UNVERIFIED where it skips (M6-1c-fix-6e): the two positive controls added
+ * in M6-1c-fix-6d — [3]'s empty peer list against the list after connecting,
+ * [6]'s expiry against a fresh peer — sit past [1], so on the development
+ * host (2026-10-11: "no beacons received") they have never run. A skip is
+ * reported as "=== skipped ===", never as a pass.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { GMPNodeManager } from '../dist/gmp-node-manager.js';
 import { LanDiscovery } from '../dist/lan-discovery.js';
 import { ghostAddressFromNodeId } from '../dist/ghost-address.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -102,13 +118,14 @@ async function waitFor(check, timeoutMs = 8000, intervalMs = 150) {
     // Being on the same Wi-Fi is not consent to open a session.
     assert(alice.node.getLinkByNodeId(bob.getNodeId()) === null,
       'no link exists to a merely-discovered peer');
-    assert(alice.getStatus().peers.length === 0, 'the peer list is still empty');
+    const emptyBeforeConnect = alice.getStatus().peers.length === 0; // asserted with its control after [4]
 
     console.log('\n[4] Connecting is deliberate, and takes the direct LAN route');
     const outcome = await alice.connectByGhostAddress(bobAddress);
     assert(outcome.connected, `alice connects to bob over the LAN (transport: ${outcome.transport})`);
     assert(outcome.transport === 'lan' || outcome.transport === 'direct',
       'the connection is direct, not relayed through a mesh that does not exist');
+    assertAbsent({ channel: 'getStatus().peers', control: () => alice.getStatus().peers, controlMessage: 'once connected, the same list shows bob', absent: () => emptyBeforeConnect, message: '[3] the peer list was still empty before connecting' });
 
     console.log('\n[4b] A beacon cannot borrow someone else\'s identity');
     // Beacons are unauthenticated. Plant one claiming an unrelated NodeID but
@@ -135,7 +152,15 @@ async function waitFor(check, timeoutMs = 8000, intervalMs = 150) {
     console.log('\n[6] Stale peers expire');
     const shortLived = new LanDiscovery(alice.node, { port: discoveryPort, group: discoveryGroup, peerTtlMs: 1 });
     shortLived.peers.set('b'.repeat(128), { nodeId: 'b'.repeat(128), address: '10.0.0.5', port: 49500, lastSeen: Date.now() - 5000 });
-    assert(shortLived.getNodeIds().length === 0, 'a peer that stopped beaconing is dropped');
+    const longLived = new LanDiscovery(alice.node, { port: discoveryPort, group: discoveryGroup, peerTtlMs: 60_000 });
+    assertAbsent({
+      channel: 'getNodeIds()',
+      control: () => { longLived.peers.set('d'.repeat(128), { nodeId: 'd'.repeat(128), address: '10.0.0.6', port: 49500, lastSeen: Date.now() }); return longLived.getNodeIds(); },
+      controlMessage: 'a peer still beaconing is listed by the same call',
+      absent: () => shortLived.getNodeIds().length === 0,
+      message: 'a peer that stopped beaconing is dropped',
+    });
+    longLived.close();
     shortLived.close();
   } finally {
     if (aliceDiscovery) aliceDiscovery.close();

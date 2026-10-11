@@ -26,6 +26,8 @@ import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
 import { loadPublicPeers } from '../dist/public-peer-list.js';
 import { selectRelay, RoleSeparationError } from '../dist/relay/role-separation.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -43,6 +45,13 @@ function assert(condition, message) {
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const hex = (b) => Buffer.from(b).toString('hex');
+/** True once no link at `host` carries `node`'s real NodeID (bounded wait: a refused link closes when the close reaches the host). */
+async function noRealLink(host, node, ms = 2000) {
+  const has = () => [...host.links.values()].some((l) => l.remoteNodeId && Buffer.from(l.remoteNodeId).equals(Buffer.from(node.identity.nodeId)));
+  for (const t0 = Date.now(); has() && Date.now() - t0 < ms; ) await delay(20);
+  return !has();
+}
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-roles-'));
 process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
@@ -102,13 +111,25 @@ async function testBootstrapUsesBootstrapRole() {
   console.log('\n=== 2. bootstrap dials only bootstrap hosts ===');
   const network = new MemoryNetwork();
   const R = await relayNode(network, 'roles relay only host');
-  const f = peersFile([{ address: 'memory', port: R.port, nodeId: R.identity.nodeIdHex, addedAt: 0, lastVerified: 0, roles: ['relay'] }]);
+  // A bootstrap host is listed too: the positive control that the dial spy
+  // below records bootstrap dials at all (M6-1c-fix-6d).
+  const Bh = await relayNode(network, 'roles bootstrap control host');
+  const f = peersFile([
+    { address: 'memory', port: R.port, nodeId: R.identity.nodeIdHex, addedAt: 0, lastVerified: 0, roles: ['relay'] },
+    { address: 'memory', port: Bh.port, nodeId: Bh.identity.nodeIdHex, addedAt: 0, lastVerified: 0, roles: ['bootstrap'] },
+  ]);
   const E = await makeNode(network, 'roles bootstrapping node', { GMP_MIN_PEERS: 1 }, { disableBootstrap: false, publicPeersPath: f });
   const dialled = [];
   const dial = E.dial.bind(E);
   E.dial = (address, port, o) => { dialled.push(port); return dial(address, port, o); };
   await E.bootstrap.start();
-  assert(!dialled.includes(R.port) && E.connections.size === 0, 'a relay-only host is never dialled for bootstrap');
+  assertAbsent({
+    channel: 'bootstrap dial spy',
+    control: () => dialled.filter((p) => p === Bh.port),
+    controlMessage: 'the spy records the listed bootstrap host\'s dial',
+    absent: () => !dialled.includes(R.port) && ![...E.connections.values()].some((l) => hex(l.remoteNodeId) === R.identity.nodeIdHex),
+    message: 'a relay-only host is never dialled for bootstrap',
+  });
 }
 
 async function testHardRules() {
@@ -119,20 +140,39 @@ async function testHardRules() {
 
   console.log('\n=== 3. never reserve on a host used with the real identity ===');
   await N.dial('memory', H.port);
+  await delay(30);
+  // Positive control for section 4's "no link carrying N's real NodeID"
+  // (M6-1c-fix-6d): a host N really dialled holds exactly such a link.
+  // links, not connections: a relay keeps a new inbound link 'pending', outside
+  // connections, until its first non-relay frame — so connections could not
+  // show the very link section 4 rules out.
+  const hHoldsN = [...H.links.values()].filter((l) => l.remoteNodeId && Buffer.from(l.remoteNodeId).equals(Buffer.from(N.identity.nodeId)));
   const e1 = await rejection(N.reserveRelay({ address: 'memory', port: H.port }));
   assert(e1 instanceof RoleSeparationError && e1.code === 'RESERVE_ON_BOOTSTRAP_HOST', `refused by address (${e1 && e1.code})`);
   const e2 = await rejection(N.reserveRelay({ address: 'memory-alias', port: H.port }));
   assert(e2 instanceof RoleSeparationError && e2.code === 'RESERVE_ON_BOOTSTRAP_HOST', `refused by NodeID behind another address (${e2 && e2.code})`);
-  assert(H.relayServer.getStats().reservationsActive === 0, 'the refused host holds no reservation');
+  const hReservations = H.relayServer.getStats().reservationsActive; // asserted with its control in section 4
 
   console.log('\n=== 4. never connect with the real identity to a reserved host ===');
   await N.reserveRelay({ address: 'memory', port: R.port });
+  assertAbsent({
+    channel: 'relayServer reservationsActive',
+    control: () => R.relayServer.getStats().reservationsActive,
+    controlMessage: 'a reservation that succeeds is counted by the same stat',
+    absent: () => hReservations === 0,
+    message: 'section 3: the refused host holds no reservation',
+  });
   const e3 = await rejection(N.dial('memory', R.port));
   assert(e3 instanceof RoleSeparationError && e3.code === 'BOOTSTRAP_VIA_RELAY_HOST', `dial() refused by address (${e3 && e3.code})`);
   const e4 = await rejection(N.dial('memory-alias', R.port));
   assert(e4 instanceof RoleSeparationError && e4.code === 'BOOTSTRAP_VIA_RELAY_HOST', `dial() refused by NodeID behind another address (${e4 && e4.code})`);
-  assert(![...R.connections.values()].some((l) => Buffer.from(l.remoteNodeId).equals(Buffer.from(N.identity.nodeId))),
-    'no link carrying N\'s real NodeID is kept at the relay');
+  await assertAbsentAsync({
+    channel: 'relay links (pending included)',
+    control: () => hHoldsN,
+    controlMessage: 'the host N bootstrapped through (section 3) held a link carrying N\'s real NodeID',
+    absent: () => noRealLink(R, N),
+    message: 'no link carrying N\'s real NodeID is kept at the relay',
+  });
   // Honest limit: the alias case is caught only after the handshake, so R did
   // see N's HELLO. That exposure is not hidden: the reservation is demoted.
   assert(N.relayReservation({ address: 'memory', port: R.port }).separation === 'unseparated',
@@ -143,8 +183,13 @@ async function testHardRules() {
   N.bootstrap.minPeers = 5;
   N.bootstrap.disableBootstrap = false;
   await N.bootstrap.start();
-  assert(![...R.connections.values()].some((l) => Buffer.from(l.remoteNodeId).equals(Buffer.from(N.identity.nodeId))),
-    'bootstrap does not dial a host holding the live reservation');
+  await assertAbsentAsync({
+    channel: 'relay links (pending included)',
+    control: () => hHoldsN,
+    controlMessage: 'the host N bootstrapped through (section 3) held a link carrying N\'s real NodeID',
+    absent: () => noRealLink(R, N),
+    message: 'bootstrap does not dial a host holding the live reservation',
+  });
 }
 
 /**
@@ -167,16 +212,21 @@ async function testListedAliasBeforeDial() {
   const N = await makeNode(network, 'roles alias client', {}, { publicPeersPath: f });
   await N.reserveRelay({ address: 'relay-a.example', port: R.port, nodeId: id });
   const hopOnly = accepted;
+  // The accept counter's control: it counted the reservation's own connection.
+  const acceptCounter = { channel: 'accept counter at R', control: () => hopOnly, controlMessage: 'it counted the reservation\'s own connection' };
 
   const e1 = await rejection(N.dial('relay-b.example', R.port));
-  assert(e1 instanceof RoleSeparationError && e1.code === 'BOOTSTRAP_VIA_RELAY_HOST' && accepted === hopOnly,
-    `dial() to the other listed hostname refused before connecting (${e1 && e1.code}; connections at the host: ${accepted - hopOnly} new)`);
+  const afterE1 = accepted;
+  assert(e1 instanceof RoleSeparationError && e1.code === 'BOOTSTRAP_VIA_RELAY_HOST', `dial() to the other listed hostname refused (${e1 && e1.code})`);
+  assertAbsent({ ...acceptCounter, absent: () => afterE1 === hopOnly, message: `before connecting (connections at the host: ${afterE1 - hopOnly} new)` });
   const e2 = await rejection(N.dial('some-alias.example', R.port, { nodeId: id }));
-  assert(e2 instanceof RoleSeparationError && accepted === hopOnly, 'a caller that knows the NodeID (cache, LAN, list) is refused before connecting too');
+  const afterE2 = accepted;
+  assert(e2 instanceof RoleSeparationError, 'a caller that knows the NodeID (cache, LAN, list) is refused');
+  assertAbsent({ ...acceptCounter, absent: () => afterE2 === hopOnly, message: 'before connecting too' });
   N.bootstrap.minPeers = 5;
   N.bootstrap.disableBootstrap = false;
   await N.bootstrap.start();
-  assert(accepted === hopOnly, `bootstrap does not dial the listed alias of the reservation host (${accepted - hopOnly} new connections)`);
+  assertAbsent({ ...acceptCounter, absent: () => accepted === hopOnly, message: `bootstrap does not dial the listed alias of the reservation host (${accepted - hopOnly} new connections)` });
   assert(N.relayReservation({ address: 'relay-a.example', port: R.port }).separation !== undefined
     && !N.exposure.hasSeen(null, id), 'the host never saw the real identity: nothing to demote');
 
@@ -223,8 +273,14 @@ async function testSeparationState() {
   const sameErr = await rejection(B.reserveRelay({ address: 'memory', port: Ra.port, operator: 'op-a' }));
   const unknown = await B.reserveRelay({ address: 'memory', port: Ru.port });
   assert(sep.separation === 'separated', `different known operator: separated (${sep.separation})`);
-  assert(sameErr instanceof RoleSeparationError && sameErr.code === 'RESERVE_ON_BOOTSTRAP_HOST' && Ra.relayServer.getStats().reservationsActive === 0,
-    `same operator as the bootstrap host: refused before connecting (${sameErr && sameErr.code}) — GM-N2-6`);
+  assert(sameErr instanceof RoleSeparationError && sameErr.code === 'RESERVE_ON_BOOTSTRAP_HOST', `same operator as the bootstrap host: refused (${sameErr && sameErr.code}) — GM-N2-6`);
+  assertAbsent({
+    channel: 'relayServer reservationsActive',
+    control: () => Rb.relayServer.getStats().reservationsActive,
+    controlMessage: 'the separated reservation on op-b\'s relay is counted',
+    absent: () => Ra.relayServer.getStats().reservationsActive === 0,
+    message: 'before connecting: op-a\'s relay holds no reservation',
+  });
   assert(unknown.separation === 'unseparated', `unknown operator: unseparated (${unknown.separation})`);
 
   const A = await makeNode(network, 'sep dialling node');

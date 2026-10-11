@@ -8,6 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -145,8 +147,11 @@ function testNoPlaintextOnDisk() {
   cache1.recordSuccess('node_id_1234567890123456789012345678901234567890123456789012345678901234', '192.168.1.100', 49500);
 
   const raw = fs.readFileSync(tempCachePath, 'utf8');
-  assert(!raw.includes('192.168.1.100'), "Plaintext IP address is not visible on disk");
-  assert(!raw.includes('node_id_1234567890123456789012345678901234567890123456789012345678901234'), "Plaintext NodeID is not visible on disk");
+  // The record IS in this file — reopening it with the seed shows it — so its
+  // absence in plaintext means sealed, not missing.
+  const holdsRecord = () => raw.length > 0 && new PeerCache({ filePath: tempCachePath, seedPhrase: seed }).cache.filter((e) => e.address === '192.168.1.100');
+  assertAbsent({ channel: 'peer cache file', control: holdsRecord, controlMessage: 'the file decrypts to the record', absent: () => !raw.includes('192.168.1.100'), message: 'Plaintext IP address is not visible on disk' });
+  assertAbsent({ channel: 'peer cache file', control: holdsRecord, controlMessage: 'the file decrypts to the record', absent: () => !raw.includes('node_id_1234567890123456789012345678901234567890123456789012345678901234'), message: 'Plaintext NodeID is not visible on disk' });
   if (process.platform !== 'win32') {
     assertEqual((fs.statSync(tempCachePath).mode & 0o777).toString(8), '600', "State file is written owner-only (0600)");
   }

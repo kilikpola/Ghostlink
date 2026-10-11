@@ -40,6 +40,8 @@ import { GMPLink } from '../dist/link/link.js';
 import { MemoryConnection, MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
 import { createGMPNode } from '../dist/node-factory.js';
 import { deriveIdentityFromSeedPhrase, generateEphemeralKeyPair, sha512 } from '../dist/identity.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -600,13 +602,19 @@ function testLayering() {
   const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'link');
   const files = readdirSync(dir).filter((f) => f.endsWith('.js'));
   assert(files.length === 7, `dist/link has the seven modules (${files.join(', ')})`);
+  let specsSeen = 0;
+  const badByFile = [];
   for (const f of files) {
     const src = readFileSync(path.join(dir, f), 'utf8');
     const specs = [...src.matchAll(/(?:^|\n)\s*(?:import|export)\s[^'"]*?from\s+['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g)]
       .map((m) => m[1] || m[2]);
-    const bad = specs.filter((spec) => !allowed.has(spec.replace(/^node:/, '')));
-    assert(bad.length === 0, `link/${f} imports only allowed modules${bad.length ? ' — found ' + bad.join(', ') : ''}`);
+    specsSeen += specs.length;
+    badByFile.push([f, specs.filter((spec) => !allowed.has(spec.replace(/^node:/, '')))]);
   }
+  for (const [f, bad] of badByFile) {
+    assertAbsent({ channel: 'import specifier scan', control: () => specsSeen > 10 && specsSeen, controlMessage: 'the scan extracted real specifiers', absent: () => bad.length === 0, message: `link/${f} imports only allowed modules${bad.length ? ' — found ' + bad.join(', ') : ''}` });
+  }
+
 }
 
 async function runTests() {

@@ -23,9 +23,11 @@ import { fileURLToPath } from 'url';
 import { findSeedPhrase, containsSeedPhrase, seedRuns } from '../dist/seed-guard.js';
 import { generateSeedPhrase } from '../dist/seed-phrase.js';
 import { deriveIdentityFromSeedPhrase, bytesToHex } from '../dist/identity.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const core = path.join(here, '..');
@@ -122,7 +124,13 @@ console.log('\n=== 3. no revoked NodeID in any peer list ===');
   walk(repo);
   const hits = lists.filter((p) => REVOKED_NODE_IDS.some((id) => fs.readFileSync(p, 'utf8').toLowerCase().includes(id)));
   assert(lists.length >= 1, `found the peer lists (${lists.map((p) => path.relative(repo, p)).join(', ')})`);
-  assert(hits.length === 0, `none names a revoked NodeID${hits.length ? ': ' + hits.map((p) => path.relative(repo, p)).join(', ') : ''}`);
+  assertAbsent({
+    channel: 'peer list contents',
+    control: () => lists.filter((p) => fs.readFileSync(p, 'utf8').includes('562c487c1a10a649')),
+    controlMessage: 'the same read finds the NodeID the lists DO carry',
+    absent: () => hits.length === 0,
+    message: `none names a revoked NodeID${hits.length ? ': ' + hits.map((p) => path.relative(repo, p)).join(', ') : ''}`,
+  });
 }
 
 console.log('\n=== 4. the logger withholds a line carrying a seed phrase ===');

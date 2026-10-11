@@ -16,9 +16,11 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { generateSeedPhrase } from '../dist/seed-phrase.js';
 import { deriveIdentityFromSeedPhrase, bytesToHex } from '../dist/identity.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent } = absenceAsserter(assert);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.join(here, '..', 'dist', 'cli.js');
@@ -74,6 +76,16 @@ async function startNode(name, cmd, { peers = [], extraEnv = {} } = {}) {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Control run first (M6-1c-fix-6e): a user client, whose bootstrap really
+// fails, shows that the log parse counts the events sections 1-2 rule out.
+console.log('\n=== 0. control run: a user client with nobody to reach ===');
+const clientRun = await (async () => {
+  const n = await startNode('client', 'start');
+  await wait(RUN_MS);
+  return { up: n.up, r: await n.stop() };
+})();
+const controlCount = (ev) => () => clientRun.r.count(ev);
+
 console.log('\n=== 1. lone public peer, nobody else listed: serves, no loop ===');
 {
   const n = await startNode('lone', 'public-peer');
@@ -81,9 +93,9 @@ console.log('\n=== 1. lone public peer, nobody else listed: serves, no loop ==='
   await wait(RUN_MS);
   const r = await n.stop();
   console.log(`  in ${RUN_MS} ms: ${r.count('bootstrap/failed')} failed WARN(s), ${r.count('health-monitor/check-trigger-bootstrap')} health re-trigger(s), ${r.count('bootstrap/rung-start')} rung start(s)`);
-  assert(r.count('bootstrap/failed') === 0, 'no "bootstrap failed" WARN');
-  assert(r.count('bootstrap/retry-scheduled') === 0, 'no retry scheduled');
-  assert(r.count('health-monitor/check-trigger-bootstrap') === 0, 'the health monitor never re-triggers bootstrap');
+  assertAbsent({ channel: 'log: bootstrap/failed', control: controlCount('bootstrap/failed'), controlMessage: 'the client run logs it', absent: () => r.count('bootstrap/failed') === 0, message: 'no "bootstrap failed" WARN' });
+  assertAbsent({ channel: 'log: bootstrap/retry-scheduled', control: controlCount('bootstrap/retry-scheduled'), controlMessage: 'the client run logs it', absent: () => r.count('bootstrap/retry-scheduled') === 0, message: 'no retry scheduled' });
+  assertAbsent({ channel: 'log: health-monitor/check-trigger-bootstrap', control: controlCount('health-monitor/check-trigger-bootstrap'), controlMessage: 'the client run logs it', absent: () => r.count('health-monitor/check-trigger-bootstrap') === 0, message: 'the health monitor never re-triggers bootstrap' });
   assert(r.count('bootstrap/rung-start') <= 4, `one ladder run at most, at start-up (${r.count('bootstrap/rung-start')} rung starts)`);
 }
 
@@ -96,15 +108,14 @@ console.log('\n=== 2. two public peers: the second still links to the first at s
   const rb = await b.stop();
   const ra = await a.stop();
   assert(rb.events.some((e) => e.event === 'complete' && /via public/.test(e.msg)), 'B reached A through the public rung');
-  assert(rb.count('bootstrap/failed') + ra.count('bootstrap/failed') === 0, 'neither logs a bootstrap failure');
+  assertAbsent({ channel: 'log: bootstrap/failed', control: controlCount('bootstrap/failed'), controlMessage: 'the client run logs it', absent: () => rb.count('bootstrap/failed') + ra.count('bootstrap/failed') === 0, message: 'neither logs a bootstrap failure' });
 }
 
 console.log('\n=== 3. a user client keeps minPeers 3 (still retries) ===');
 {
-  const n = await startNode('client', 'start');
-  assert(n.up, 'starts');
-  await wait(RUN_MS);
-  const r = await n.stop();
+  // The control run above.
+  const r = clientRun.r;
+  assert(clientRun.up, 'starts');
   assert(r.count('health-monitor/check-trigger-bootstrap') >= 2, `the client keeps trying (${r.count('health-monitor/check-trigger-bootstrap')} re-triggers)`);
 }
 

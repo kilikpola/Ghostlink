@@ -10,6 +10,8 @@
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { createGMPNode } from '../dist/node-factory.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let run = 0, passed = 0, failed = 0;
 function assert(cond, msg) {
@@ -22,6 +24,9 @@ const hex = (b) => Buffer.from(b).toString('hex');
 
 // The responder gives an unconfirmed handshake 10s before giving up; wait past it.
 const CONFIRM_WINDOW_MS = 11000;
+
+/** Messages the honest control delivered: the impostor case's positive control. */
+let controlMessages = [];
 
 async function makeTarget() {
   const target = createGMPNode({ port: 0 });
@@ -49,6 +54,11 @@ async function testHonestPeerConnects(victimSeed) {
   assert(!(dialed instanceof Error), 'the real victim\'s dial succeeds');
   assert(seen.connections.includes(hex(victimId.nodeId)),
     'the target accepts a connection from the victim\'s NodeID when the victim dials');
+  // The control for the impostor case's message channel: the real victim's
+  // message is delivered through the same target log.
+  try { await dialed?.link?.send?.('message from the victim'); } catch { /* checked in the impostor case */ }
+  await delay(300);
+  controlMessages = [...seen.messages];
 
   victim.close();
   target.close();
@@ -86,8 +96,13 @@ async function testImpostorRejected(victimSeed, victimNodeIdHex) {
   assert(!seen.connections.includes(victimNodeIdHex),
     'the target never reports a connection from the victim\'s NodeID');
   assert(seen.connections.length === 0, 'the target reports no connection at all from the impostor');
-  assert(!seen.messages.includes('message from the impostor'),
-    'nothing the impostor sends is delivered as coming from the victim');
+  assertAbsent({
+    channel: 'target message log',
+    control: () => controlMessages.filter((m) => m === 'message from the victim'),
+    controlMessage: 'the real victim\'s message was delivered through it',
+    absent: () => !seen.messages.includes('message from the impostor'),
+    message: 'nothing the impostor sends is delivered as coming from the victim',
+  });
   console.log(`    (dial ${dialError ? 'failed: ' + dialError.message : 'returned'}; target errors: ${seen.errors.length})`);
 
   impostor.close();

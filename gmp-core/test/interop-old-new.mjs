@@ -20,6 +20,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 /** The deployed public peer's build (2026-10-10). Move deliberately, in its own diff. */
 export const INTEROP_OLD_REF = '8ba4f3a7c48182cbd33294166633086bb4722d1f';
@@ -102,6 +103,7 @@ const record = (label, checks, detail) => {
   pass += checks.filter(Boolean).length;
   console.log(`${label.padEnd(28)} ${checks.every(Boolean) ? 'OK  ' : 'FAIL'} ${detail}`);
 };
+const { assertAbsent } = absenceAsserter((ok, msg) => { total++; if (ok) pass++; console.log(`${''.padEnd(28)} ${ok ? 'OK  ' : 'FAIL'} ${msg}`); });
 
 console.log(`old = ${sha.startsWith('dir:') ? sha : sha.slice(0, 12)}, new = working tree\n`);
 for (const [dialer, listener, kind] of [['old', 'new', 'plain'], ['new', 'old', 'plain'], ['old', 'new', 'public'], ['new', 'new', 'public'], ['new', 'new', 'plain'], ['old', 'old', 'plain']]) {
@@ -117,17 +119,23 @@ if (oldHasRelay) {
     const L = await startListener(relay, 'relay');
     const r = await client(reserver, 'reserve', L.port);
     await stop(L);
-    // Non-vacuous: the relay must have seen the hop's identity, and it must
-    // not be the reserver's real one.
     const seen = [...L.out().matchAll(/^(?:SEEN|LINKED) ([0-9a-f]+)$/gm)].map((m) => m[1]);
-    const sawReal = seen.includes(r.me);
-    record(`${reserver} reserves on ${relay} relay`, [r.reserved === true, !!r.me && seen.length > 0 && !sawReal],
-      `${JSON.stringify({ reserved: r.reserved, error: r.error, identitiesSeenByRelay: seen.length, relaySawRealNodeId: sawReal })}`);
+    record(`${reserver} reserves on ${relay} relay`, [r.reserved === true], `${JSON.stringify({ reserved: r.reserved, error: r.error, identitiesSeenByRelay: seen.length })}`);
+    // The relay emits no 'connection' for relay sessions (this check once
+    // passed observing nothing): its control is that it saw the session's
+    // throwaway identity.
+    assertAbsent({
+      channel: `${relay} relay's link identities`,
+      control: () => seen.filter((id) => id !== r.me),
+      controlMessage: 'the relay saw the reservation\'s throwaway identity',
+      absent: () => !!r.me && !seen.includes(r.me),
+      message: 'the relay never saw the reserver\'s real NodeID',
+    });
   }
 } else {
-  console.log(`relay pairing               N/A  ${sha.slice(0, 12)} has no relay code (dist/relay absent); applies once a build with relays is the pinned baseline (24 -> 28)`);
+  console.log(`relay pairing               N/A  ${sha.slice(0, 12)} has no relay code (dist/relay absent); applies once a build with relays is the pinned baseline (24 -> 30)`);
 }
 
-const expected = oldHasRelay ? 28 : 24;
+const expected = oldHasRelay ? 30 : 24; // relay pairings: reserved, control, absence (3 each)
 console.log(`\ninterop: ${pass}/${total} checks (expected ${expected} against this baseline)`);
 process.exit(pass === total && total === expected ? 0 : 1);

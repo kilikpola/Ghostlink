@@ -5,6 +5,8 @@
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { createGMPNode } from '../dist/node-factory.js';
 import crypto from 'crypto';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsRun = 0;
 let testsPassed = 0;
@@ -282,10 +284,16 @@ async function testTTLExpiry() {
   nodeD.on('ttl-expired', handleTtlExpired('D'));
   nodeE.on('ttl-expired', handleTtlExpired('E'));
 
-  let messageReceivedByE = false;
-  nodeE.on('message', () => {
-    messageReceivedByE = true;
-  });
+  // A routed frame that reaches E is seen by E's forwarder as local. The mock
+  // payload below could never surface as a 'message' (it is not sealed to E),
+  // so that event alone cannot see an arrival; this spy can (M6-1c-fix-6d).
+  let arrivedAtE = 0;
+  const processIncomingE = nodeE.forwarder.processIncoming.bind(nodeE.forwarder);
+  nodeE.forwarder.processIncoming = (...a) => {
+    const r = processIncomingE(...a);
+    if (r && r.local) arrivedAtE++;
+    return r;
+  };
 
   const linkA_B = nodeA.getLinkByNodeId(nodeB.identity.nodeId);
   assert(linkA_B !== null, "Link A-B exists");
@@ -300,7 +308,21 @@ async function testTTLExpiry() {
 
   assertEqual(ttlExpiredEmitted, true, "'ttl-expired' event was emitted");
   assertEqual(expiredNode, 'D', "'ttl-expired' event emitted at the correct node (D)");
-  assertEqual(messageReceivedByE, false, "Message never reached E");
+  // "Message never reached E" via E's 'message' event is gone: that event
+  // cannot fire for this unsealed mock payload, so it could not have seen a
+  // failure (M6-1c-fix-6d). The forwarder spy can.
+  const arrivedShort = arrivedAtE;
+  if (linkA_B) {
+    linkA_B.sendRoutedDATA(nodeE.identity.nodeId.slice(0, 32), 8, Buffer.from("Secret frame"), nodeA.identity.nodeId.slice(0, 32));
+    await delay(400);
+  }
+  assertAbsent({
+    channel: "E's forwarder (local arrivals)",
+    control: () => arrivedAtE - arrivedShort,
+    controlMessage: 'the same frame with enough hops reaches E and is counted',
+    absent: () => arrivedShort === 0,
+    message: 'the TTL-3 frame never reached E',
+  });
 
   nodeA.close();
   nodeB.close();

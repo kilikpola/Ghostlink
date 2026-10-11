@@ -23,6 +23,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GMPNodeManager } from '../dist/gmp-node-manager.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsPassed = 0;
 let testsFailed = 0;
@@ -155,8 +157,16 @@ async function run() {
       pc.load();
       cached = pc.cache;
     }
-    assert(claims === 0 && cached.length === 0,
-      `the storage peer persisted no session claim and no peer (claims ${claims} B, peer cache ${cached.length} entries): every visitor was a throwaway hop`);
+    // Positive control (M6-1c-fix-6d): this IS the storage peer's state
+    // directory — it exists and the peer wrote to it — so "no claim file, no
+    // cached peer" is read from the right place, not from an empty path.
+    assertAbsent({
+      channel: 'storage peer data dir',
+      control: () => files.filter((f) => /boot-counter|blobs|store/.test(f)),
+      controlMessage: 'it is the peer\'s own state directory (it wrote there)',
+      absent: () => claims === 0 && cached.length === 0,
+      message: `the storage peer persisted no session claim and no peer (claims ${claims} B, peer cache ${cached.length} entries): every visitor was a throwaway hop`,
+    });
   }
   console.log(`\nResults: ${testsPassed} passed, ${testsFailed} failed`);
   process.exit(testsFailed > 0 ? 1 : 0);

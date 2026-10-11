@@ -17,6 +17,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createGMPNode } from '../dist/node-factory.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const TEST_SEED_A = 'memory transport test seed phrase node a';
 const TEST_SEED_B = 'memory transport test seed phrase node b';
@@ -165,8 +167,11 @@ function testNoNetImports() {
   const importsNet = /from\s+['"](?:node:)?net['"]|require\(\s*['"](?:node:)?net['"]\s*\)/.test(built);
   const importsTls = /from\s+['"](?:node:)?tls['"]|require\(\s*['"](?:node:)?tls['"]\s*\)/.test(built);
 
-  assert(!importsNet, 'dist/link.js does not import net');
-  assert(!importsTls, 'dist/link.js does not import tls');
+  const tcp = readFileSync(path.join(here, '..', 'dist', 'transport', 'tcp-transport.js'), 'utf8');
+  const netRe = /from\s+['"](?:node:)?net['"]|require\(\s*['"](?:node:)?net['"]\s*\)/;
+  const tlsRe = /from\s+['"](?:node:)?tls['"]|require\(\s*['"](?:node:)?tls['"]\s*\)/;
+  assertAbsent({ channel: 'net import pattern', control: () => netRe.test(tcp), controlMessage: 'it matches tcp-transport.js, which imports net', absent: () => !importsNet, message: 'dist/link.js does not import net' });
+  assertAbsent({ channel: 'tls import pattern', control: () => tlsRe.test(tcp), controlMessage: 'it matches tcp-transport.js, which imports tls', absent: () => !importsTls, message: 'dist/link.js does not import tls' });
   assert(built.includes('tcp-transport'), 'dist/link.js goes through the transport abstraction');
 }
 

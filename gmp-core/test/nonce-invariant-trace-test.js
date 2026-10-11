@@ -21,6 +21,7 @@ import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transpo
 import { fingerprintKey } from '../dist/link/session.js';
 import { RelayHop } from '../dist/relay/relay-client.js';
 import { withSource } from './helpers/ephemeral-source.mjs';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 function trace(inv, ok, msg) {
@@ -127,7 +128,20 @@ console.log(`strictState: true   claim-log debug asserts armed: ${DEBUG_ASSERTS}
   e.claimSessionKey(peerA, fp());
   e.updateCounters(peerA, crypto.randomBytes(32), 5, 5);
   e.close();
-  trace('I3-eph', fs.readdirSync(dir).sort().join(',') === before, 'ephemeral: nothing written anywhere (no durability claimed, none needed)');
+  const afterEph = fs.readdirSync(dir).sort().join(',');
+  // Through the absence helper, reported as trace lines (M6-1c-fix-6e).
+  absenceAsserter((ok, msg) => trace(/^control/.test(msg) ? 'control' : 'I3-eph', ok, msg)).assertAbsent({
+    channel: 'directory listing',
+    control: () => {
+      const d = new NonceStore({ stateFile: path.join(dir, 'control-state.json'), seedPhrase: SEED, strictState: true }).load();
+      d.claimSessionKey(peerA, fp());
+      d.close();
+      return fs.readdirSync(dir).sort().join(',') !== afterEph;
+    },
+    controlMessage: 'a durable claim in the same directory changes the listing',
+    absent: () => afterEph === before,
+    message: 'ephemeral: nothing written anywhere (no durability claimed, none needed)',
+  });
 }
 
 // I4 — state is merged, never replaced

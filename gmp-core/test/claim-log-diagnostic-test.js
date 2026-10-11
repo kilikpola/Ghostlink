@@ -20,9 +20,11 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
 import { inspectClaimLogs, describeClaimLogReport } from '../dist/claim-log-diagnostic.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-cldiag-'));
@@ -92,7 +94,29 @@ console.log('\n=== 1 + 2. the check finds duplicates, and touches nothing ===');
   for (const [m, f] of Object.entries(saved)) fs[m] = f;
 
   assert(!err, `the check ran${err ? ` (${err.message})` : ''}`);
-  assert(trapped.length === 0, `no fs mutation was attempted (${trapped.length}${trapped.length ? ': ' + trapped.join(', ') : ''})`);
+  // The same trap, reinstalled, must catch a real gmp-core writer that
+  // imports fs the way the diagnostic does — else "nothing trapped" is vacuous.
+  const { writeFileAtomicSync } = await import('../dist/atomic-file.js');
+  assertAbsent({
+    channel: 'fs mutation trap',
+    control: () => {
+      const caught = [];
+      const keep = {};
+      for (const m of MUTATORS) {
+        if (typeof fs[m] !== 'function') continue;
+        keep[m] = fs[m];
+        fs[m] = () => { caught.push(m); throw new Error(`trapped fs.${m}`); };
+      }
+      keep.openSync = fs.openSync;
+      fs.openSync = (p, flags = 'r', ...rest) => { if (flags !== 'r' && flags !== fs.constants.O_RDONLY) caught.push('openSync'); return keep.openSync(p, flags, ...rest); };
+      try { writeFileAtomicSync(path.join(os.tmpdir(), `gmp-trap-control-${process.pid}`), 'x'); } catch { /* trapped */ }
+      for (const [m, fn] of Object.entries(keep)) fs[m] = fn;
+      return caught;
+    },
+    controlMessage: 'the trap catches writeFileAtomicSync',
+    absent: () => trapped.length === 0,
+    message: `no fs mutation was attempted (${trapped.length}${trapped.length ? ': ' + trapped.join(', ') : ''})`,
+  });
   const after = snapshot(dataDir);
   assert(JSON.stringify(before) === JSON.stringify(after), 'every file is byte-, size-, mtime- and inode-identical afterwards; nothing added or removed');
   if (report) {
@@ -103,7 +127,14 @@ console.log('\n=== 1 + 2. the check finds duplicates, and touches nothing ===');
     assert(f.duplicates.length === 2 && f.duplicates.some((d) => d.count === 3), `two fingerprints duplicated, one of them three times (${JSON.stringify(f.duplicates.map((d) => d.count))})`);
     assert(report.otherIdentity === 1, `the other identity's log is skipped, not judged (${report.otherIdentity})`);
     assert(report.bootCounter === '7', `boot counter reported (${report.bootCounter})`);
-    assert(!JSON.stringify(report).includes(fp(2)), 'full fingerprints never appear in the report (prefixes only)');
+    const named = Array.from({ length: 16 }, (_, i) => fp(i)).filter((x) => f.duplicates.some((d) => x.startsWith(d.prefix)));
+    assertAbsent({
+      channel: 'report JSON',
+      control: () => named.length === 2 && named.every((x) => JSON.stringify(report).includes(x.slice(0, 12))) && named,
+      controlMessage: 'the report names the duplicated fingerprints by prefix',
+      absent: () => named.every((x) => !JSON.stringify(report).includes(x)) && !JSON.stringify(report).includes(fp(2)),
+      message: 'full fingerprints never appear in the report (prefixes only)',
+    });
   }
 }
 

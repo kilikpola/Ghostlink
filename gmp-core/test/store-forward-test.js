@@ -41,6 +41,8 @@ import { withSource } from './helpers/ephemeral-source.mjs';
 import { RoleSeparationError } from '../dist/relay/role-separation.js';
 import { MESSAGETYPES } from '../dist/link/frame.js';
 import { SfPollScheduler } from '../dist/storage/sf-scheduler.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsPassed = 0;
 let testsFailed = 0;
@@ -274,7 +276,13 @@ async function testHostSeesNoIdentity() {
     ['plaintext', Buffer.from('secret text')],
   ];
   const found = needles.filter(([, b]) => all.includes(b)).map(([name]) => name);
-  assert(seen.length >= 4 && found.length === 0, `across ${seen.length} frames the host read no tag, tag prefix, NodeID, static key or plaintext (${found.join(', ') || 'none'})`);
+  assertAbsent({
+    channel: 'byte search over every host frame',
+    control: () => seen.length >= 4 && all.includes(Buffer.from('"bucket"')) && all.includes(Buffer.from('requestId')) && seen.length,
+    controlMessage: 'the same search finds the control fields present in every frame',
+    absent: () => found.length === 0,
+    message: `across ${seen.length} frames the host read no tag, tag prefix, NodeID, static key or plaintext (${found.join(', ') || 'none'})`,
+  });
   const keys = new Set(seen.flatMap((s) => {
     const len = s.pt.readUInt32BE(0);
     return Object.keys(JSON.parse(s.pt.subarray(4, 4 + len).toString()));
@@ -424,8 +432,19 @@ async function testThrowawayOnly() {
   await sfA.send(B.identity.nodeIdHex, 'x');
   await sfB.poll('x');
   await delay(30);
-  assert(conns.length === 0 && S.nonceStore.claimCount === claims && S.peerCache.cache.length === 0,
-    'the storage host saw no peer: no connection event, no claim, no peer-cache entry');
+  const sawPeer = { conns: conns.length, claims: S.nonceStore.claimCount - claims, cached: S.peerCache.cache.length };
+  // Control: a real peer that talks to the host is seen by the same listener and counters.
+  const P = await makeNode(network, 'sf storage control peer');
+  await P.dial('memory', S.port);
+  await P.getLinkByNodeId(S.identity.nodeId).send('control');
+  await delay(50);
+  assertAbsent({
+    channel: 'storage host connection event + claim count',
+    control: () => conns.length === 1 && S.nonceStore.claimCount === claims + 1 && conns,
+    controlMessage: 'a real peer is seen (one connection event, one claim)',
+    absent: () => sawPeer.conns === 0 && sawPeer.claims === 0 && sawPeer.cached === 0,
+    message: 'the storage host saw no peer: no connection event, no claim, no peer-cache entry',
+  });
   const real = await rejection(StorageSession.open(new MemoryTransport(network), mailbox, withSource({ identity: A.identity })));
   assert(real && real.reason === 'real-identity', `passing the real identity in is refused before connecting (${real && real.message})`);
   const fake = await rejection(StorageSession.open(new MemoryTransport(network), mailbox, withSource({ identity: { ...A.identity, ephemeral: 1 } })));

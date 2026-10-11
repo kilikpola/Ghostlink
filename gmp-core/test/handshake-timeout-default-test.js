@@ -10,9 +10,11 @@ import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-
 import net from 'net';
 
 import { GMPNodeManager } from '../dist/gmp-node-manager.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const HELLO_TIMEOUT_MS = 600;
@@ -48,11 +50,12 @@ console.log('\n=== 1. silent inbound sockets are closed after the HELLO timeout 
   await delay(200);
   const openEarly = socks.filter((s) => !s.isClosed).length;
   assert(openEarly === N, `all ${N} silent sockets were admitted (no admission cap by default; ${openEarly} open)`);
+  const heldEarly = node.links.size; // the control for "no half-open link left behind"
   await delay(HELLO_TIMEOUT_MS * 3);
   const stillOpen = socks.filter((s) => !s.isClosed).length;
   console.log(`  after ${(HELLO_TIMEOUT_MS * 3 + 200) / 1000}s silent: ${stillOpen}/${N} sockets still open, node.links=${node.links.size}`);
   assert(stillOpen === 0, `every silent socket was closed by the HELLO timeout (${stillOpen} still open)`);
-  assert(node.links.size === 0, `no half-open link left behind (${node.links.size})`);
+  assertAbsent({ channel: 'node.links', control: () => heldEarly === N && heldEarly, controlMessage: 'the node held a link per silent socket before the timeout', absent: () => node.links.size === 0, message: `no half-open link left behind (${node.links.size})` });
   socks.forEach((s) => s.destroy());
 }
 

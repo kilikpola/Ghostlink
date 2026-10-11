@@ -14,9 +14,11 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
 
 let run = 0, passed = 0, failed = 0;
 const assert = (c, m) => { run++; c ? (passed++, console.log(`  ✓ ${m}`)) : (failed++, console.error(`  ✗ ${m}`)); };
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = path.join(here, '..', 'src');
@@ -40,7 +42,14 @@ console.log('\n=== 1. no environment sniffing in gmp-core/src ===');
   };
   walk(src);
   for (const h of hits) console.error(`    ${h}`);
-  assert(hits.length === 0, `no NODE_ENV read and no argv path test in gmp-core/src (${hits.length} found)`);
+  const flags = (line) => { const code = line.replace(/\/\/.*$/, ''); return !/^\s*\*/.test(line) && (/process\.env\.NODE_ENV/.test(code) || /argv\[\d\][^;\n]*\.includes\(/.test(code)); };
+  assertAbsent({
+    channel: 'NODE_ENV / argv line rule',
+    control: () => flags("if (process.env.NODE_ENV === 'test') skip();") && flags("const isTest = process.argv[1].includes('test');") && !flags('// process.env.NODE_ENV is not read'),
+    controlMessage: 'the rule flags a NODE_ENV read and an argv path test, and passes a comment',
+    absent: () => hits.length === 0,
+    message: `no NODE_ENV read and no argv path test in gmp-core/src (${hits.length} found)`,
+  });
 }
 
 function debugAsserts(env) {

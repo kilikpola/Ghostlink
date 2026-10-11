@@ -28,6 +28,8 @@ import { withSource } from './helpers/ephemeral-source.mjs';
 import * as sfCrypto from '../dist/storage/sf-crypto.js';
 import { StoreForward } from '../dist/storage/store-forward.js';
 import { MESSAGETYPES } from '../dist/link/frame.js';
+import { absenceAsserter } from './helpers/assert-absent.mjs';
+const { assertAbsent, assertAbsentAsync } = absenceAsserter(assert);
 
 let testsPassed = 0;
 let testsFailed = 0;
@@ -114,8 +116,13 @@ async function testNoDelete() {
   assert(got.join() === 'hello' && states.join() === 'stored:m1,delivered:m1', `round trip complete (${states.join(' ')})`);
   assert(!seen.some((f) => f.type === 0x15), `the host received no 0x15 in the whole round trip (${seen.map((f) => '0x' + f.type.toString(16)).join(' ')})`);
   const fromClients = seen.flatMap((f) => Object.keys(f.control || {}));
-  assert(!fromClients.includes('blobId') && !fromClients.includes('receipt') && !fromClients.includes('commitment'),
-    `no client ever names a blob to the host (fields sent: ${[...new Set(fromClients)].sort().join(', ')})`);
+  assertAbsent({
+    channel: 'host tap: client control fields',
+    control: () => fromClients.filter((k) => k === 'bucket'),
+    controlMessage: 'the tap captures what clients send',
+    absent: () => !fromClients.includes('blobId') && !fromClients.includes('receipt') && !fromClients.includes('commitment'),
+    message: `no client ever names a blob to the host (fields sent: ${[...new Set(fromClients)].sort().join(', ')})`,
+  });
   const stats = S.storageServer.getStats();
   assert(stats.blobs === 2, `the message the recipient read is still stored, next to its receipt (${stats.blobs} blobs): removed only by TTL or LRU`);
   assert(MESSAGETYPES.FETCH_DELETE === undefined && MESSAGETYPES.RETIRED_0x15 === 0x15, '0x15 is retired in the frame table, not reused');

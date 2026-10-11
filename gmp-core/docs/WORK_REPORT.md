@@ -37,7 +37,7 @@ Detail lives in: `ARCHITECTURE_BASELINE.md` (§1–13), `PROTOCOL_SPEC.md` (§3,
 | **GM-M4-3 — strictState by role** | on for public peer / relay / storage, off for clients, explicit wins; refusals operator-actionable, seed change = one refusal + one combined `mv` | `strict-role-test` 16 (the printed command is executed and the node then starts) |
 | **GM-M4-4 — Mobile secrets** | sealed storage (XChaCha20-Poly1305, data key in react-native-encrypted-storage, key name as AAD, no plaintext fallback); every key classified; stored Shamir fragments and the never-read invite code retired and deleted at upgrade; fragments made on demand for copy-out only | `secret-storage.test` 49 (A on HEAD: 5 AsyncStorage importers, 2 fragment writes); mobile suite green; **not run on a device** |
 | **GM-M4-5 — Nonce-reuse witness** | relay RELAY_RESERVATION and storage FETCH_RESPONSE captured twice under one (key, counter) with the counter bypassed; C1^C2 == P1^P2 over 522 / 4193 bytes; B refuses | `nonce-reuse-witness-test` 16; with the boot counter removed it FAILS (both B cases: second reply, shared key) |
-| **GM-M5-1 — Topology** | own edges signed once per validity window and cached; each peer shown a keyed sample of <= 8 (fixed per address key and 24 h epoch, so fresh identities add nothing); nothing flooded, received announces stored only; only new or re-signed edges sent; routes kept alive by local rebuild from fresh edges; routes to NAMED NodeIDs / Ghost Addresses found on demand (PEER_REQUEST routeQuery, TTL 3, fan-out 8, 30/min per link); peer exchange shares only dialled peers, sampled, rate-limited per address; inbound peers kept in the cache for key rotation WITHOUT their address. Found on the way and fixed: accept-time rate limits banned the whole address for 24 h (M4-2' had armed it); the first sampler cost 9 s per round at 540 peers | capacity (same harness, lab per-address bucket): before, never above ~140 held, max lag 3.8-7.5 s, 105-113 dropped per step; after, 540 held, 0 dropped, p99 29 ms, 113 KiB/conn. `membership-disclosure-test` 11 (A: 30/30 via topology + 20 via PX on one visit, 633 signatures for 30 joins; B: 8, 0, 36). Bound: 8 per address key per epoch — not a defence against many addresses (50 keys see ~half of 540) |
+| **GM-M5-1 — Topology** | own edges signed once per validity window and cached; each peer shown a keyed sample of <= 8 (fixed per address key and 24 h epoch, so fresh identities add nothing); nothing flooded, received announces stored only; only new or re-signed edges sent; routes kept alive by local rebuild from fresh edges; routes to NAMED NodeIDs / Ghost Addresses found on demand (PEER_REQUEST routeQuery, TTL 3, fan-out 8, 30/min per link); peer exchange shares only dialled peers, sampled, rate-limited per address; inbound peers kept in the cache for key rotation WITHOUT their address. Found on the way and fixed: accept-time rate limits banned the whole address for 24 h (M4-2' had armed it); the first sampler cost 9 s per round at 540 peers | capacity (same harness, lab per-address bucket): before, never above ~140 held, max lag 3.8-7.5 s, 105-113 dropped per step; after, 540 held, 0 dropped, p99 29 ms, 113 KiB/conn. `membership-disclosure-test` (A: 30/30 via topology + 20 via PX on one visit, 633 signatures for 30 joins; B: 8 via topology, 36 signatures). **Restated 2026-10-11 (M6-1c-fix-6e): the B run's "0 via PX" was measured through a dead channel** — see "M5 disclosure figures, restated" below. Bound: 8 per address key per epoch — not a defence against many addresses (50 keys see ~half of 540) |
 | **GM-M5-2 — Fragment migration** | legacy recovery copies (stored fragments; 0.0.x wrapped key and phrase check) sealed and kept unless a matching modern bundle exists or can be rebuilt from them; otherwise the user confirms the phrase (verified by re-derivation, the bundle, or the 0.0.x check), a PBKDF2 bundle is written, then they go; manual fragments 3-of-5 with instructions and a hand-out checklist. Found: 0.0.x wrapped keys used a 32-bit hash as "SHA-256", and 0.0.x "keypairs" were random, unrelated bytes | `legacy-recovery-migration.test` 33 (install that cannot re-derive: kept, wrong phrase deletes nothing, right phrase -> same key restorable on a fresh device); mobile suite green; **never built or run** |
 | **GM-M5-3 — Deploy diagnostics** | read-only claim-log check (src/claim-log-diagnostic.ts) runs at startup on the public peer and storage peer, before the node can compact the log, and on the standalone bridge when a seed is set; the bridge says at startup that it is not a public peer | `claim-log-diagnostic-test` 14: zero fs mutations with every mutator trapped, files byte/mtime/inode-identical; real `gmp public-peer`: verdict 240 ms after launch, before the node starts; first resource sample at 1.4 s. **The Railway start command is not in the repo; `npm start` would run the standalone bridge** |
 
@@ -89,6 +89,100 @@ look the same. Each instance below was found on 2026-10-10.
 Not a control of ours but the same shape: libuv sheds connections at the
 descriptor limit and reports nothing to JavaScript. Covered by the clamp (the
 node refuses first, logged) and by the /proc ground truth in the resource log.
+
+#### M5 disclosure figures, restated (M6-1c-fix-6e)
+
+The vacuous-negative sweep found that M5's "0 via peer exchange" was read
+through a channel that could not have shown anything: every in-memory node
+arrives from 'memory.local', so the hub's per-address PEER_REQUEST limit
+answered the first member and dropped every later request, the stranger's
+included. Re-run 2026-10-11 with the channel working (hub's request interval
+lifted so the per-requester SAMPLE is what is measured). Network rows: N = 30,
+three runs, identical; sampler rows: N = 540, 100 random secrets.
+
+| Figure | Published (M5) | Restated | Positive control in the same test |
+|---|---|---|---|
+| members learned via topology, one visit | 8 | **8** with only member links; **7** when the hub also holds an outbound link (it takes one of the 8 slots). Bound unchanged: <= 8 NodeIDs per address key per epoch | the stranger's lsdb holds 7-8 members (non-zero by its own reading) |
+| members learned via peer exchange, one visit | 0 (**dead channel**) | **0**, now through a live channel | the hub's outbound peer reaches the stranger through PX (pool 1) |
+| union after 6 visits from one address | <= 8 | **8** (7 with the outbound peer) | as the two rows above |
+| guessed NodeIDs found by route query | 0 of 8 | **0 of 8** | a query for a NodeID the asker holds is answered |
+| route-query burst on one link | cut to budget | **cut**: 1 answered of 40 (9 of the 10-query burst already spent by the probes above) | answered > 0 |
+| hub signatures for 30 joins | 36 | **40-42** (1.3-1.4 per join; was 633 before M5) | counted by wrapping the signing functions; > 0 |
+| one address, daily epochs to see all 540 | median ~466 | **median 484 (282-1063)** | sampler returns 8 per pick (asserted) — a value channel, never dead |
+| one epoch, address keys to see all 540 | median ~447 (330-675) | **median 474 (298-886)** | same |
+| coverage at 10 / 50 / 100 / 200 keys | ~65 / ~half / ~74 % / ~94 % | **75 (13.9 %) / 278 (51.5 %) / 406 (75.2 %) / 504 (93.3 %)**, medians; ranges 58-80, 240-326, 356-455, 468-531 | same |
+
+Only the peer-exchange zero was measured through a dead channel; its value
+does not move. The sampler figures were never at risk (value channel); they
+move by sampling only (one secret per run before, 100 secrets now), and the
+"10 keys" figure was low: ~65 published against a median of 75. Use the
+restated column in anything user-facing.
+
+#### Fifth family member: a test that proves a negative by observing nothing (M6-1c-fix-6d)
+
+An assertion of the form "never happened / not called / no event / 0 of N"
+passes just as well when the channel that would have shown the event does not
+work. Found by the interop relay pairing (M6-1c-fix-6c): "the relay never saw
+the real NodeID" passed while the relay emitted nothing at all for relay
+sessions. The rule is now structural, not remembered (M6-1c-fix-6e):
+test/helpers/assert-absent.mjs `assertAbsent({ channel, control, absent,
+message })` throws when called without a control thunk, runs the control
+first, and reports the absence as VACUOUS (a failure) when the control
+observes nothing — the same reasoning that made the security controls
+non-optional. All 41 below (38 + the 3 repaired channels) go through it; new
+negatives are meant to. A plain assert() can still express a negative; no
+regex can find them all (two were missed this time), so the helper is the
+guard, and test/assert-absent-test.js proves its refusals.
+
+Sweep (gmp-core/test, 2026-10-11): 273 assertions matched a negative-form
+pattern; 173 are value checks (a return value, a thrown error, a byte
+comparison — the value is the observation). 100 observe an absence through a
+channel (event list, spy, log capture, connection counter, file or source
+scan). 62 already had a positive control in the same file; 38 did not. Two
+more were found only because a new control failed (the regex missed their
+wording), so the extraction is not exhaustive.
+
+| Assertion (file) | Channel | Control before | Added |
+|---|---|---|---|
+| address not banned (admission-cgnat) | reputation.isBanned | no | a banned address reports banned |
+| no bootstrap/failed, no retry-scheduled (bootstrap-role 1, 2) | log parse | no (only check-trigger shown) | client run: parser counts both |
+| no fs mutation attempted (claim-log-diagnostic) | monkeypatched fs | no | same trap catches writeFileAtomicSync |
+| no full fingerprint in report (claim-log-diagnostic) | report JSON | no | the two duplicated fingerprints are named by prefix |
+| refused claim writes nothing (claim-log) | file size | no | an accepted claim grows the file |
+| every DEFAULTS key classified (config) | key diff | no | a synthetic unclassified key is caught; 72 keys |
+| no node module imports config.js (config) | source regex | no | the regex finds the six allowed importers |
+| no NODE_ENV / argv sniffing (env-sniffing) | source regex | no (A run only, historical) | rule flags both shapes, passes a comment |
+| no plaintext IP / NodeID on disk (encryption-at-rest) | file read | no | the same file decrypts to the record |
+| impostor's message not delivered (handshake-impersonation) | target message log | no (connection channel only) | the real victim's message is delivered |
+| no half-open link left (handshake-timeout-default) | node.links | no | node held 30 links before the timeout |
+| peer list empty before connecting; stale peer dropped (lan-discovery) | getStatus / getNodeIds | no | list shows bob after connect; fresh peer listed — UNVERIFIED: never run (the suite skips at [1] without multicast loopback on UDP 49698 / 239.255.42.98; TASKS.md "LAN discovery controls") |
+| link/ imports only allowed modules (link-modules) | specifier regex | no | 14 specifiers extracted |
+| PX gives a stranger no member (membership-disclosure) | PX candidate pool | no — and the channel was DEAD: every MemoryTransport node is 'memory.local', so the hub's per-address PEER_REQUEST limit answered only the first member and dropped the stranger's request | hub interval lifted so the sample is what is measured; hub's outbound peer reaches the stranger (pool 1), still no member |
+| link.js has no net / tls import (memory-transport) | source regex | no | regexes match tcp-transport.js |
+| message never reached E (multi-hop TTL) | E 'message' event | no — and the channel could not fire: the mock payload is not sealed to E | forwarder spy: 0 arrivals at TTL 3, 1 with enough hops |
+| nothing leaked into GMP_DATA_DIR (multi-instance) | filename regex | no | pattern matches B's own state files |
+| ephemeral state writes nothing (nonce-invariant-trace I3-eph; relay-ephemeral-nonce 9) | directory listing | no | a durable claim in the same dir changes it |
+| null transport imports nothing, no Node global (null-transport) | source scan | no | both checks fire on tcp-transport.js |
+| refused session's frame never dispatched (relay-ephemeral-nonce) | relay 'message' | no | an accepted session's frame reaches the same listener |
+| relay-only host never dialled (relay-roles 2) | dial spy | no | listed bootstrap host is recorded |
+| refused host holds no reservation (relay-roles 3, 6) | relayServer stats | no | a successful reservation counts 1 |
+| no link carrying N's real NodeID at the relay (relay-roles 4, x2) | R.connections | no — and the channel was WRONG: a relay keeps a new link 'pending' in links, outside connections | checks moved to links (bounded wait for the refused link's close); control: the bootstrap host holds N's link |
+| accept counter unchanged (relay-roles 4b; role-separation-merge) | accept spy | no | counter counted the reservation's own connection |
+| no revoked NodeID in a peer list (seed-leak) | file read | no | the scan finds the current NodeID |
+| storage peer persisted no claim / peer (storage-selfhost) | files in data dir | no — an empty or wrong path would pass | the dir holds the peer's state |
+| no client names a blob (store-forward-n2b) | host tap | no | tap captures 'bucket' |
+| host read no tag / NodeID / key / plaintext (store-forward) | byte search | no | search finds "bucket" and requestId |
+| storage host saw no peer (store-forward) | connection event + counters | no | a real peer is seen (1 event, +1 claim) |
+| relay never saw the real NodeID (interop, M6-1c-fix-6c) | relay 'connection' | no — DEAD channel: no event for relay sessions | relay reports every link's NodeID; ≥1 seen, never the real one |
+
+Three of these were not merely missing a control but had a dead or wrong
+channel (peer exchange, multi-hop E, relay-roles connections), plus the
+interop case that started the sweep. In every one, the property held once it
+was observable: no product defect behind them, but until now nothing showed
+it. Covered-before examples, for the shape of a good control: the
+impersonation test's honest-victim connection; claim-log's quarantine and
+corrupt-tail lines shown in sibling cases; relay-ephemeral-nonce's peer D
+emitting 'connection'; fd-cap's closedByServer > 0.
 
 ## Bugs found and fixed along the way
 

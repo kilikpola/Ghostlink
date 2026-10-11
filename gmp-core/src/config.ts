@@ -32,7 +32,7 @@ type OptionalKey = keyof typeof OPTIONAL_KEYS;
 /** Keys that no longer exist, and why. Setting one yields a config issue. */
 const RETIRED_KEYS: Record<string, string> = {
   GMP_RATE_LIMIT_MAX_PER_IP:
-    'there is no per-IP connection count (GM-M4-2\'): behind CGNAT hundreds of subscribers share one address. ' +
+    'there is no per-IP connection count: behind CGNAT hundreds of subscribers share one address. ' +
     'Per-address admission is a token bucket: GMP_INBOUND_RATE_PER_MINUTE / GMP_INBOUND_BURST',
 };
 export type ConfigKey = DefaultKey | OptionalKey;

@@ -22,20 +22,29 @@ import { pathToFileURL } from 'url';
 
 const [core, mode, arg] = process.argv.slice(2);
 const dist = (f) => import(pathToFileURL(path.join(core, 'dist', f)).href);
-// A fresh identity per run, built from word indices (no phrase in the source).
-const { BIP39_WORDS } = await dist('bip39-english.js');
-const seed = Array.from({ length: 12 }, () => BIP39_WORDS[crypto.randomInt(BIP39_WORDS.length)]).join(' ');
 const hasFactory = fs.existsSync(path.join(core, 'dist', 'node-factory.js'));
+const hasThrowaway = fs.existsSync(path.join(core, 'dist', 'throwaway-node.js'));
+let throwaway = null;
 
+/**
+ * A fresh-identity node with no bootstrap and no LAN, via throwaway-node.js
+ * where the build has it. Older pinned baselines lack it, so for them only the
+ * identity is built here the way that build would.
+ */
 async function plainNode() {
+  if (hasThrowaway) {
+    throwaway = await (await dist('throwaway-node.js')).createThrowawayNode({ prefix: 'gmp-interop-node' });
+    return throwaway.node;
+  }
+  const { BIP39_WORDS } = await dist('bip39-english.js');
+  const seed = Array.from({ length: 12 }, () => BIP39_WORDS[crypto.randomInt(BIP39_WORDS.length)]).join(' ');
   const opts = { port: 0, disableBootstrap: true, lanDiscovery: false };
-  let node;
-  if (hasFactory) node = (await dist('node-factory.js')).createGMPNode(opts);
-  else node = new (await dist('link.js')).GMPNode(opts);
+  const node = hasFactory ? (await dist('node-factory.js')).createGMPNode(opts) : new (await dist('link.js')).GMPNode(opts);
   node.on('error', () => {});
   await node.loadIdentity(seed);
   return node;
 }
+const closeNode = (node) => { if (throwaway) throwaway.close(); else node.close(); };
 
 if (mode === 'listen') {
   let node, manager = null;
@@ -43,7 +52,8 @@ if (mode === 'listen') {
     // The shipped public-peer construction path.
     const ep = await dist('entry-points.js');
     const { GMPNodeManager } = await dist('gmp-node-manager.js');
-    manager = new GMPNodeManager(ep.cliManagerOptions({ seedPhrase: seed, isPublic: true, env: { PORT: '0' }, configuredPort: undefined }));
+    const { generateSeedPhrase } = await dist('seed-phrase.js');
+    manager = new GMPNodeManager(ep.cliManagerOptions({ seedPhrase: generateSeedPhrase(), isPublic: true, env: { PORT: '0' }, configuredPort: undefined }));
     await manager.start();
     node = manager.node;
     process.stdout.write(`STRICT ${manager.config.GMP_STRICT_STATE} MINPEERS ${manager.config.GMP_MIN_PEERS}\n`);
@@ -66,7 +76,7 @@ if (mode === 'listen') {
     }
   }, 50).unref();
   process.stdout.write(`PORT ${node.port}\n`);
-  process.on('SIGTERM', async () => { if (manager) await manager.stop(); else node.close(); process.exit(0); });
+  process.on('SIGTERM', async () => { if (manager) await manager.stop(); else closeNode(node); process.exit(0); });
 } else if (mode === 'dial') {
   const node = await plainNode();
   const t0 = Date.now();
@@ -89,7 +99,7 @@ if (mode === 'listen') {
     res = { handshake: false, error: e.message };
   }
   process.stdout.write(`RESULT ${JSON.stringify(res)}\n`);
-  node.close();
+  closeNode(node);
   process.exit(0);
 } else if (mode === 'reserve') {
   const node = await plainNode();
@@ -102,7 +112,7 @@ if (mode === 'listen') {
   }
   process.stdout.write(`RESULT ${JSON.stringify(res)}\n`);
   await new Promise((r) => setTimeout(r, 300)); // let the relay print what it saw
-  node.close();
+  closeNode(node);
   process.exit(0);
 } else {
   console.error(`unknown mode ${mode}`);

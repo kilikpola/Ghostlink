@@ -195,10 +195,32 @@ upgrade install over a build that has data, and confirmation that
 react-native-encrypted-storage's native module links (it was declared but
 never imported before).
 
+## Deploy verification: `gmp probe` (every deploy, every seed change)
+
+**Status:** standing step.
+
+After each Railway deploy, and after any change to GMP_SEED_PHRASE:
+
+    node gmp-core/dist/cli.js probe hayabusa.proxy.rlwy.net 58516 \
+      --expect 562c487c1a10a649179dd7b131527344c9f6bd65e7ebc800b6570dd496371f65b25aec43d1d1eb3937de2bf74e3ce45f7777e6375561f26ec26215f31301ea3a
+
+The --expect value is the nodeId in data/public-peers.json for that host.
+It runs a real GMP handshake from a throwaway identity (temporary data dir,
+removed; this machine's node state is never touched) and exits:
+0 = the host answered a handshake as the listed NodeID; 2 = nothing accepts
+TCP (deploy down, proxy port wrong); 3 = TCP up but no GMP handshake (the
+wrong process — e.g. the standalone bridge — or still starting); 4 = a
+different identity answered (seed variable wrong, or a rotation not made /
+not expected). A deploy is not done until this exits 0. First run,
+2026-10-11: OK, connect 452 ms, handshake 1290 ms, 291 B sent / 285 B
+received. Test: test/probe-test.js (against a local public peer).
+
 ## REVOKED: public peer NodeID 52ab5611… (seed disclosed)
 
-**Opened:** 2026-10-10 (M6-1c-fix-0). **Status:** rotation prepared; waits on
-the operator setting the new GMP_SEED_PHRASE in Railway's Variables.
+**Opened:** 2026-10-10 (M6-1c-fix-0). **Status:** rotated on Railway —
+verified 2026-10-11 with `gmp probe ... --expect 562c487c…`: the live host
+answers as the new NodeID (still the 8ba4f3a build until the next push).
+Open: delete the generated seed file (`shred -u ~/ghostlink-public-peer-seed.txt`).
 
 The Railway public peer's GMP_SEED_PHRASE was disclosed in a chat transcript.
 It is permanently compromised: whoever holds it can impersonate the peer and

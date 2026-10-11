@@ -408,6 +408,10 @@ async function main(): Promise<void> {
       }
       break;
     }
+    case 'probe': {
+      process.exit(await probeCommand(args.slice(1)));
+      break;
+    }
     default: {
       console.error(`Unknown command: ${command}`);
       printHelp();
@@ -416,17 +420,81 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * `gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]`
+ * The deploy verification step (docs/TASKS.md). Exit codes, for scripts:
+ *   0 handshake completed (and the NodeID matched --expect, if given)
+ *   1 usage error   2 TCP connect failed   3 handshake failed   4 NodeID mismatch
+ */
+async function probeCommand(argv: string[]): Promise<number> {
+  const usage = 'Usage: gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]';
+  const positional: string[] = [];
+  let expect: string | null = null;
+  let timeoutMs = 10_000;
+  let tls = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--expect') expect = (argv[++i] || '').toLowerCase();
+    else if (a === '--timeout') timeoutMs = Number(argv[++i]);
+    else if (a === '--tls') tls = true;
+    else if (a.startsWith('--')) { console.error(`Unknown option ${a}\n${usage}`); return 1; }
+    else positional.push(a);
+  }
+  const [host, portArg] = positional;
+  const port = Number(portArg);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535 || positional.length !== 2 || !(timeoutMs > 0)) {
+    console.error(usage);
+    return 1;
+  }
+  if (expect !== null && !/^[0-9a-f]{128}$/.test(expect)) {
+    console.error(`--expect needs a full 128-hex NodeID (got ${expect.length} characters)\n${usage}`);
+    return 1;
+  }
+
+  const { probe } = await import('./probe.js');
+  console.log(`probe ${host}:${port} (fresh throwaway identity, temporary data dir)`);
+  const r = await probe(host, port, { timeoutMs, tls });
+  console.log(`  TCP connect    ${r.connectMs === null ? 'FAILED' : `${r.connectMs} ms`}${r.remoteAddress ? ` (${r.remoteAddress})` : ''}`);
+  console.log(`  handshake      ${r.ok ? `completed in ${r.handshakeMs} ms` : r.stage === 'connect' ? 'not attempted' : 'FAILED'}`);
+  console.log(`  bytes          sent ${r.txBytes}, received ${r.rxBytes}`);
+  console.log(`  peer NodeID    ${r.nodeId ?? '-'}`);
+  console.log(`  Ghost Address  ${r.ghostAddress ?? '-'}`);
+  console.log(`  throwaway      ${r.throwawayFiles.length} state file(s) written to its temporary dir, now removed`);
+  if (!r.ok) {
+    console.log(`RESULT ${r.stage === 'connect' ? 'CONNECT FAILED' : 'HANDSHAKE FAILED'}: ${r.error}`);
+    return r.stage === 'connect' ? 2 : 3;
+  }
+  if (expect !== null && r.nodeId !== expect) {
+    console.log('');
+    console.log('  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    console.log('  !!  NODEID MISMATCH: the host answering is NOT the expected node  !!');
+    console.log('  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    console.log(`  expected  ${expect}`);
+    console.log(`  answered  ${r.nodeId}`);
+    console.log('RESULT NODEID MISMATCH');
+    return 4;
+  }
+  console.log(`RESULT OK${expect !== null ? ' (NodeID matches --expect)' : ''}`);
+  return 0;
+}
+
 function printHelp(): void {
   console.log('GhostMesh Protocol (GMP) Operator CLI');
   console.log('\nUsage:');
   console.log('  gmp start           Starts the GMP node and client bridge');
   console.log('  gmp public-peer     Starts the node as a Public Peer');
-  console.log('  gmp storage-peer    Starts a self-hosted store-and-forward mailbox (GM-N2)');
+  console.log('  gmp storage-peer    Starts a self-hosted store-and-forward mailbox');
   console.log('  gmp status          Queries local node metrics and prints status box');
   console.log('  gmp peers           Lists currently connected peers');
   console.log('  gmp rotate-key      Walks through seed generation and rotating identity keys');
   console.log('  gmp ping <nodeId>   Pings a NodeID through the multi-hop mesh');
   console.log('  gmp generate-seed   Generates a cryptographically random 12-word seed phrase');
+  console.log('  gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]');
+  console.log('                      Real GMP handshake from a throwaway identity (temp dir, removed;');
+  console.log('                      never touches this node\'s data). Prints connect time, bytes,');
+  console.log('                      NodeID and Ghost Address. Exit 0 ok, 2 connect failed,');
+  console.log('                      3 handshake failed, 4 NodeID differs from --expect.');
+  console.log('                      Deploy check: gmp probe <public peer> <port> --expect <its NodeID>');
 }
 
 main().catch((err: unknown) => {

@@ -1,11 +1,8 @@
 /**
  * GhostLink Mobile — Root App Entry Point
  *
- * React Navigation native stack with conditional auth flow.
- * ghostlink:// URLs open screens through React Navigation's linking config.
- * Global state via AppContext. Theme system matching the web app
- * (phantom / neon / blood / ocean / cyber). Push notification setup.
- * Dark StatusBar styling.
+ * React Navigation native stack with conditional auth flow, ghostlink:// deep
+ * links, global state via AppContext, and push notification setup.
  */
 
 import React, {useEffect, useMemo} from 'react';
@@ -23,12 +20,8 @@ import RootNavigator from './src/navigation/MainNavigator';
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Any web page or app can fire a ghostlink:// URL, and React Navigation passes
- * its query string through as route params. So nothing reachable from here may
- * act on its own: `call/:peerId` used to be mapped, and
- * ghostlink://call/x?peer=y&video=true opened the Call screen, which turned on
- * the camera and microphone and showed a connected call. Calls are started
- * from inside a conversation only.
+ * Any page or app can fire a ghostlink:// URL with arbitrary params, so no
+ * deep link may act on its own. Calls start only from inside a conversation.
  */
 const DEEP_LINK_CONFIG = {
   prefixes: ['ghostlink://', 'https://ghostlink.app'],
@@ -53,20 +46,8 @@ const DEEP_LINK_CONFIG = {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Bring up push notifications, or carry on without them.
- *
- * react-native-push-notification pulls in firebase-messaging, and its
- * configure() asks Firebase for a token. With no google-services.json in the
- * build — which is the case today — that throws "Default FirebaseApp is not
- * initialized in this process" out of Java, which React Native surfaces as an
- * unhandled exception and Android reports as "GhostLink closed because this app
- * has a bug". It happens during first render, so the app dies before it draws
- * anything.
- *
- * Notifications are not load-bearing: every screen works without them, and the
- * handlers below are still placeholders. So the module is required lazily and
- * the whole setup is best-effort. When Firebase is configured this starts
- * working with no further change; until then the app boots.
+ * Best-effort push notification setup, required lazily: without a Firebase
+ * config the module throws at configure() and would crash the app on launch.
  */
 function configurePushNotifications() {
   let PushNotification;

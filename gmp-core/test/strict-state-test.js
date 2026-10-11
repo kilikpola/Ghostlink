@@ -1,17 +1,7 @@
 /**
- * GMP_STRICT_STATE — what happens to a state file that exists but will not
- * authenticate.
- *
- * Discarding one silently is how replay protection disappears without anyone
- * noticing: the nonce store loses every high-water mark, and a peer can then
- * reconnect and replay counters this node already accepted. The default is
- * still to continue (a corrupt file must not lock a user out of their own
- * client), but it is now an ERROR rather than a WARN, and strict mode refuses
- * outright.
- *
- * The two easy regressions this guards: load()'s broad try/catch swallowing the
- * refusal and starting fresh anyway, and strict mode escalating cases that are
- * perfectly normal — a missing file, or a healthy one.
+ * GMP_STRICT_STATE and state files that will not authenticate: by default an
+ * ERROR and continue; strict mode refuses. Also checks the refusal is not
+ * swallowed by load(), and that a missing or healthy file is not escalated.
  */
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import fs from 'fs';
@@ -21,7 +11,6 @@ import path from 'path';
 const GMP = new URL('../dist/', import.meta.url).href;
 const { NonceStore } = await import(`${GMP}nonce-store.js`);
 const { PeerCache }  = await import(`${GMP}peer-cache.js`);
-const config         = (await import(`${GMP}config.js`)).default;
 
 const SEED = 'strict mode probe seed';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-strict-'));
@@ -55,25 +44,23 @@ const freshCache = () => {
   return f;
 };
 
-console.log('\n[1] Default (GMP_STRICT_STATE off): logs and continues');
-config.GMP_STRICT_STATE = false;
+console.log('\n[1] Default (strictState off): logs and continues');
 let threw = false;
-try { new NonceStore({ stateFile: freshNonce(), seedPhrase: SEED }).load(); } catch { threw = true; }
+try { new NonceStore({ stateFile: freshNonce(), seedPhrase: SEED, strictState: false }).load(); } catch { threw = true; }
 ok('nonce store starts fresh instead of throwing', !threw);
 threw = false;
-try { new PeerCache({ filePath: freshCache(), seedPhrase: SEED }); } catch { threw = true; }
+try { new PeerCache({ filePath: freshCache(), seedPhrase: SEED, strictState: false }); } catch { threw = true; }
 ok('peer cache starts fresh instead of throwing', !threw);
 
-console.log('\n[2] GMP_STRICT_STATE on: refuses');
-config.GMP_STRICT_STATE = true;
+console.log('\n[2] strictState on: refuses');
 let msg = '';
 threw = false;
-try { new NonceStore({ stateFile: freshNonce(), seedPhrase: SEED }).load(); } catch (e) { threw = true; msg = e.message; }
+try { new NonceStore({ stateFile: freshNonce(), seedPhrase: SEED, strictState: true }).load(); } catch (e) { threw = true; msg = e.message; }
 ok('nonce store refuses a state file it cannot authenticate', threw);
 ok('and explains the consequence', /could not be authenticated/.test(msg) && /replay protection/.test(msg));
 
 threw = false; msg = '';
-try { new PeerCache({ filePath: freshCache(), seedPhrase: SEED }); } catch (e) { threw = true; msg = e.message; }
+try { new PeerCache({ filePath: freshCache(), seedPhrase: SEED, strictState: true }); } catch (e) { threw = true; msg = e.message; }
 ok('peer cache refuses a cache it cannot authenticate', threw);
 ok('and explains why', /could not be authenticated/.test(msg));
 
@@ -84,12 +71,12 @@ const peer = new Uint8Array(64); peer.fill(0xBB);
 gs.checkNonce(peer, 'fp', 7);
 gs.close();
 threw = false;
-try { new NonceStore({ stateFile: good, seedPhrase: SEED }).load(); } catch { threw = true; }
+try { new NonceStore({ stateFile: good, seedPhrase: SEED, strictState: true }).load(); } catch { threw = true; }
 ok('strict mode loads a valid state file normally', !threw);
 
 console.log('\n[4] No file at all is not an error');
 threw = false;
-try { new NonceStore({ stateFile: path.join(dir, 'absent.json'), seedPhrase: SEED }).load(); } catch { threw = true; }
+try { new NonceStore({ stateFile: path.join(dir, 'absent.json'), seedPhrase: SEED, strictState: true }).load(); } catch { threw = true; }
 ok('a missing state file still starts fresh under strict mode', !threw);
 
 console.log(`\n  Results: ${pass} passed, ${fail} failed`);

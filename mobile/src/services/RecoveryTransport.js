@@ -26,10 +26,7 @@ class RecoveryTransport {
   _handleMessage(peerId, msg) {
     if (!msg?.type) return;
 
-    // A reply only counts from the peer the request went to. Matching on the
-    // id alone let any connected peer answer a request meant for another —
-    // ids are a timestamp plus a counter, so easy to guess — and so supply the
-    // fragment a recovery was waiting on.
+    // Only the peer the request went to may answer it (ids are guessable).
     const pending = msg.id ? this._pendingRequests.get(msg.id) : null;
     if (pending && pending.peerId === peerId) {
       clearTimeout(pending.timer);

@@ -1,15 +1,8 @@
 /**
  * GhostLink Mobile — WebRTC Service
  *
- * Manages WebRTC peer connections on React Native using `react-native-webrtc`.
- *
- * Install peer dependency:
- *   npm install react-native-webrtc
- *
- * iOS: cd ios && pod install
- * Android: auto-linked via React Native CLI.
- *
- * This module mirrors the web RTCPeerManager connection lifecycle:
+ * Manages WebRTC peer connections on React Native using `react-native-webrtc`,
+ * mirroring the web RTCPeerManager lifecycle:
  *   createConnection -> offer/answer exchange -> ICE negotiation -> data channel open
  *
  * @module WebRTCService
@@ -170,19 +163,9 @@ class WebRTCService extends Emitter {
     /** @private Our own id, needed to derive symmetric keys. */
     this._localPeerId = options.localPeerId || null;
     /**
-     * Where the Ghost Mesh bridge lives.
-     *
-     * This used to be hardcoded to ws://localhost:3002, which cannot work on a
-     * phone: localhost is the handset, and there is no bridge running on it —
-     * embedded GMP is not in this build. The connection therefore always
-     * failed, _gmpActive stayed false, and every message silently took the
-     * direct WebRTC path instead. The web client has always been able to point
-     * at a remote bridge (`?bridge=192.168.1.15:3002`); mobile now can too.
-     *
-     * One bridge process serves one GMP identity — `manager` in gmp-bridge.ts
-     * is per-process and the first `start` wins — so a phone must not share the
-     * desktop's bridge or the two become the same node rather than two peers
-     * that can talk. Point it at a bridge started with the phone's own seed.
+     * The Ghost Mesh bridge URL (no embedded GMP in this build). One bridge
+     * serves one identity, so point it at a bridge started with this phone's
+     * own seed, not the desktop's.
      */
     this._gmpBridgeUrl = options.gmpBridgeUrl || null;
     this._gmpSeedPhrase = options.gmpSeedPhrase || null;
@@ -560,10 +543,8 @@ class WebRTCService extends Emitter {
     const dc = session.dataChannel;
     if (dc.readyState !== 'open') return false;
 
-    // Direct path. DTLS protects the hop, not the conversation, so the payload
-    // is sealed here or it does not go. Returning false lets the caller leave
-    // the message unsent rather than show it delivered under a padlock it
-    // never earned.
+    // Direct path: DTLS protects only the hop, so the payload is sealed here or
+    // not sent at all.
     const keys = this._sessionKeys.get(peerId);
     if (!keys) {
       console.warn(`[GhostLink:WebRTC] no session with ${peerId} yet; holding the message`);
@@ -687,16 +668,7 @@ class WebRTCService extends Emitter {
 export {WebRTCService};
 
 /**
- * The app's transport.
- *
- * The default export used to be the class, while every caller treated it as an
- * instance — CallScreen called WebRTCService.createConnection(), which is an
- * instance method, so it was undefined and every call threw. Nothing ever
- * constructed it either, so the constructor never ran and the Ghost Mesh
- * connection it sets up never even attempted.
- *
- * One transport per app, so the default export is that instance. The class
- * stays exported for RecoveryScreen, which deliberately runs a throwaway
- * connection of its own.
+ * The app's single transport instance. The class is also exported for
+ * RecoveryScreen's throwaway connection.
  */
 export default new WebRTCService();

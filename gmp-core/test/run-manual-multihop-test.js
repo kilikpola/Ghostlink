@@ -1,5 +1,5 @@
 /**
- * GMP Phase 3 — Manual Multi-hop Relay Test
+ * GMP Manual Multi-hop Relay Test
  *
  * Spawns 3 real GMP nodes (A, B, C) on localhost.
  * Topology:  A ←→ B ←→ C   (A and C have NO direct link)
@@ -13,8 +13,7 @@
  *
  * Run:  node test/run-manual-multihop-test.js
  */
-
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import crypto from 'crypto';
 import readline from 'readline';
 
@@ -71,9 +70,9 @@ async function main() {
 
   // ── Step 1: Boot 3 real nodes ──────────────────────────────────
   console.log('[1/7] Booting three GMP nodes on localhost…');
-  const nodeA = new GMPNode({ port: 49750 });
-  const nodeB = new GMPNode({ port: 49751 });
-  const nodeC = new GMPNode({ port: 49752 });
+  const nodeA = createGMPNode({ port: 49750 });
+  const nodeB = createGMPNode({ port: 49751 });
+  const nodeC = createGMPNode({ port: 49752 });
 
   await nodeA.loadIdentity('manual-test-node-A-identity-phrase');
   await nodeB.loadIdentity('manual-test-node-B-relay-identity');

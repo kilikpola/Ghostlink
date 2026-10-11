@@ -1,16 +1,11 @@
 /**
- * Bridge ↔ frontend contract test for identity-based connection.
- *
- * The browser never touches GMP directly — everything it knows about the mesh
- * arrives over the bridge WebSocket. This exercises that wire protocol the way
- * index.html actually uses it:
+ * Bridge ↔ frontend contract for identity-based connection, as index.html uses it:
  *
  *   start        → 'started' carries nodeId AND ghostAddress
  *   resolve      → 'resolve-result' with the requestId echoed back
  *   connectNode  → 'connect-result' for a peer identified only by NodeID
  *
- * Two bridges are started on different ports with different seeds, standing in
- * for two users' machines. They find each other by address, not by IP.
+ * Two bridges with different seeds find each other by address, not by IP.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data

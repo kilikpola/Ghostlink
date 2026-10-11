@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,17 +15,6 @@ let testsRun = 0;
 let testsPassed = 0;
 let testsFailed = 0;
 
-function assert(condition, message) {
-  testsRun++;
-  if (condition) {
-    testsPassed++;
-    console.log(`  ✓ ${message}`);
-  } else {
-    testsFailed++;
-    console.error(`  ✗ ${message}`);
-  }
-}
-
 function assertEqual(actual, expected, message) {
   testsRun++;
   if (actual === expected) {
@@ -35,10 +24,6 @@ function assertEqual(actual, expected, message) {
     testsFailed++;
     console.error(`  ✗ ${message} (expected ${expected}, got ${actual})`);
   }
-}
-
-async function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 const tempCachePath = path.join(__dirname, 'data', 'temp-health-cache.json');
@@ -78,7 +63,7 @@ async function runTests() {
 async function testMetricsTracking() {
   console.log('\n=== Test 1: Metrics Tracking ===');
 
-  const node = new GMPNode({ port: 49970, peerCachePath: tempCachePath, disableBootstrap: true });
+  const node = createGMPNode({ port: 49970, peerCachePath: tempCachePath, disableBootstrap: true });
   await node.loadIdentity('health metrics');
   await node.listen();
 
@@ -104,7 +89,7 @@ async function testMetricsTracking() {
 async function testPeriodicChecksRebootstrap() {
   console.log('\n=== Test 2: Periodic Checks and Rebootstrap ===');
 
-  const node = new GMPNode({ port: 49971, peerCachePath: tempCachePath, disableBootstrap: true });
+  const node = createGMPNode({ port: 49971, peerCachePath: tempCachePath, disableBootstrap: true });
   await node.loadIdentity('health checks');
   await node.listen();
 
@@ -124,7 +109,7 @@ async function testPeriodicChecksRebootstrap() {
 async function testRoutingDegradation() {
   console.log('\n=== Test 3: Routing Degradation Check ===');
 
-  const node = new GMPNode({ port: 49972, peerCachePath: tempCachePath, disableBootstrap: true });
+  const node = createGMPNode({ port: 49972, peerCachePath: tempCachePath, disableBootstrap: true });
   await node.loadIdentity('health degradation');
   await node.listen();
 

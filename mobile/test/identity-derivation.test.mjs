@@ -1,17 +1,13 @@
 /**
- * A recovery phrase must recover the identity — not just the address.
+ * A recovery phrase must recover the messaging keypair, not just the address.
  *
- * The messaging keypair used to be drawn at random and kept only in the
- * keystore, so entering your phrase on a new device gave you your Ghost
- * Address back and a different messaging key. Contacts holding the old public
- * key could no longer seal anything to you.
- *
- * react-native-keychain is stubbed because it cannot load outside the app; the
- * stub is generated from the real source each run so this cannot drift.
+ * react-native-keychain is stubbed; the stub is generated from the real source
+ * each run.
  */
 import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
+import {FIXTURE_A} from '../../test/helpers/fixture-phrases.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const real = path.join(here, '..', 'src', 'utils', 'crypto.js');
@@ -38,7 +34,7 @@ try {
 let pass = 0, fail = 0;
 const ok = (c, m) => { c ? (pass++, console.log('  ✓ ' + m)) : (fail++, console.error('  ✗ ' + m)); };
 
-const PHRASE = ['abuse','morning','urban','captain','vendor','olympic','forest','unlock','flavor','ocean','vibrant','elite'];
+const PHRASE = [...FIXTURE_A];
 const OTHER  = [...PHRASE.slice(0, 11), 'zebra'];
 
 const a = await CryptoEngine.deriveIdentityKeyPair(PHRASE);

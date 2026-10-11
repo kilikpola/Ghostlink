@@ -4,6 +4,7 @@ import path from 'path';
 import config from './config.js';
 import logger from './logger.js';
 import type { NodeIdentity, KeyRotationPayload } from './types.js';
+import type { RelayStats } from './relay/relay-server.js';
 
 interface Registry {
   'peers.current': number;
@@ -29,14 +30,7 @@ interface Registry {
   'bootstrap.status': string;
 }
 
-/**
- * The counters that can actually be incremented.
- *
- * Registry also holds a string ('bootstrap.status') and a nullable timestamp,
- * and `+=` over the full key union collapses to never. Narrowing to the plain
- * number entries makes the += legal and also makes incrementing a status
- * string a compile error rather than a silent no-op.
- */
+/** Registry keys holding numbers, so `+=` type-checks and status strings cannot be incremented. */
 type NumericRegistryKey = {
   [K in keyof Registry]: Registry[K] extends number ? K : never;
 }[keyof Registry];
@@ -51,14 +45,11 @@ interface LinkInstance {
 
 interface NodeInstance {
   identity?: NodeIdentity;
+  /** Present on nodes running the relay tier. */
+  relayServer?: { getStats(): RelayStats } | null;
   connections: Map<string, LinkInstance>;
   virtualConnections: Map<string, LinkInstance>;
-  /**
-   * RoutingTable's real surface. This used to be declared as `{ table: Map }`,
-   * but RoutingTable keeps its routes in a private `routes` field and exposes
-   * no `table` at all — so the size lookup below always read undefined and
-   * silently fell back, and the ping path would have thrown on `.table.get`.
-   */
+  /** RoutingTable's public surface. */
   routingTable?: {
     getAllRoutes(): Array<{ hopCount: number }>;
     getBestRoute(dest: string): { nextHopNodeId: string; hopCount: number } | null;
@@ -69,6 +60,8 @@ interface NodeInstance {
 
 interface MetricsJSON {
   timestamp: string;
+  /** Relay counters; null when the relay is off. */
+  relay: RelayStats | null;
   node: {
     nodeId: string;
     uptimeSeconds: number;
@@ -198,25 +191,10 @@ class MetricsTracker {
         return;
       }
 
-      // The loopback bind stops a *remote* host, but a browser on this machine
-      // connects from 127.0.0.1 too, so isLocal alone does not stop a web page.
-      // This server exposes POST /rotate-key, which replaces the node's whole
-      // identity with a caller-supplied seed phrase and writes it to disk — so
-      // a page the user merely visits could take over their mesh identity with
-      // a seed the attacker knows. Two browser-only signals close that:
-      //
-      //   Host — a page resolving evil.com -> 127.0.0.1 (DNS rebinding) still
-      //     sends `Host: evil.com`. Requiring a loopback Host rejects it. The
-      //     CLI's http client sends `Host: 127.0.0.1:<port>`, so it is fine.
-      //
-      //   Origin — a browser attaches an Origin to any cross-origin fetch (and
-      //     Chrome to same-origin POSTs). A non-browser client sends none, so
-      //     the presence of Origin here means a page is calling: refuse it.
-      //
-      // Mutating endpoints additionally require Content-Type: application/json,
-      // which forces a cross-origin browser request to preflight (OPTIONS) —
-      // unanswered here — instead of slipping through as a CORS "simple"
-      // text/plain POST that JSON.parse would still read.
+      // A local browser page also connects from 127.0.0.1, and POST /rotate-key
+      // replaces the node's identity. So require a loopback Host (defeats DNS
+      // rebinding), refuse any request carrying Origin (only browsers send it),
+      // and require JSON on mutating endpoints (forces an unanswered preflight).
       const hostHeader = (req.headers.host || '').toLowerCase();
       const hostName = hostHeader.replace(/:\d+$/, '');
       const hostAllowed = hostName === '127.0.0.1' || hostName === 'localhost' ||
@@ -313,6 +291,7 @@ class MetricsTracker {
 
     return {
       timestamp: new Date().toISOString(),
+      relay: this.nodeInstance && this.nodeInstance.relayServer ? this.nodeInstance.relayServer.getStats() : null,
       node: {
         nodeId,
         uptimeSeconds,
@@ -431,10 +410,8 @@ class MetricsTracker {
             fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
           }
           fileConfig.GMP_SEED_PHRASE = newSeedPhrase;
-          // This file now holds the plaintext seed phrase — the root secret every
-          // key is derived from — so it must not be readable by other local
-          // users. writeFileSync's mode only applies on creation, so tighten an
-          // existing file too.
+          // The file holds the plaintext seed phrase: tighten an existing file
+          // too, since writeFileSync's mode only applies on creation.
           fs.writeFileSync(configPath, JSON.stringify(fileConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
           fs.chmodSync(configPath, 0o600);
         } catch (e) {
@@ -457,10 +434,7 @@ class MetricsTracker {
     let body = '';
     req.on('data', (chunk: Buffer) => { body += chunk; });
     req.on('end', async () => {
-      // Hoisted so the catch below can tear them down. If sendMessage threw
-      // (e.g. no route), the catch answered 500 but left the 10s timeout armed;
-      // it then called writeHead on the finished response, and the resulting
-      // ERR_HTTP_HEADERS_SENT thrown from a timer crashed the whole node.
+      // Hoisted so the catch can disarm the timeout before answering.
       let cleanup: (() => void) | null = null;
       try {
         const { targetNodeId } = JSON.parse(body) as PingBody;

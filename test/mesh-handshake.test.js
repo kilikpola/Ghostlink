@@ -1,21 +1,9 @@
 /**
- * Regression tests for the Ghost Mesh identity handshake in P2PConnector.
+ * Ghost Mesh identity handshake in P2PConnector:
  *
- * Two properties are asserted here, both of which were broken and neither of
- * which is visible from the UI:
- *
- *   - a session key is an ECDH product or it does not exist. The handshake
- *     used to fall back to SHA-256(ourFingerprint + ':' + theirFingerprint)
- *     whenever ECDH failed. Both halves are public values, so that key was
- *     known to anyone who had seen the two fingerprints — and the *remote*
- *     side chose when it was used, because any publicKeyHex that failed to
- *     import sent derivation down the catch. A peer could therefore downgrade
- *     the session to no encryption at all, silently.
- *
- *   - a fingerprint is bound to the key it is announced with. A fingerprint is
- *     defined as a truncated SHA-256 of the public key, but nothing checked
- *     that, so a peer could announce its own key under somebody else's
- *     fingerprint and the session would open under the wrong identity.
+ *   - a session key is an ECDH product or the connection is refused (no
+ *     fallback derived from public fingerprints)
+ *   - an announced fingerprint must be the truncated SHA-256 of the announced key
  *
  * Run with: node test/mesh-handshake.test.js
  */

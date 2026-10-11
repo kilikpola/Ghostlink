@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import crypto from 'crypto';
 
 let testsRun = 0;
@@ -86,9 +86,9 @@ async function runTests() {
 async function testTopologyPropagationAndE2E() {
   console.log('\n=== Test 1, 2, 3: Topology, E2E Encryption, and Key Isolation ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({ port: 0 });
-  const nodeC = new GMPNode({ port: 0 });
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({ port: 0 });
+  const nodeC = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('seed A');
   await nodeB.loadIdentity('seed B');
@@ -102,12 +102,16 @@ async function testTopologyPropagationAndE2E() {
   await nodeA.dial('127.0.0.1', nodeB.port);
   await nodeB.dial('127.0.0.1', nodeC.port);
 
-  // Give topology announcements time to propagate
   await delay(600);
 
   const hexA = nodeA.identity.nodeIdHex;
   const hexB = nodeB.identity.nodeIdHex;
   const hexC = nodeC.identity.nodeIdHex;
+
+  // Routes beyond a neighbour are found on demand for a named destination;
+  // nothing is flooded.
+  await nodeA.topologyManager.queryRoute(hexC);
+  await nodeC.topologyManager.queryRoute(hexA);
 
   const routeAtoC = nodeA.routingTable.getBestRoute(hexC);
   const routeCtoA = nodeC.routingTable.getBestRoute(hexA);
@@ -189,9 +193,9 @@ async function testTopologyPropagationAndE2E() {
 async function testLoopPrevention() {
   console.log('\n=== Test 4: Loop Prevention ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({ port: 0 });
-  const nodeC = new GMPNode({ port: 0 });
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({ port: 0 });
+  const nodeC = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('loop A');
   await nodeB.loadIdentity('loop B');
@@ -207,21 +211,24 @@ async function testLoopPrevention() {
 
   await delay(600);
 
+  // Count TOPOLOGY_ANNOUNCE receptions (TopologyManager emits no 'route-added').
   let announceCount = 0;
-  const countAnnounces = () => {
-    announceCount++;
-  };
-
-  nodeA.topologyManager.on('route-added', countAnnounces);
-  nodeB.topologyManager.on('route-added', countAnnounces);
-  nodeC.topologyManager.on('route-added', countAnnounces);
+  for (const node of [nodeA, nodeB, nodeC]) {
+    const original = node.topologyManager.handleReceivedAnnounce.bind(node.topologyManager);
+    node.topologyManager.handleReceivedAnnounce = (announce, link) => {
+      announceCount++;
+      return original(announce, link);
+    };
+  }
 
   nodeA.topologyManager.handleLinkEstablished(nodeB.identity.nodeIdHex);
 
+  await delay(500);
   const initialCount = announceCount;
   await delay(500);
   const finalCount = announceCount;
 
+  assert(initialCount > 0, `The re-announce propagated (${initialCount} receptions)`);
   assertEqual(initialCount, finalCount, "Topology propagation terminated successfully (no infinite loops)");
 
   nodeA.close();
@@ -232,11 +239,11 @@ async function testLoopPrevention() {
 async function testTTLExpiry() {
   console.log('\n=== Test 5: TTL Expiry ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({ port: 0 });
-  const nodeC = new GMPNode({ port: 0 });
-  const nodeD = new GMPNode({ port: 0 });
-  const nodeE = new GMPNode({ port: 0 });
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({ port: 0 });
+  const nodeC = createGMPNode({ port: 0 });
+  const nodeD = createGMPNode({ port: 0 });
+  const nodeE = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('ttl A');
   await nodeB.loadIdentity('ttl B');
@@ -256,6 +263,9 @@ async function testTTLExpiry() {
   await nodeD.dial('127.0.0.1', nodeE.port); // D-E
 
   await delay(800);
+  // A asks for E; B and C learn their onward routes by forwarding the query
+  //, which is what lets the frame get as far as D.
+  assert(await nodeA.topologyManager.queryRoute(nodeE.identity.nodeIdHex), 'A finds a 4-hop route to E on demand');
   
   let ttlExpiredEmitted = false;
   let expiredNode = null;
@@ -302,8 +312,8 @@ async function testTTLExpiry() {
 async function testNoRoute() {
   console.log('\n=== Test 6: No Route Handling ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({ port: 0 });
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('noroute A');
   await nodeB.loadIdentity('noroute B');
@@ -339,9 +349,9 @@ async function testNoRoute() {
 async function testLinkWithdrawal() {
   console.log('\n=== Test 7: Link Withdrawal Propagation ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({ port: 0 });
-  const nodeC = new GMPNode({ port: 0 });
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({ port: 0 });
+  const nodeC = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('withdraw A');
   await nodeB.loadIdentity('withdraw B');
@@ -355,6 +365,8 @@ async function testLinkWithdrawal() {
   await nodeB.dial('127.0.0.1', nodeC.port); // B-C
 
   await delay(600);
+  await nodeA.topologyManager.queryRoute(nodeC.identity.nodeIdHex); // on demand
+  await nodeC.topologyManager.queryRoute(nodeA.identity.nodeIdHex);
 
   assert(nodeA.routingTable.getBestRoute(nodeC.identity.nodeIdHex) !== null, "C is initially reachable from A");
 
@@ -388,13 +400,13 @@ async function testLinkWithdrawal() {
 async function testForwardingRateLimit() {
   console.log('\n=== Test 8: Forwarding Rate Limit ===');
 
-  const nodeA = new GMPNode({ port: 0 });
-  const nodeB = new GMPNode({
+  const nodeA = createGMPNode({ port: 0 });
+  const nodeB = createGMPNode({
     port: 0,
     forwardRateLimitMax: 10,
     forwardRateLimitWindowMs: 5000
   });
-  const nodeC = new GMPNode({ port: 0 });
+  const nodeC = createGMPNode({ port: 0 });
 
   await nodeA.loadIdentity('ratelimit A');
   await nodeB.loadIdentity('ratelimit B');
@@ -408,6 +420,7 @@ async function testForwardingRateLimit() {
   await nodeB.dial('127.0.0.1', nodeC.port); // B-C
 
   await delay(600);
+  await nodeA.topologyManager.queryRoute(nodeC.identity.nodeIdHex); // on demand
 
   let forwardsCount = 0;
   nodeB.on('forwarded', () => {

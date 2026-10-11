@@ -1,11 +1,6 @@
 /**
- * A failed GMPNodeManager.start() must leave the manager restartable.
- *
- * start() assigned `_node` before loading the identity and binding the port.
- * If either failed (typically EADDRINUSE), `_node` stayed set: every later
- * start() threw "already started", and the bridge treated the half-built node
- * as running. This occupies the port, lets the first start fail, frees it, and
- * asserts a retry succeeds.
+ * A failed GMPNodeManager.start() (here EADDRINUSE) must leave the manager
+ * restartable.
  *
  * Run with: node test/manager-restart-test.js
  */

@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -84,8 +84,8 @@ async function runTests() {
 async function testStage1CacheConnection() {
   console.log('\n=== Test 1: Stage 1 Cache Connection ===');
 
-  const nodeA = new GMPNode({ port: 49960, peerCachePath: tempCachePath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49961, peerCachePath: tempCachePath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true });
 
   await nodeA.loadIdentity('bootstrap S1 A');
   await nodeB.loadIdentity('bootstrap S1 B');
@@ -94,7 +94,7 @@ async function testStage1CacheConnection() {
   await nodeB.listen();
 
   // Populate cache on nodeB with nodeA's details
-  nodeB.peerCache.recordSuccess(nodeA.identity.nodeIdHex, '127.0.0.1', 49960);
+  nodeB.peerCache.recordSuccess(nodeA.identity.nodeIdHex, '127.0.0.1', nodeA.port);
 
   // Re-enable and trigger bootstrap on B. We set minPeers=1 so 1 connection is sufficient.
   nodeB.bootstrap.disableBootstrap = false;
@@ -121,8 +121,8 @@ async function testStage1CacheConnection() {
 async function testStage2PublicPeers() {
   console.log('\n=== Test 2: Stage 2 Public Peers ===');
 
-  const nodePublic = new GMPNode({ port: 49962, peerCachePath: tempCachePath, disableBootstrap: true });
-  const nodeClient = new GMPNode({ port: 49963, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
+  const nodePublic = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true });
+  const nodeClient = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
 
   await nodePublic.loadIdentity('bootstrap S2 Public');
   await nodeClient.loadIdentity('bootstrap S2 Client');
@@ -134,7 +134,7 @@ async function testStage2PublicPeers() {
   const publicList = [
     {
       address: '127.0.0.1',
-      port: 49962,
+      port: nodePublic.port,
       nodeId: nodePublic.identity.nodeIdHex,
       addedAt: Date.now(),
       lastVerified: Date.now()
@@ -162,7 +162,7 @@ async function testStage2PublicPeers() {
 async function testStage3FailureFallback() {
   console.log('\n=== Test 3: Stage 3 Failure Fallback ===');
 
-  const nodeClient = new GMPNode({ port: 49964, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
+  const nodeClient = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
   await nodeClient.loadIdentity('bootstrap S3 Client');
   await nodeClient.listen();
 
@@ -196,7 +196,7 @@ async function testStage3FailureFallback() {
 async function testDisconnectionTriggeredRebootstrap() {
   console.log('\n=== Test 4: Disconnection-Triggered Rebootstrap ===');
 
-  const nodeClient = new GMPNode({ port: 49965, peerCachePath: tempCachePath, disableBootstrap: true });
+  const nodeClient = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true });
   await nodeClient.loadIdentity('bootstrap S4 Client');
   await nodeClient.listen();
 
@@ -219,7 +219,7 @@ async function testDisconnectionTriggeredRebootstrap() {
 async function testExponentialBackoffValues() {
   console.log('\n=== Test 5: Exponential Backoff Values ===');
 
-  const nodeClient = new GMPNode({ port: 49966, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
+  const nodeClient = createGMPNode({ port: 0, peerCachePath: tempCachePath, disableBootstrap: true, publicPeersPath: tempPublicPeersPath });
   await nodeClient.loadIdentity('bootstrap S5 Client');
   await nodeClient.listen();
 

@@ -1,24 +1,9 @@
 /**
- * The recovery-phrase wordlists. This file is the single source of truth.
+ * The recovery-phrase wordlists — the single source of truth for every client.
  *
- * Every client — the web app, the mobile app and the gmp CLI — draws from and
- * validates against these lists. They used to each carry their own: web had
- * the full 2048-word BIP-39 list, mobile a curated 575, and the CLI a 99-word
- * excerpt. The result was silent data loss in the one feature whose whole
- * purpose is preventing it: a phrase written down on one device was rejected
- * by the restore screen on another, because most of its words were simply not
- * in that client's list.
- *
- * Two rules keep that from coming back:
- *
- *   1. GENERATION draws only from BIP39_WORDS. A new phrase is always a real
- *      BIP-39 phrase, so it is portable to every client and legible to any
- *      other wallet that speaks BIP-39.
- *
- *   2. VALIDATION accepts ACCEPTED_WORDS, the union of BIP-39 and the old
- *      mobile list. Fifteen words in that old list are not BIP-39 words at
- *      all, and people are holding phrases that contain them. Those fifteen
- *      are LEGACY_ONLY_WORDS: accepted forever on entry, never produced.
+ *   1. Generation draws only from BIP39_WORDS.
+ *   2. Validation accepts ACCEPTED_WORDS: BIP-39 plus LEGACY_ONLY_WORDS (from
+ *      the old mobile list), accepted on entry but never produced.
  *
  * Do not copy these arrays. Import them.
  */

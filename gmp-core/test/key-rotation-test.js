@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import { deriveIdentityFromSeedPhrase } from '../dist/identity.js';
 import fs from 'fs';
 import path from 'path';
@@ -95,8 +95,8 @@ async function testBasicRotation() {
   console.log('\n=== Test 1: Basic Rotation ===');
   cleanTempFiles();
 
-  const nodeA = new GMPNode({ port: 49980, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'rotation A seed' });
-  const nodeB = new GMPNode({ port: 49981, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rotation B seed' });
+  const nodeA = createGMPNode({ port: 0, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'rotation A seed' });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rotation B seed' });
 
   await nodeA.loadIdentity('rotation A seed');
   await nodeB.loadIdentity('rotation B seed');
@@ -105,7 +105,7 @@ async function testBasicRotation() {
   await nodeB.listen();
 
   // Connect A and B
-  const { link: linkAB } = await nodeA.dial('127.0.0.1', 49981);
+  const { link: linkAB } = await nodeA.dial('127.0.0.1', nodeB.port);
   await delay(200);
 
   const successorIdentity = await deriveIdentityFromSeedPhrase('rotation A seed successor');
@@ -118,8 +118,7 @@ async function testBasicRotation() {
   const cachedEntry = nodeB.peerCache.cache.find(e => e.nodeId === successorIdentity.nodeIdHex);
   assert(cachedEntry !== undefined, "Connected peer B updated peer cache with new NodeID");
   assertEqual(cachedEntry.signingPubKey, successorIdentity.signingPubKeyHex, "Signing public key matches successor");
-  // The NodeID peers were told to use must be the one A actually presents now
-  // (it used to switch to SHA-512(signingPubKey) while the cert said otherwise).
+  // The NodeID peers were told to use must be the one A actually presents now.
   assertEqual(nodeA.identity.nodeIdHex, cert.newNodeId, "Rotated node operates under the NodeID its certificate announced");
 
   nodeA.close();
@@ -127,10 +126,10 @@ async function testBasicRotation() {
 
   // newNodeId is signed: a cert whose newNodeId was rewritten after signing is
   // refused, so a relay cannot redirect the old identity somewhere else.
-  const nodeC = new GMPNode({ port: 49982, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rotation C seed' });
+  const nodeC = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rotation C seed' });
   await nodeC.loadIdentity('rotation C seed');
   const oldA = await deriveIdentityFromSeedPhrase('rotation A seed');
-  nodeC.peerCache.recordSuccess(oldA.nodeIdHex, '127.0.0.1', 49980, oldA.signingPubKeyHex);
+  nodeC.peerCache.recordSuccess(oldA.nodeIdHex, '127.0.0.1', nodeA.port, oldA.signingPubKeyHex);
   const redirected = { ...cert, newNodeId: 'f'.repeat(128) };
   nodeC.keyRotationManager.handleReceivedRotation({ cert: redirected, sequenceNumber: 99, ttl: 16 }, null);
   assert(nodeC.peerCache.cache.find(e => e.nodeId === 'f'.repeat(128)) === undefined,
@@ -139,13 +138,13 @@ async function testBasicRotation() {
 }
 
 async function testRotationFlood() {
-  console.log('\n=== Test 2: Rotation Flood Propagation ===');
+  console.log('\n=== Test 2: Rotation Flood Only to Direct Neighbours (M6-1a) ===');
   cleanTempFiles();
 
   // Topology: A - B - C
-  const nodeA = new GMPNode({ port: 49952, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'rot flood A' });
-  const nodeB = new GMPNode({ port: 49953, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot flood B' });
-  const nodeC = new GMPNode({ port: 49954, peerCachePath: tempCacheCPath, disableBootstrap: true, seedPhrase: 'rot flood C' });
+  const nodeA = createGMPNode({ port: 0, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'rot flood A' });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot flood B' });
+  const nodeC = createGMPNode({ port: 0, peerCachePath: tempCacheCPath, disableBootstrap: true, seedPhrase: 'rot flood C' });
 
   await nodeA.loadIdentity('rot flood A');
   await nodeB.loadIdentity('rot flood B');
@@ -156,15 +155,23 @@ async function testRotationFlood() {
   await nodeC.listen();
 
   // Connect A-B, B-C
-  await nodeA.dial('127.0.0.1', 49953);
-  await nodeB.dial('127.0.0.1', 49954);
+  await nodeA.dial('127.0.0.1', nodeB.port);
+  await nodeB.dial('127.0.0.1', nodeC.port);
   await delay(300);
 
-  // Seed Node C's cache with Node A's old identity so it knows/trusts it
-  nodeC.peerCache.recordSuccess(
-    nodeA.identity.nodeIdHex,
+  const oldNodeIdA = nodeA.identity.nodeIdHex;
+
+  // Seed B and C's caches with Node A's old identity so they know/trust it
+  nodeB.peerCache.recordSuccess(
+    oldNodeIdA,
     '127.0.0.1',
-    49952,
+    nodeA.port,
+    nodeA.identity.signingPubKeyHex
+  );
+  nodeC.peerCache.recordSuccess(
+    oldNodeIdA,
+    '127.0.0.1',
+    nodeA.port,
     nodeA.identity.signingPubKeyHex
   );
 
@@ -173,9 +180,20 @@ async function testRotationFlood() {
 
   await delay(500);
 
-  // C should have received the flooded certificate and updated its cache
+  // Direct neighbour B should receive and process the rotation
+  const entryOnB = nodeB.peerCache.cache.find(e => e.nodeId === successor.nodeIdHex);
+  assert(entryOnB !== undefined, "Direct neighbour B received rotation certificate and updated cache");
+  assertEqual(entryOnB.signingPubKey, successor.signingPubKeyHex, "B's cache has correct signing key");
+
+  // Indirect peer C (2 hops away) should NOT receive the rotation via flood
   const entryOnC = nodeC.peerCache.cache.find(e => e.nodeId === successor.nodeIdHex);
-  assert(entryOnC !== undefined, "Indirect peer C received rotation certificate via flood and updated cache");
+  assert(entryOnC === undefined, "Indirect peer C did NOT receive rotation via flood (M6-1a)");
+
+  // On-demand - when C presents stale key to B, B should send rotation cert
+  // Simulate C trying to connect to A via B (using stale key)
+  // C's peer cache still has old NodeIdA; when it dials through B, B should send rotation
+  // For this test, directly invoke handleReceivedRotation on B for a message from C
+  // but since we're testing the flood behavior, we verify C's cache is unchanged
 
   nodeA.close();
   nodeB.close();
@@ -186,7 +204,7 @@ async function testInvalidSignatureRejected() {
   console.log('\n=== Test 3: Invalid Signature Rejected ===');
   cleanTempFiles();
 
-  const nodeB = new GMPNode({ port: 49956, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot invalid B' });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot invalid B' });
   await nodeB.loadIdentity('rot invalid B');
 
   // Seed nodeB cache with fake Node A info
@@ -219,7 +237,7 @@ async function testUnknownPeerRotationRejected() {
   console.log('\n=== Test 4: Unknown Peer Rotation Rejected ===');
   cleanTempFiles();
 
-  const nodeB = new GMPNode({ port: 49957, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot unknown B' });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'rot unknown B' });
   await nodeB.loadIdentity('rot unknown B');
 
   // cert for an unknown old NodeID (not in cache)
@@ -244,8 +262,8 @@ async function testPostRotationConnections() {
   console.log('\n=== Test 5: Post-Rotation Connections ===');
   cleanTempFiles();
 
-  const nodeA = new GMPNode({ port: 49958, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'post-rot A' });
-  const nodeB = new GMPNode({ port: 49959, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'post-rot B' });
+  const nodeA = createGMPNode({ port: 0, peerCachePath: tempCacheAPath, disableBootstrap: true, seedPhrase: 'post-rot A' });
+  const nodeB = createGMPNode({ port: 0, peerCachePath: tempCacheBPath, disableBootstrap: true, seedPhrase: 'post-rot B' });
 
   await nodeA.loadIdentity('post-rot A');
   await nodeB.loadIdentity('post-rot B');
@@ -259,7 +277,7 @@ async function testPostRotationConnections() {
   nodeA.rotateKey(successor);
 
   // Attempt to connect from rotated A to B. Should succeed using the new NodeID.
-  const { link } = await nodeA.dial('127.0.0.1', 49959);
+  const { link } = await nodeA.dial('127.0.0.1', nodeB.port);
   await delay(200);
 
   assertEqual(link.state, 'connected', "Handshake succeeded using rotated identity");

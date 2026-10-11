@@ -1,9 +1,7 @@
 /**
- * start_https.sh serves the app over HTTPS on 0.0.0.0. It used to run a plain
- * SimpleHTTPRequestHandler from the repo root, so key.pem (the server's own TLS
- * private key), .git and gmp-core/data were downloadable by anyone on the LAN.
- * This runs the script's embedded server (minus TLS, on an ephemeral port) and
- * checks what it will hand out.
+ * start_https.sh serves the app on 0.0.0.0: runs its embedded server (minus
+ * TLS, on an ephemeral port) and checks key.pem, .git and gmp-core/data are not
+ * served.
  *
  * Run with: node test/https-server-scope.test.js   (skips without python3)
  */

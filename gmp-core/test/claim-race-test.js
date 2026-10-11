@@ -1,11 +1,6 @@
 /**
- * GMP Concurrent Claim Tests
- *
- * claimSessionKey() checks an in-memory index before taking the lock. That
- * check is a fast path and cannot be the authority: between it and the lock
- * another process can append the very same fingerprint. Without a re-check
- * inside the lock, two processes claiming one session key BOTH succeed, and
- * at-most-once — the property the whole subsystem exists for — is gone.
+ * GMP Concurrent Claim Tests: the at-most-once check is repeated under the
+ * lock, so two processes claiming one session key cannot both succeed.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data

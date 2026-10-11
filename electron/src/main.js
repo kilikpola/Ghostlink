@@ -31,31 +31,27 @@ let gmpBridge = null;
 let gmpStarting = null;
 
 /**
- * Start the node and its loopback bridge once. startBridge is async and
- * resolves to { wss } only after the listener is bound; it used to be stored
- * unawaited, so gmpBridge was a Promise, `gmpBridge.wss` was always undefined
- * and stopGMPNode never closed the bridge, and a bind failure surfaced as an
- * unhandled rejection. gmpManager was also set before start() succeeded, so a
- * failed start left a dead manager that made every later gmp-start a silent
- * no-op. Concurrent callers now share one attempt, and a failure is cleaned
- * up so the next call can retry.
+ * Start the node and its loopback bridge once. Concurrent callers share one
+ * attempt; a failure is cleaned up so the next call can retry.
  */
 function startGMPNode(seedPhrase) {
   if (!gmpStarting) {
     gmpStarting = (async () => {
-      // gmp-core keeps peer cache / nonce state under its package data dir,
-      // which is read-only inside an installed app. Redirect mutable state to
-      // the per-user data dir unless the environment already picked a spot.
-      if (app.isPackaged && !process.env.GMP_DATA_DIR) {
-        process.env.GMP_DATA_DIR = path.join(app.getPath('userData'), 'gmp-data');
-        fs.mkdirSync(process.env.GMP_DATA_DIR, { recursive: true });
+      // Redirect mutable node state to the per-user data dir (gmp-core's own is
+      // read-only when installed), via entry-points.js, which imports nothing
+      // else from gmp-core so it runs before paths.ts reads GMP_DATA_DIR.
+      // Windows needs a file:// URL for dynamic import().
+      const coreModule = (name) => import(pathToFileURL(path.join(GMP_CORE_DIR, 'dist', name)).href);
+      const { electronDataDir, electronManagerOptions } = await coreModule('entry-points.js');
+      const dataDir = electronDataDir({ isPackaged: app.isPackaged, userDataPath: app.getPath('userData'), env: process.env });
+      if (dataDir) {
+        process.env.GMP_DATA_DIR = dataDir;
+        fs.mkdirSync(dataDir, { recursive: true });
       }
-      // A raw absolute path breaks dynamic import() on Windows
-      // (ERR_UNSUPPORTED_ESM_URL_SCHEME) — ESM needs a file:// URL.
-      const { GMPNodeManager } = await import(pathToFileURL(path.join(GMP_CORE_DIR, 'dist', 'gmp-node-manager.js')).href);
-      const { startBridge } = await import(pathToFileURL(path.join(GMP_CORE_DIR, 'dist', 'gmp-bridge.js')).href);
+      const { GMPNodeManager } = await coreModule('gmp-node-manager.js');
+      const { startBridge } = await coreModule('gmp-bridge.js');
 
-      gmpManager = new GMPNodeManager({ seedPhrase });
+      gmpManager = new GMPNodeManager(electronManagerOptions({ seedPhrase }));
       gmpBridge = await startBridge(gmpManager, 3002);
       const { port } = await gmpManager.start();
       console.log(`[Electron GMP] Node Manager started on port ${port}, Bridge on 3002`);
@@ -68,8 +64,11 @@ function startGMPNode(seedPhrase) {
 }
 
 function stopGMPNode() {
-  if (gmpBridge && gmpBridge.wss) {
-    try { gmpBridge.wss.close(); } catch(e){}
+  if (gmpBridge) {
+    // close() releases the bridge's TCP listener and stops any nodes the
+    // bridge started for other seed phrases.
+    const bridge = gmpBridge;
+    Promise.resolve(bridge.close ? bridge.close() : bridge.wss && bridge.wss.close()).catch(() => {});
   }
   if (gmpManager) {
     // stop() is async: a try/catch alone never sees its rejection.
@@ -86,14 +85,8 @@ const IS_DEV = process.argv.includes('--dev');
 const PROTOCOL = 'ghostlink';
 
 /**
- * Locate a repo-root resource that the packaged app needs.
- *
- * Development and `electron-builder --dir` runs load straight from the
- * checkout (electron/src -> repo root). Installed builds instead ship these
- * files via electron-builder's extraResources, which lands them under
- * process.resourcesPath (resources/ inside the install directory): the web
- * payload under resources/webapp/ and the mesh core under resources/gmp-core/.
- * The checkout path is tried first so the repo layout keeps working unchanged.
+ * Locate a repo-root resource: from the checkout in development, otherwise
+ * from process.resourcesPath (resources/webapp/, resources/gmp-core/).
  */
 function resolveResource(checkoutRelative, packagedRelative) {
   const checkoutPath = path.join(__dirname, '..', '..', checkoutRelative);
@@ -115,25 +108,16 @@ const store = new Store({
     autoLaunch: false,
     mutedNotifications: false,
   },
-  // electron-store's encryptionKey is obfuscation, not encryption: the key is
-  // a constant compiled into the app, so anyone with the binary can read the
-  // file. That is acceptable for window bounds and a tray preference, which is
-  // all this store now holds — the recovery seed moved to safeStorage below.
+  // Obfuscation only (constant key); this store holds only non-secret prefs.
   encryptionKey: 'gl-desktop-cfg-v1', // light obfuscation for prefs
 });
 
 /* ─── Recovery seed at rest ─────────────────────────────────── */
 
 /**
- * The GMP seed phrase is the master identity: every key the node uses derives
- * from it, and it is the whole of account recovery. It used to sit in the
- * config store above under that constant key, which meant it was recoverable
- * from the config file by anyone who could read it — no user secret involved.
- *
- * safeStorage backs onto the OS keychain (Keychain on macOS, DPAPI on Windows,
- * libsecret/kwallet on Linux), so the ciphertext is bound to the logged-in
- * user. If the platform cannot provide that, storing the phrase in the clear
- * is not an acceptable substitute — refuse, and let the caller surface it.
+ * The GMP seed phrase (master identity) is stored via safeStorage, bound to the
+ * OS keychain. If the platform cannot provide that, refuse rather than store
+ * it in the clear.
  */
 const SEED_STORE_KEY = 'gmp_seed_phrase_enc';
 const LEGACY_SEED_STORE_KEY = 'gmp_seed_phrase';
@@ -188,12 +172,8 @@ function getStoredSeed() {
 }
 
 /* ─── Ghost Mesh TCP bridge state ───────────────────────────── */
-// These were referenced by every ghostmesh-* IPC handler but never declared,
-// so the first `if (ghostMeshServer)` threw a ReferenceError and the whole
-// Ghost Mesh transport was dead on arrival.
-// Must differ from the GMP node's port (config.GMP_PORT, default 49500): both
-// run in this process and bind [::], so sharing a port made whichever started
-// second fail with EADDRINUSE. The renderer dials without a port and gets this.
+// Must differ from the GMP node's port (default 49500): both bind [::] in this
+// process. The renderer dials without a port and gets this.
 const GHOSTMESH_PORT = 49600;
 let ghostMeshServer = null;
 const activeMeshSockets = new Map(); // connId -> net.Socket
@@ -286,22 +266,16 @@ function createMainWindow() {
       callback({
         responseHeaders: {
           ...details.responseHeaders,
-          // The app is a local file:// bundle with no remote code. The policy
-          // said otherwise: script-src allowed https://unpkg.com, so anything
-          // that host served (or anyone who could answer for it) ran with full
-          // access to the preload bridge, and 'unsafe-eval' let injected
-          // markup reach a JS compiler. Neither is used — index.html vendors
-          // its dependencies locally and pins an import map for that reason.
+          // Local file:// bundle with vendored dependencies: no remote script
+          // origins and no 'unsafe-eval'.
           'Content-Security-Policy': [
             "default-src 'self' blob: data:; " +
             "script-src 'self' 'unsafe-inline'; " +
             "style-src 'self' 'unsafe-inline'; " +
             "img-src 'self' data: blob:; " +
             "media-src 'self' blob: data:; " +
-            // Loopback only: the GMP bridge (ws 3002), the signaling socket
-            // (ws 3001) and the relay-queue fetch that offline-queue.js derives
-            // from that same origin. WebRTC/STUN is negotiated by the ICE
-            // agent and is not governed by connect-src.
+            // Loopback only: GMP bridge (ws 3002), signaling (ws 3001) and the
+            // relay-queue fetch on that origin. WebRTC is not governed by connect-src.
             "connect-src 'self' " +
             "http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:* " +
             "ws://127.0.0.1:* ws://localhost:* wss://127.0.0.1:* wss://localhost:*; " +
@@ -389,16 +363,8 @@ function injectElectronStyles(win) {
    ═══════════════════════════════════════════════════════════════ */
 
 /**
- * Hand a URL to the OS only if it is plain web traffic.
- *
- * shell.openExternal asks the desktop to launch whatever handler is registered
- * for the scheme. The navigation hook used to pass it every non-file: URL and
- * the window-open hook used a `startsWith('http')` test that also matched
- * `httpsomething:` — so a link in a message could reach the handler for
- * smb:, ms-msdt:, vscode:, or any other locally registered protocol. Parse the
- * URL and allow only http/https, plus mailto: — the license request flow and
- * the "Contact for pricing" link navigate to mailto:, and blocking it left
- * both dead in the desktop app. A mail client only opens a compose window.
+ * Hand a URL to the OS only if it is http/https or mailto:, so message links
+ * cannot reach other locally registered protocol handlers.
  */
 const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
 
@@ -421,10 +387,8 @@ function openExternalIfSafe(url) {
    GHOST MESH SOCKETS
    ═══════════════════════════════════════════════════════════════ */
 
-// One newline-delimited frame. The reader used to append every chunk to a
-// string until it saw '\n', with no limit, so anyone who could reach the
-// mesh port (it listens on [::], every interface) could stream bytes without
-// a newline and grow the main process's heap until it died.
+// Cap on one newline-delimited frame, so a peer cannot grow the heap without
+// bound by never sending a newline.
 const MAX_MESH_LINE_CHARS = 1024 * 1024;
 
 function wireMeshSocket(socket, connId, label) {
@@ -609,11 +573,8 @@ function setupIPC() {
       return { success: true };
     }
     return new Promise((resolve) => {
-      // destroy, not end: server.close() only calls back once every
-      // connection is fully closed, and end() is a half-close that a peer
-      // which never sends its own FIN keeps open forever — the promise then
-      // never settled and ghostMeshServer stayed set, so the server could not
-      // be restarted.
+      // destroy, not end: a half-closed socket can stay open forever and
+      // server.close() would never call back.
       for (const [connId, socket] of activeMeshSockets.entries()) {
         try { socket.destroy(); } catch (e) {}
         activeMeshSockets.delete(connId);
@@ -754,9 +715,7 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Calls need the microphone and camera; nothing here needs geolocation, USB,
-  // MIDI, or the rest. Electron grants every permission by default, so a page
-  // flaw would otherwise be enough to turn on the mic. Deny by default.
+  // Electron grants every permission by default; allow only what calls need.
   const ALLOWED_PERMISSIONS = new Set(['media', 'clipboard-sanitized-write']);
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
     callback(ALLOWED_PERMISSIONS.has(permission));

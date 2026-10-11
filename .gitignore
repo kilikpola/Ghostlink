@@ -4,6 +4,9 @@ license-test.html
 test-license.html
 gmp-core/data/*
 !gmp-core/data/public-peers.example.json
+# The shipped public peer list: hostnames, ports, NodeIDs — no secrets
+# (M6-1c-fix-5). Locally added peers go in public-peers.local.json (ignored).
+!gmp-core/data/public-peers.json
 
 # Only the archived design/audit reports stay out of the tree. The previous
 # blanket *.md/*.txt rule silently swallowed every new doc (CONTRIBUTING.md,
@@ -70,7 +73,6 @@ mobile/android/app/build/
 
 # Marketing site — kept out of the repo, built and deployed separately.
 landing.html
-ghostlink-website.html
 assets/site-shell.css
 assets/app-screenshot.png
 *.apk

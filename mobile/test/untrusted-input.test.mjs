@@ -1,10 +1,7 @@
 /**
- * Chat frames from a peer, as the conversation screen accepts them.
- *
- * A frame is parsed JSON written by the other side; what ChatScreen keeps from
- * it is persisted and rendered on every later launch. A `text` that was an
- * object used to be stored as-is and then thrown on by React Native's <Text>,
- * and a peer who used our display name had their messages drawn as ours.
+ * Peer chat frames as the conversation screen accepts them: malformed fields
+ * must not be stored or rendered, and a peer using our display name must not
+ * be drawn as us.
  */
 import fs from 'fs';
 import path from 'path';

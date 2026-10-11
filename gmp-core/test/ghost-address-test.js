@@ -1,17 +1,10 @@
 /**
  * Ghost Address Test Suite
  *
- * Covers the two halves of identity-based connection:
- *
- *   1. Derivation — GHOST-XXX-XXX-XXX is a pure function of the NodeID, so the
- *      same seed phrase always yields the same address, and user-typed variants
- *      (lower case, no dashes, O/0 and I/1 confusion) normalise back to it.
- *
- *   2. Resolution and connection over a hub topology that mirrors the real
- *      deployment: two spokes that can only see each other through a shared
- *      public peer. Neither spoke knows the other's IP or port — only the
- *      address — and the connection has to come up anyway, through a routed
- *      virtual circuit. That is exactly the "connect from anywhere" case.
+ *   1. Derivation: a pure function of the NodeID; user-typed variants
+ *      normalise back to it.
+ *   2. Resolution and connection between two spokes that see each other only
+ *      through a shared public peer, by address alone, over a routed circuit.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
@@ -134,9 +127,10 @@ async function testMeshResolution() {
     await alice.connectToPeer('127.0.0.1', basePort);
     await bob.connectToPeer('127.0.0.1', basePort);
 
-    // Topology announcements flood through the hub; give them a moment.
-    const resolved = await waitFor(() => {
-      const r = alice.resolveGhostAddress(bobAddress);
+    // Nothing is flooded any more: alice asks the mesh for the
+    // address she was given, and the hub answers with its signed edge to bob.
+    const resolved = await waitFor(async () => {
+      const r = await alice.lookupGhostAddress(bobAddress);
       return r.reason === 'ok' ? r : null;
     });
 

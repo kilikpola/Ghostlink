@@ -82,11 +82,18 @@ desktop-package:
   image: node:22
   needs: []
   timeout: 30m
+  variables:
+    # The interop step builds a pinned older commit (git archive).
+    GIT_DEPTH: "0"
   script:
     - npm ci
     - npm run install:gmp
     - npm run build:gmp
     - npm run build
+    # gmp-core under Electron's bundled Node (the test job has no Electron binary).
+    - (cd gmp-core && node test/electron-runtime-test.js)
+    # Wire interop with a PINNED older build (INTEROP_OLD_REF in the test).
+    - (cd gmp-core && node test/interop-old-new.mjs)
     # build:dir = electron-builder --dir, preceded by prepare-packaging.cjs.
     - (cd electron && npm run build:dir)
     - |

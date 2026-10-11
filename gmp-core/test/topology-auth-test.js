@@ -1,19 +1,7 @@
 /**
- * A topology announcement must prove it came from the node it names.
- *
- * Announces are flooded across the whole mesh. The session key on the link an
- * announce arrives over authenticates only the relaying hop, not the claimed
- * originator — so before this fix, any peer that completed a handshake could
- * inject an announce with `announcerNodeId` set to any victim, poisoning every
- * node's link-state database and routing table as it flooded: redirect a
- * target's traffic through the attacker (to blackhole it), or withdraw a
- * target's real edges to partition it off the mesh.
- *
- * The fix makes an announce self-authenticating, exactly as HELLO already is:
- * it carries the announcer's static and signing pubkeys, those are bound to
- * announcerNodeId by hash, and the fields are Ed25519-signed. This suite drives
- * the real TopologyManager and asserts a forged announce never reaches the
- * LSDB while a genuine one does.
+ * A topology announcement must prove it came from the node it names: carried
+ * keys bound to announcerNodeId by hash and Ed25519-signed fields. Forged
+ * announces never reach the LSDB; genuine ones do.
  *
  * Run with: node test/topology-auth-test.js
  */
@@ -21,7 +9,7 @@ import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-
 import { TopologyManager } from '../dist/topology-announce.js';
 import {
   deriveIdentityFromSeedPhrase,
-  signMessage, bytesToHex, hexToBytes, sha512, stringToBytes,
+  signMessage, bytesToHex, stringToBytes,
 } from '../dist/identity.js';
 
 let run = 0, passed = 0, failed = 0;

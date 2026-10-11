@@ -1,27 +1,15 @@
 /**
  * Handshake identity binding: a node must not be able to connect as someone else.
  *
- * A NodeID is SHA-512 of the node's static X25519 public key, and that public
- * key travels in every HELLO. The handshake used to check only that the NodeID
- * matched the static *public* key and that the HELLO was signed by whatever
- * signing key it carried, and derived session keys from the ephemeral exchange
- * alone. So anyone could take a victim's public static key, sign with their own
- * signing key, and be accepted — and addressed — as the victim.
- *
- * The fix folds a static<->static X25519 exchange into the session keys and
- * holds the responder in a `confirming` state until the initiator's first
- * encrypted frame decrypts. Only the holder of the victim's static *private*
- * key can produce that frame.
- *
- * The impostor here is an ordinary GMPNode whose identity pairs the victim's
- * public NodeID and static key with the impostor's own private keys — i.e.
- * everything an attacker can learn about the victim, and nothing it cannot.
+ * The impostor pairs the victim's public NodeID and static key with its own
+ * private keys — everything an attacker can learn about the victim. The
+ * static<->static term in the session keys plus key confirmation must reject it.
  *
  * Run: node test/handshake-impersonation-test.js
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 
 let run = 0, passed = 0, failed = 0;
 function assert(cond, msg) {
@@ -36,7 +24,7 @@ const hex = (b) => Buffer.from(b).toString('hex');
 const CONFIRM_WINDOW_MS = 11000;
 
 async function makeTarget() {
-  const target = new GMPNode({ port: 0 });
+  const target = createGMPNode({ port: 0 });
   await target.loadIdentity('handshake impersonation test target');
   const { port } = await target.listen();
   const seen = { connections: [], messages: [], errors: [] };
@@ -51,7 +39,7 @@ async function makeTarget() {
 async function testHonestPeerConnects(victimSeed) {
   console.log('\n=== Control: the real key holder connects ===');
   const { target, port, seen } = await makeTarget();
-  const victim = new GMPNode({ port: 0 });
+  const victim = createGMPNode({ port: 0 });
   const victimId = await victim.loadIdentity(victimSeed);
 
   let dialed = null;
@@ -73,9 +61,9 @@ async function testImpostorRejected(victimSeed, victimNodeIdHex) {
 
   // Everything public about the victim — NodeID and static public key — is what
   // the victim sends in every HELLO, so an attacker has it.
-  const victimPublic = await new GMPNode({ port: 0 }).loadIdentity(victimSeed);
+  const victimPublic = await createGMPNode({ port: 0 }).loadIdentity(victimSeed);
 
-  const impostor = new GMPNode({ port: 0 });
+  const impostor = createGMPNode({ port: 0 });
   const own = await impostor.loadIdentity('handshake impersonation test attacker');
   impostor.identity = {
     ...own,                                   // attacker's own private keys

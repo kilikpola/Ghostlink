@@ -70,8 +70,8 @@ test('a Proxy whose getPrototypeOf throws does not drop the message', () => {
 test('an Error whose stack throws on conversion does not drop the message', () => {
   captured.info.length = 0;
   const err = new Error('boom');
-  // `stack` is writable; a value whose toString throws would previously escape
-  // _fmtOne's guard and blow up in _fmt's join().
+  // `stack` is writable; a value whose toString throws must stay inside
+  // _fmtOne's guard.
   Object.defineProperty(err, 'stack', {
     value: { toString() { throw new Error('hostile stack'); } },
     writable: true, configurable: true,

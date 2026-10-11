@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -81,8 +81,8 @@ async function runTests() {
 async function testAutomaticQuery() {
   console.log('\n=== Test 1: Automatic Query on Connection ===');
 
-  const nodeA = new GMPNode({ port: 49950, peerCachePath: tempCachePath });
-  const nodeB = new GMPNode({ port: 49951, peerCachePath: tempCachePath });
+  const nodeA = createGMPNode({ port: 49950, peerCachePath: tempCachePath });
+  const nodeB = createGMPNode({ port: 49951, peerCachePath: tempCachePath });
 
   await nodeA.loadIdentity('peer exch automatic A');
   await nodeB.loadIdentity('peer exch automatic B');
@@ -111,7 +111,7 @@ async function testAutomaticQuery() {
 async function testFilterAndLimitResponses() {
   console.log('\n=== Test 2: Filter and Limit Responses ===');
 
-  const nodeA = new GMPNode({ port: 49952, peerCachePath: tempCachePath });
+  const nodeA = createGMPNode({ port: 49952, peerCachePath: tempCachePath });
   await nodeA.loadIdentity('peer exch filter A');
 
   // Populate cache with multiple entries (some direct within 24h, some direct old)
@@ -143,7 +143,7 @@ async function testFilterAndLimitResponses() {
 async function testRequestRateLimiting() {
   console.log('\n=== Test 3: Request Rate Limiting ===');
 
-  const nodeA = new GMPNode({ port: 49954, peerCachePath: tempCachePath });
+  const nodeA = createGMPNode({ port: 49954, peerCachePath: tempCachePath });
   await nodeA.loadIdentity('peer exch limit A');
 
   let responseCount = 0;
@@ -169,7 +169,7 @@ async function testRequestRateLimiting() {
 async function testCandidatePoolPopulation() {
   console.log('\n=== Test 4: Candidate Pool Population ===');
 
-  const nodeA = new GMPNode({ port: 49956, peerCachePath: tempCachePath });
+  const nodeA = createGMPNode({ port: 49956, peerCachePath: tempCachePath });
   await nodeA.loadIdentity('peer exch cand A');
 
   const mockLink = {
@@ -191,8 +191,7 @@ async function testCandidatePoolPopulation() {
   assertEqual(nodeA.peerExchange.candidatePool.size, 2, "Unconnected peers from response added to candidate pool");
   assert(nodeA.peerExchange.candidatePool.has('22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222'), "Pool contains node_two");
 
-  // A peer controls the size of its response. Oversized responses must not
-  // grow the pool without bound (it used to keep every entry forever).
+  // A peer controls the size of its response; the pool must stay bounded.
   for (let r = 0; r < 60; r++) {
     const peers = [];
     for (let i = 0; i < 1000; i++) {

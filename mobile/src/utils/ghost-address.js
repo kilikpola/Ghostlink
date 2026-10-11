@@ -1,14 +1,8 @@
 /**
- * GhostLink Mobile — Ghost Address.
+ * GhostLink Mobile — Ghost Address (GHOST-XXX-XXX-XXX).
  *
- *   GHOST-XXX-XXX-XXX
- *
- * A short, human-copyable name for a mesh identity, derived from the first 45
- * bits of the NodeID. This is a port of gmp-core/src/ghost-address.js and must stay
- * byte-for-byte identical to it: the desktop, the web app and this file all
- * have to produce the same address for the same identity, or two peers compute
- * two different names for the same person. test/ghost-address checks that
- * against the real gmp-core implementation.
+ * A port of gmp-core/src/ghost-address.js that must stay byte-for-byte
+ * identical; test/ghost-address checks it against gmp-core.
  */
 
 // Crockford base32: no I, L, O or U. Removes the 1/l/I and 0/O confusions when
@@ -63,12 +57,8 @@ export function ghostAddressFromNodeId(nodeId) {
 }
 
 /**
- * Accept whatever the user typed or pasted and return the canonical address,
- * or null if it is not one.
- *
- * Tolerates lower case, a missing GHOST- prefix, missing or extra dashes,
- * spaces, and the four ambiguous characters Crockford excludes (O→0, I/L→1,
- * U→V), so an address copied by hand off a screen still resolves.
+ * Canonicalise user input, or return null. Tolerates case, a missing GHOST-
+ * prefix, dashes, spaces, and Crockford's ambiguous characters (O→0, I/L→1, U→V).
  */
 export function normalizeGhostAddress(input) {
   if (typeof input !== 'string') return null;

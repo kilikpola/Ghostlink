@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import config from './config.js';
+import type { RoutingTableEvents } from './events.js';
+import { DEFAULTS } from './config-defaults.js';
 import type { RouteEntry } from './types.js';
 
 function toHex(nodeId: string | Buffer | Uint8Array): string {
@@ -10,16 +11,17 @@ function toHex(nodeId: string | Buffer | Uint8Array): string {
   return String(nodeId);
 }
 
-export class RoutingTable extends EventEmitter {
+export class RoutingTable extends EventEmitter<RoutingTableEvents> {
   private expiryTimeoutMs: number;
   private pruneIntervalMs: number;
-  private routes: Map<string, Map<string, RouteEntry>>;
+  /** destination -> next hop -> route. Read by key rotation to re-point routes. */
+  readonly routes: Map<string, Map<string, RouteEntry>>;
   private pruneTimer: NodeJS.Timeout;
 
   constructor(options: { expiryTimeoutMs?: number; pruneIntervalMs?: number } = {}) {
     super();
-    this.expiryTimeoutMs = options.expiryTimeoutMs ?? config.GMP_ROUTE_EXPIRY_MS ?? 300000;
-    this.pruneIntervalMs = options.pruneIntervalMs ?? config.GMP_REANNOUNCE_INTERVAL_MS ?? 60000;
+    this.expiryTimeoutMs = options.expiryTimeoutMs ?? DEFAULTS.GMP_ROUTE_EXPIRY_MS;
+    this.pruneIntervalMs = options.pruneIntervalMs ?? DEFAULTS.GMP_REANNOUNCE_INTERVAL_MS;
     this.routes = new Map();
 
     this.pruneTimer = setInterval(() => {

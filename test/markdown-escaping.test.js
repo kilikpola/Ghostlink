@@ -1,16 +1,6 @@
 /**
- * Regression tests for the markdown escaping layer.
- *
- * Both escape tables in this codebase were written with their keys mapped to
- * their own decoded output — '&' -> '&', '<' -> '<', '"' -> '"' — which made
- * escapeHTML a no-op for exactly the four characters that carry markup. Every
- * caller that "escaped" peer-controlled text got that text back verbatim.
- *
- * The parser also resolved its sanitizer with a bare require() inside a
- * try/catch. In the browser `require` is undefined, so the catch fired on every
- * load and the sanitizer reference stayed null — silently disabling the only
- * URL check in the file and letting `[text](javascript:...)` render as a live
- * href.
+ * Markdown escaping: escapeHTML escapes markup characters, and the parser's
+ * sanitizer resolves in the browser so javascript: links are blocked.
  *
  * Run with: node test/markdown-escaping.test.js
  */

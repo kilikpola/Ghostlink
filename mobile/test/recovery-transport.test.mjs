@@ -45,8 +45,7 @@ class FakeWebRTC extends EventEmitter {
 }
 
 {
-  // The timer used to be left running after a reply, firing later on a
-  // settled request.
+  // The timer must be cleared once a reply settles the request.
   const rtc = new FakeWebRTC();
   const t = new RecoveryTransport(rtc);
   let cleared = 0;

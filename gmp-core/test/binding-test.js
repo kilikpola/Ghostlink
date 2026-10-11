@@ -1,5 +1,5 @@
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode, SessionKeyLRUSet } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import { RateLimiter } from '../dist/rate-limiter.js';
 import { queryPublicAddress } from '../dist/public-peer-list.js';
 import net from 'net';
@@ -20,17 +20,6 @@ function assert(condition, message) {
   }
 }
 
-function assertEqual(actual, expected, message) {
-  testsRun++;
-  if (actual === expected) {
-    testsPassed++;
-    console.log(`  ✓ ${message}`);
-  } else {
-    testsFailed++;
-    console.error(`  ✗ ${message} (expected ${expected}, got ${actual})`);
-  }
-}
-
 async function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -38,8 +27,8 @@ async function delay(ms) {
 async function testBasicBindingExchange() {
   console.log('\n=== Test 1: Basic Binding Query over localhost ===');
 
-  const nodeA = new GMPNode({ port: 49600, isPublicPeer: true });
-  const nodeB = new GMPNode({ port: 49601 });
+  const nodeA = createGMPNode({ port: 49600, isPublicPeer: true });
+  const nodeB = createGMPNode({ port: 49601 });
 
   await nodeA.loadIdentity('binding test seed public peer');
   await nodeB.loadIdentity('binding test seed client');
@@ -78,8 +67,8 @@ async function testBasicBindingExchange() {
 async function testPublicPeerQueryConsensus() {
   console.log('\n=== Test 2: queryPublicAddress with Consensus ===');
 
-  const nodeA = new GMPNode({ port: 49602, isPublicPeer: true });
-  const nodeB = new GMPNode({ port: 49603 });
+  const nodeA = createGMPNode({ port: 49602, isPublicPeer: true });
+  const nodeB = createGMPNode({ port: 49603 });
 
   await nodeA.loadIdentity('consensus test public peer');
   await nodeB.loadIdentity('consensus test client');
@@ -110,12 +99,12 @@ async function testStrictRateLimitingForBinding() {
   console.log('\n=== Test 3: Stricter rate limit on unestablished peers ===');
 
   const bindingRateLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 2,
+    ratePerMinute: 2,
+    burst: 2,
     maxGlobal: 20,
   });
 
-  const nodeA = new GMPNode({
+  const nodeA = createGMPNode({
     port: 49604,
     isPublicPeer: true,
     bindingRateLimiter,
@@ -139,7 +128,7 @@ async function testStrictRateLimitingForBinding() {
   await new Promise(resolve => socket2.connect(49604, '127.0.0.1', resolve));
   console.log('  Connection 2 opened');
 
-  // Third connection should be rejected by the binding rate limiter (maxPerIp = 2)
+  // Third connection should be rejected by the binding rate limiter (bucket of 2)
   const socket3Closed = new Promise((resolve) => {
     const socket3 = new net.Socket();
     socket3.connect(49604, '127.0.0.1', () => {
@@ -162,21 +151,24 @@ async function testEstablishedPeerExemption() {
   console.log('\n=== Test 4: Established Peer Exemption ===');
 
   const bindingLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 1, // Only 1 unestablished connection allowed per IP!
+    ratePerMinute: 1,
+    burst: 1, // Only 1 unestablished connection allowed per IP!
     maxGlobal: 10,
   });
 
   const normalLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 10, // Normal peers can have more connections
+    ratePerMinute: 10,
+    burst: 10, // Normal peers can have more connections
     maxGlobal: 100,
   });
 
-  const nodeBIdentity = await new GMPNode().loadIdentity('exemption test node B identity');
+  // Node B loads its identity properly: dialling needs the ephemeral source
+  // loadIdentity builds, so a hand-assigned identity is refused.
+  const nodeB = createGMPNode({ port: 49606, rateLimiter: normalLimiter });
+  const nodeBIdentity = await nodeB.loadIdentity('exemption test node B identity');
   const peerNodeIdHex = Buffer.from(nodeBIdentity.nodeId).toString('hex');
 
-  const nodeA = new GMPNode({
+  const nodeA = createGMPNode({
     port: 49605,
     isPublicPeer: true,
     establishedPeers: new Set([peerNodeIdHex]),
@@ -187,8 +179,6 @@ async function testEstablishedPeerExemption() {
   await nodeA.loadIdentity('exemption test public peer');
   await nodeA.listen();
 
-  const nodeB = new GMPNode({ port: 49606, rateLimiter: normalLimiter });
-  nodeB.identity = nodeBIdentity;
 
   // Let Node B connect. Node B is established, so it should be exempted once handshake is complete
   const { link: linkB } = await nodeB.dial('127.0.0.1', 49605);

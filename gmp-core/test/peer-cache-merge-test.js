@@ -1,11 +1,6 @@
 /**
- * GMP Peer Cache Merge-On-Load Tests
- *
- * PeerCache.load() used to assign over this.cache. Because link.js supplies the
- * encryption key only after deriving the identity (link.js:1305/1420), every
- * peer recorded before that point was dropped by setEncryptionKey(), and
- * setEncryptionKey(null) erased the cache outright. Same shape as the nonce
- * store bug, milder consequence: a forgotten peer costs a colder bootstrap.
+ * GMP Peer Cache Merge-On-Load Tests: peers recorded before the encryption key
+ * arrives survive setEncryptionKey().
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data

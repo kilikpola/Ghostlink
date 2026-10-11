@@ -412,9 +412,7 @@ export default function CallScreen({route, navigation}) {
   // ── Call Initialization ──
 
   useEffect(() => {
-    // The gate lives here too, not only on ChatScreen's buttons: this screen
-    // can be reached by other routes, and with calls unavailable it used to
-    // open the camera and microphone and then show a call as connected.
+    // Gated here too: this screen can be reached by other routes.
     if (!CALLS_AVAILABLE) {
       setCallState(CALL_STATES.FAILED);
     } else if (callState === CALL_STATES.CONNECTING) {
@@ -463,8 +461,7 @@ export default function CallScreen({route, navigation}) {
           return;
         }
       } else {
-        // No peer, no call. This used to walk through RINGING to CONNECTED on
-        // a timer and show a live "end-to-end encrypted" call with nobody.
+        // No peer, no call.
         setCallState(CALL_STATES.FAILED);
         return;
       }

@@ -1,14 +1,7 @@
 /**
- * Controls that lead nowhere must not be reachable.
- *
- * The call path has no rendezvous and the Ghost Mesh setup modal calls into a
- * crypto proxy that throws, so both are gated in utils/capabilities.js. These
- * check the gates are actually applied at the entry points — a flag nothing
- * reads is not a gate.
- *
- * Source inspection rather than a mounted render: these screens need the React
- * Native runtime, and what matters here is structural — that the entry point
- * cannot be taken while the capability is false.
+ * Controls gated in utils/capabilities.js (calls, Ghost Mesh setup) must be
+ * unreachable at their entry points. Checked by source inspection, since the
+ * screens need the React Native runtime.
  */
 import fs from 'fs';
 import path from 'path';

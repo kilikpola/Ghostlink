@@ -1,40 +1,31 @@
+// @ts-check
 /**
- * GMP Link Module — Phase 2a
- * Single-link implementation for Electron (Node.js TCP).
+ * GMP node — GMPNode and the VirtualSocket used for mesh-routed links.
  *
- * Phase 2a additions:
- * - Session key uniqueness check (LRU set, size 50) to detect key reuse attacks
- * - Nonce store integration for persisted high-water marks
- * - Rate limiter integration for connection flood protection
- * - Handshake timeouts (10s HELLO, 10s full handshake)
- * - New events: 'rate-limited', 'connection-cap-reached', 'hello-timeout', 'handshake-timeout'
- *
- * Implements the Ghost Mesh Protocol wire format per gmp-core/PROTOCOL_SPEC.md:
- * - Length-prefixed binary framing: [4 bytes length][1 byte type][N bytes payload]
- * - 2-message handshake: HELLO -> HELLO_ACK (with staticPubKey for NodeID verification)
- * - AES-256-GCM session encryption with forward secrecy via ephemeral ECDH
- * - PING/PONG keepalive
+ * Per-link logic (framing, handshake, session crypto, keepalive) lives in
+ * link/. GMPLink, MESSAGETYPES and SessionKeyLRUSet are re-exported here.
  *
  * Port: 49500 (default)
  */
 
 import { EventEmitter } from 'events';
-import net from 'net';
-import tls from 'tls';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { createRequire } from 'module';
 import {
   deriveIdentityFromSeedPhrase,
-  generateEphemeralKeyPair,
-  x25519DeriveSharedSecret,
-  deriveSessionKeys,
   signMessage,
-  verifySignature,
   sha512,
   bytesToHex,
   stringToBytes,
-  concatBytes,
 } from './identity.js';
-import { NonceStore } from './nonce-store.js';
+import { EphemeralKeySource } from './link/ephemeral-source.js';
+import { advanceBootCounter } from './boot-counter.js';
+import { GMPLink, toHex } from './link/link.js';
+import { MESSAGETYPES } from './link/frame.js';
+import { SessionKeyLRUSet } from './link/session.js';
+import { NonceStore, deriveNonceStoreKey } from './nonce-store.js';
 import { RateLimiter } from './rate-limiter.js';
 import { detectNATType } from './nat-detector.js';
 import { RoutingTable } from './routing-table.js';
@@ -43,1195 +34,29 @@ import { Forwarder } from './forwarder.js';
 import { PeerCache } from './peer-cache.js';
 import { PeerExchangeManager } from './peer-exchange.js';
 import { BootstrapManager } from './bootstrap.js';
-import { LanDiscovery } from './lan-discovery.js';
 import { NetworkHealthMonitor } from './network-health.js';
 import { KeyRotationManager } from './key-rotation.js';
 import { ReputationManager } from './peer-reputation.js';
-import config from './config.js';
+import { DEFAULTS } from './config-defaults.js';
+import { RelayServer } from './relay/relay-server.js';
+import { RelayHop, RelayConnection } from './relay/relay-client.js';
+import { RelayError, decodeControl, encodeControl } from './relay/relay-protocol.js';
+import { nodeIdMatchesKeys } from './link/handshake.js';
+import { SessionExposure, RoleSeparationError, hostKey, SELF_OPERATOR } from './relay/role-separation.js';
+import { loadPublicPeers, listedNodeIdsForAddress } from './public-peer-list.js';
+import { decodeStorage, encodeStorage } from './storage/storage-protocol.js';
+import { BlobStore } from './storage/blob-store.js';
+import { StorageServer } from './storage/storage-server.js';
+import { DATA_DIR, dataPath } from './paths.js';
 import logger from './logger.js';
+import { countOpenFds, readFdLimits } from './fd-limits.js';
 
+const requireLocal = createRequire(import.meta.url);
 
-function toHex(nodeId) {
-  if (typeof nodeId === 'string') return nodeId;
-  if (Buffer.isBuffer(nodeId) || nodeId instanceof Uint8Array) {
-    return Buffer.from(nodeId).toString('hex');
-  }
-  return nodeId;
-}
+const DEFAULT_PORT = DEFAULTS.GMP_PORT;
 
-const MESSAGETYPES = {
-  HELLO: 0x01,
-  HELLO_ACK: 0x02,
-  DATA: 0x03,
-  PING: 0x04,
-  PONG: 0x05,
-  BINDING_REQUEST: 0x06,
-  BINDING_RESPONSE: 0x07,
-  TOPOLOGY_ANNOUNCE: 0x08,
-  PEER_REQUEST: 0x09,
-  PEER_RESPONSE: 0x0A,
-  KEY_ROTATION: 0x0B,
-};
-
-const DEFAULT_PORT = config.GMP_PORT || 49500;
-const PING_INTERVAL_MS = config.GMP_PING_INTERVAL_MS || 30000;
-const PONG_TIMEOUT_MS = config.GMP_PING_TIMEOUT_MS || 10000;
-const MAX_MESSAGE_SIZE = 1024 * 1024;
-const SESSION_KEY_LRU_SIZE = 50;
-// How long a responder waits for the initiator's key-confirmation PING.
-const HANDSHAKE_CONFIRM_TIMEOUT_MS = 10000;
-
-const HELLO_PAYLOAD_LEN = 265;
-const HELLO_ACK_PAYLOAD_LEN = 280;
-
-// A test suite should not reach out to the public bootstrap list, and should
-// not put discovery beacons on the developer's LAN. Both defaults derive from
-// this, but they are separate options: a test that wants one of them can ask
-// for it without getting the other.
-const IS_TEST_PROCESS = !!(process.argv[1] && process.argv[1].includes('test'));
-
-function writeUint32BE(buffer, value, offset) {
-  buffer[offset] = (value >> 24) & 0xff;
-  buffer[offset + 1] = (value >> 16) & 0xff;
-  buffer[offset + 2] = (value >> 8) & 0xff;
-  buffer[offset + 3] = value & 0xff;
-}
-
-function readUint32BE(buffer, offset) {
-  return (
-    (buffer[offset] << 24) |
-    (buffer[offset + 1] << 16) |
-    (buffer[offset + 2] << 8) |
-    buffer[offset + 3]
-  ) >>> 0;
-}
-
-// Build a 12-byte AES-GCM IV from a 64-bit counter value
-// IV structure: 4 bytes zero + 8 bytes counter (big-endian)
-function buildGCMIV(counter) {
-  const iv = Buffer.alloc(12, 0);
-  iv.writeBigUInt64BE(BigInt(counter), 4);
-  return iv;
-}
-
-function encryptAESGCM(key, nonceCounter, plaintext, aad) {
-  const iv = buildGCMIV(nonceCounter);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  if (aad) cipher.setAAD(aad);
-  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return Buffer.concat([authTag, encrypted]);
-}
-
-function decryptAESGCM(key, nonceCounter, ciphertext, aad) {
-  const iv = buildGCMIV(nonceCounter);
-  const authTag = ciphertext.slice(0, 16);
-  const encrypted = ciphertext.slice(16);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(authTag);
-  if (aad) decipher.setAAD(aad);
-  return Buffer.concat([decipher.update(encrypted), decipher.final()]);
-}
-
-// Compare two buffers for equality (timing-safe)
-function bufferEquals(a, b) {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-// Compute a fingerprint of a session key for LRU tracking
-function fingerprintKey(sessionKey) {
-  return crypto.createHash('sha256').update(Buffer.from(sessionKey)).digest('hex').slice(0, 32);
-}
-
-// LRU Set for session key deduplication
-class SessionKeyLRUSet {
-  constructor(maxSize = SESSION_KEY_LRU_SIZE) {
-    this._maxSize = maxSize;
-    this._map = new Map();
-    this._order = [];
-  }
-
-  _touch(key) {
-    const idx = this._order.indexOf(key);
-    if (idx !== -1) {
-      this._order.splice(idx, 1);
-    }
-    this._order.push(key);
-  }
-
-  has(key) {
-    return this._map.has(key);
-  }
-
-  add(key) {
-    if (this._map.has(key)) {
-      this._touch(key);
-      return false;
-    }
-
-    if (this._order.length >= this._maxSize) {
-      const oldest = this._order.shift();
-      this._map.delete(oldest);
-    }
-
-    this._map.set(key, true);
-    this._order.push(key);
-    return true;
-  }
-
-  clear() {
-    this._map.clear();
-    this._order = [];
-  }
-
-  size() {
-    return this._order.length;
-  }
-}
-
-class GMPLink extends EventEmitter {
-  /**
-   * Construct a GMP link over an existing TCP socket.
-   *
-   * Phase 2a changes:
-   * - Accepts rateLimiter for handshake timeout enforcement
-   * - Accepts nonceStore for persisted high-water mark tracking
-   * - Accepts sessionKeyLRUSet for detecting key reuse across connections
-   * - Performs session key uniqueness check to prevent nonce reuse attacks
-   */
-  constructor({ identity, socket, isInitiator, ephemeralKeyPair, rateLimiter, nonceStore, sessionKeyLRUSet, pingIntervalMs, pongTimeoutMs, node, isVirtual }) {
-    super();
-    this.identity = identity;
-    this.socket = socket;
-    this.isInitiator = isInitiator;
-    this.remoteNodeId = null;
-    this.remoteStaticPubkey = null;
-    this.remoteSigningPubkey = null;
-    this.ephemeralKeyPair = ephemeralKeyPair;
-
-    this.sessionKey = null;
-    this.sendKey = null;
-    this.recvKey = null;
-    this.sendNonceCounter = 0;
-    this.recvNonceCounter = 0;
-    this.state = 'handshaking';
-
-    this.recvBuffer = Buffer.alloc(0);
-    this.expectedPayloadLen = 0;
-    this.currentMessageType = null;
-
-    this.pingIntervalMs = pingIntervalMs || PING_INTERVAL_MS;
-    this.pongTimeoutMs = pongTimeoutMs || PONG_TIMEOUT_MS;
-
-    this.pingTimer = null;
-    this.pongTimer = null;
-    this.confirmTimer = null;
-    this.lastPongReceived = false;
-
-    this.initiatorNonce = null;
-    this.initiatorEphemeralPubkey = null;
-
-    this.rateLimiter = rateLimiter;
-    this.nonceStore = nonceStore;
-    this.sessionKeyLRUSet = sessionKeyLRUSet;
-    this.node = node;
-    this.isVirtual = !!isVirtual;
-    this._connId = `link-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    this._setupSocketHandlers();
-  }
-
-  _updateNonceStore() {
-    if (this.nonceStore && this.remoteNodeId && this.sendKey) {
-      this.nonceStore.updateCounters(
-        this.remoteNodeId,
-        this.sendKey,
-        this.sendNonceCounter,
-        this.recvNonceCounter
-      );
-    }
-  }
-
-  _setupSocketHandlers() {
-    this.socket.on('data', (data) => this._handleData(data));
-    this.socket.on('close', () => this._handleClose());
-    this.socket.on('error', (err) => this.emit('error', err));
-  }
-
-  _handleData(data) {
-    this.recvBuffer = Buffer.concat([this.recvBuffer, data]);
-
-    // Intercept plain HTTP GET/HEAD requests (e.g. from reverse proxy health checks)
-    if (this.recvBuffer.length >= 4) {
-      const prefix = this.recvBuffer.slice(0, 4).toString('utf8');
-      if (prefix === 'GET ' || prefix === 'HEAD') {
-        const response = 
-          "HTTP/1.1 200 OK\r\n" +
-          "Content-Type: application/json\r\n" +
-          "Content-Length: 20\r\n" +
-          "Connection: close\r\n\r\n" +
-          '{"status":"healthy"}';
-        this.socket.write(response, () => {
-          this.socket.end();
-        });
-        return;
-      }
-    }
-
-    while (this.recvBuffer.length >= 5) {
-      if (this.expectedPayloadLen === 0) {
-        this.expectedPayloadLen = readUint32BE(this.recvBuffer, 0);
-        this.currentMessageType = this.recvBuffer[4];
-
-        if (this.expectedPayloadLen > MAX_MESSAGE_SIZE) {
-          this.destroy(new Error('Message too large'));
-          return;
-        }
-      }
-
-      const totalLen = 5 + this.expectedPayloadLen;
-      if (this.recvBuffer.length < totalLen) return;
-
-      const type = this.currentMessageType;  // Capture before resetting
-      const payload = this.recvBuffer.slice(5, totalLen);
-      this.recvBuffer = this.recvBuffer.slice(totalLen);
-      this.expectedPayloadLen = 0;
-      this.currentMessageType = null;
-
-      this._processMessage(type, payload);
-    }
-  }
-
-  _processMessage(type, payload) {
-    switch (type) {
-      case MESSAGETYPES.HELLO:
-        // These handlers are async and reach into X25519, which throws on a
-        // malformed/low-order peer key. A throw here is an unhandled rejection
-        // that would take down the whole node process, so a single crafted
-        // HELLO from any unauthenticated peer is a remote crash. Catch it and
-        // tear down just this link instead.
-        this._handleHELLO(payload).catch((err) => this.destroy(err));
-        break;
-      case MESSAGETYPES.HELLO_ACK:
-        this._handleHELLO_ACK(payload).catch((err) => this.destroy(err));
-        break;
-      case MESSAGETYPES.DATA:
-        this._handleDATA(payload);
-        break;
-      case MESSAGETYPES.PING:
-        this._handlePING(payload);
-        break;
-      case MESSAGETYPES.PONG:
-        this._handlePONG(payload);
-        break;
-      case MESSAGETYPES.BINDING_REQUEST:
-        this._handleBINDING_REQUEST(payload);
-        break;
-      case MESSAGETYPES.BINDING_RESPONSE:
-        this._handleBINDING_RESPONSE(payload);
-        break;
-      case MESSAGETYPES.TOPOLOGY_ANNOUNCE:
-        this._handleTOPOLOGY_ANNOUNCE(payload);
-        break;
-      case MESSAGETYPES.PEER_REQUEST:
-        this._handlePEER_REQUEST(payload);
-        break;
-      case MESSAGETYPES.PEER_RESPONSE:
-        this._handlePEER_RESPONSE(payload);
-        break;
-      case MESSAGETYPES.KEY_ROTATION:
-        this._handleKEY_ROTATION(payload);
-        break;
-      default:
-        this.destroy(new Error(`Unknown message type: ${type}`));
-    }
-  }
-
-  async _handleHELLO(payload) {
-    if (this.state !== 'handshaking') { return; }
-
-    if (this.rateLimiter) {
-      this.rateLimiter.recordHelloReceived(this._connId);
-    }
-
-    if (payload.length !== HELLO_PAYLOAD_LEN) {
-      this.destroy(new Error(`Invalid HELLO payload length: ${payload.length}, expected ${HELLO_PAYLOAD_LEN}`));
-      return;
-    }
-
-    // Parse HELLO version byte
-    const version = payload[0];
-    if (version !== 0x01) {
-      this.destroy(new Error(`Unsupported protocol version: ${version}`));
-      return;
-    }
-
-    // Parse HELLO message fields (shifted by 1 byte)
-    const initiatorNodeId = payload.slice(1, 65);
-    const initiatorNodeIdHex = Buffer.from(initiatorNodeId).toString('hex');
-    const remoteIp = this.socket ? this.socket.remoteAddress : null;
-
-    if (this.node && this.node.reputation && this.node.reputation.isBanned(initiatorNodeIdHex, remoteIp)) {
-      this.destroy(new Error('Peer is banned'));
-      return;
-    }
-
-    const initiatorStaticPubkey = payload.slice(65, 97);
-    const initiatorSigningPubkey = payload.slice(97, 129);
-    const initiatorEphemeralPubkey = payload.slice(129, 161);
-    const timestamp = Number(payload.readBigUInt64BE(161));
-    const initiatorNonce = payload.slice(169, 201);
-    const signature = payload.slice(201, 265);
-
-    // Verify NodeID = SHA-512(staticPubkey) or SHA-512(signingPubkey) (to support rotated identities) using timing-safe bufferEquals
-    const computedNodeIdX = sha512(initiatorStaticPubkey);
-    const computedNodeIdEd = sha512(initiatorSigningPubkey);
-    if (!bufferEquals(computedNodeIdX, initiatorNodeId) && !bufferEquals(computedNodeIdEd, initiatorNodeId)) {
-      this._penalizeSuspicious('HELLO NodeID does not match SHA-512(staticPubkey) or SHA-512(signingPubkey)');
-      this.destroy(new Error('HELLO NodeID does not match SHA-512(staticPubkey) or SHA-512(signingPubkey)'));
-      return;
-    }
-
-    // Verify timestamp is within tolerance
-    const now = this.node ? this.node.now() : Date.now();
-    const delta = Math.abs(now - timestamp);
-    const windowMs = this.node ? this.node.timestampWindowMs : 120000;
-    if (delta > windowMs) {
-      this._penalizeSuspicious('HELLO timestamp out of range');
-      this.destroy(new Error('HELLO timestamp out of range'));
-      return;
-    }
-
-    if (delta > 5 * 60 * 1000) {
-      this.emit('clock-skew-detected', { delta, remoteNodeId: initiatorNodeId });
-      if (this.node) {
-        this.node.emit('clock-skew-detected', { delta, link: this, remoteNodeId: initiatorNodeId });
-      }
-    }
-
-    // msgToVerify = bytes 0..200 (the signed portion = all fields except the signature itself)
-    const msgToVerify = payload.slice(0, 201);
-    if (!verifySignature(initiatorSigningPubkey, new Uint8Array(msgToVerify), new Uint8Array(signature))) {
-      this._penalizeUntrusted('HELLO signature verification failed');
-      this.destroy(new Error('HELLO signature verification failed'));
-      return;
-    }
-
-    this.remoteNodeId = initiatorNodeId;
-    this.remoteStaticPubkey = initiatorStaticPubkey;
-    this.remoteSigningPubkey = initiatorSigningPubkey;
-
-    this.initiatorNonce = initiatorNonce;
-    this.initiatorEphemeralPubkey = initiatorEphemeralPubkey;
-
-    // Derive shared session keys from TWO X25519 exchanges:
-    //   - ephemeral<->ephemeral, which gives forward secrecy, and
-    //   - static<->static, between the two identities' long-term X25519 keys,
-    //     which is what authenticates identity.
-    // A NodeID commits to its static public key (NodeID = SHA-512(staticPubKey)),
-    // but the ephemeral-only agreement never exercised the static key, so an
-    // attacker could replay a victim's *public* static key to satisfy the NodeID
-    // check while signing with its own signing key and impersonate the victim
-    // outright. Folding the static-static secret in means only the holder of the
-    // matching static private key reaches the same session key: an impersonator
-    // fails the HELLO_ACK proof. A malformed/low-order key makes X25519 throw, so
-    // the try/catch also keeps a crafted key from crashing the node.
-    let initiatorKey, responderKey;
-    try {
-      const ssEphemeral = x25519DeriveSharedSecret(
-        new Uint8Array(this.ephemeralKeyPair.ephemeralPriv),
-        new Uint8Array(initiatorEphemeralPubkey)
-      );
-      const ssStatic = x25519DeriveSharedSecret(
-        new Uint8Array(this.identity.staticPrivKey),
-        new Uint8Array(initiatorStaticPubkey)
-      );
-      ({ initiatorKey, responderKey } = deriveSessionKeys(
-        concatBytes(ssEphemeral, ssStatic),
-        new Uint8Array(initiatorNodeId),
-        new Uint8Array(this.identity.nodeId)
-      ));
-    } catch (e) {
-      this._penalizeUntrusted('HELLO key agreement failed');
-      this.destroy(new Error('HELLO key agreement failed'));
-      return;
-    }
-
-    // As responder: sendKey = responderKey, recvKey = initiatorKey
-    this.sendKey = Buffer.from(responderKey);
-    this.recvKey = Buffer.from(initiatorKey);
-
-    // Nonce store uniqueness check (Phase 2a persisted check)
-    if (this.nonceStore) {
-      const nsResult = this.nonceStore.claimSessionKey(this.remoteNodeId, fingerprintKey(this.sendKey));
-      if (!nsResult.valid) {
-        logger.error('link', 'security-session-key-reuse', `Session key reuse detected: ${nsResult.reason}`, {
-          reason: nsResult.reason
-        });
-        this._penalizeUntrusted(`Session key reuse detected: ${nsResult.reason}`);
-        this.destroy(new Error(`Session key reuse detected: ${nsResult.reason}`));
-        return;
-      }
-    }
-
-    // Session key uniqueness check (Phase 2a)
-    const keyFingerprint = fingerprintKey(this.sendKey);
-    if (this.sessionKeyLRUSet) {
-      if (this.sessionKeyLRUSet.has(keyFingerprint)) {
-        logger.error('link', 'security-duplicate-session-key', `Duplicate session key detected for peer ${Buffer.from(initiatorNodeId).toString('hex').slice(0, 16)}...`);
-        this._penalizeUntrusted('Session key reuse detected');
-        this.destroy(new Error('Session key reuse detected - possible attack or crypto bug'));
-        return;
-      }
-      this.sessionKeyLRUSet.add(keyFingerprint);
-    }
-
-    // Encrypt the initiator's nonce as proof-of-key using responder's send key
-    // This proves we (responder) successfully derived the session key
-    const encryptedProof = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      Buffer.from(initiatorNonce),
-      null  // No AAD for the proof encryption in Phase 1
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-
-    // Not 'connected' yet. HELLO_ACK proves *our* key to the initiator, but
-    // nothing so far proves the initiator holds the static key its NodeID
-    // commits to — anyone can replay a victim's public HELLO fields. Treating
-    // the link as live here would emit 'connection' for the claimed NodeID,
-    // announce an edge to it, and record the claimant's signing key in the peer
-    // cache (which key rotation later trusts). Wait for key confirmation: the
-    // initiator's first frame is an encrypted PING, which only decrypts if it
-    // derived the same session keys (see _handlePING). The state is set before
-    // the write so a fast PING is not dropped as arriving mid-handshake.
-    this.state = 'confirming';
-    this.confirmTimer = setTimeout(() => {
-      if (this.state === 'confirming') this.destroy(new Error('Handshake confirmation timeout'));
-    }, HANDSHAKE_CONFIRM_TIMEOUT_MS);
-    if (this.confirmTimer.unref) this.confirmTimer.unref();
-    await this._sendHELLO_ACK(encryptedProof);
-  }
-
-  async _handleHELLO_ACK(payload) {
-    if (this.state !== 'handshaking') { return; }
-
-    if (payload.length !== HELLO_ACK_PAYLOAD_LEN) {
-      this.destroy(new Error(`Invalid HELLO_ACK payload length: ${payload.length}, expected ${HELLO_ACK_PAYLOAD_LEN}`));
-      return;
-    }
-
-    // Parse HELLO_ACK message fields
-    const responderNodeId = payload.slice(0, 64);
-    const responderNodeIdHex = Buffer.from(responderNodeId).toString('hex');
-    const remoteIp = this.socket ? this.socket.remoteAddress : null;
-
-    if (this.node && this.node.reputation && this.node.reputation.isBanned(responderNodeIdHex, remoteIp)) {
-      this.destroy(new Error('Peer is banned'));
-      return;
-    }
-
-    const responderStaticPubkey = payload.slice(64, 96);
-    const responderSigningPubkey = payload.slice(96, 128);
-    const responderEphemeralPubkey = payload.slice(128, 160);
-    const timestamp = Number(payload.readBigUInt64BE(160));
-    const encryptedProof = payload.slice(168, 216); // 48 bytes: 16 tag + 32 ciphertext
-    const signature = payload.slice(216, 280);
-
-    // Verify NodeID = SHA-512(staticPubkey) or SHA-512(signingPubkey) (to support rotated identities) using timing-safe bufferEquals
-    const computedNodeIdX = sha512(responderStaticPubkey);
-    const computedNodeIdEd = sha512(responderSigningPubkey);
-    if (!bufferEquals(computedNodeIdX, responderNodeId) && !bufferEquals(computedNodeIdEd, responderNodeId)) {
-      this._penalizeSuspicious('HELLO_ACK NodeID does not match SHA-512(staticPubkey) or SHA-512(signingPubkey)');
-      this.destroy(new Error('HELLO_ACK NodeID does not match SHA-512(staticPubkey) or SHA-512(signingPubkey)'));
-      return;
-    }
-
-    // Verify timestamp
-    const now = this.node ? this.node.now() : Date.now();
-    const delta = Math.abs(now - timestamp);
-    const windowMs = this.node ? this.node.timestampWindowMs : 120000;
-    if (delta > windowMs) {
-      this._penalizeSuspicious('HELLO_ACK timestamp out of range');
-      this.destroy(new Error('HELLO_ACK timestamp out of range'));
-      return;
-    }
-
-    if (delta > 5 * 60 * 1000) {
-      this.emit('clock-skew-detected', { delta, remoteNodeId: responderNodeId });
-      if (this.node) {
-        this.node.emit('clock-skew-detected', { delta, link: this, remoteNodeId: responderNodeId });
-      }
-    }
-
-    // Verify signature over signed portion (bytes 0..215)
-    // Signature is at offset 216, so signed portion is 0..215 (216 bytes)
-    const signedPortion = payload.slice(0, 216);
-    const sig = payload.slice(216, 280);
-    if (!verifySignature(responderSigningPubkey, new Uint8Array(signedPortion), new Uint8Array(sig))) {
-      this._penalizeUntrusted('HELLO_ACK signature verification failed');
-      this.destroy(new Error('HELLO_ACK signature verification failed'));
-      return;
-    }
-
-    this.remoteNodeId = responderNodeId;
-    this.remoteStaticPubkey = responderStaticPubkey;
-    this.remoteSigningPubkey = responderSigningPubkey;
-
-    // Derive shared session keys from the ephemeral<->ephemeral exchange (for
-    // forward secrecy) combined with the static<->static exchange between the
-    // two identities' long-term X25519 keys (which authenticates identity —
-    // see the matching comment in _handleHELLO). A malformed peer key makes
-    // X25519 throw, so the try/catch keeps a crafted HELLO_ACK from crashing us.
-    // As initiator (isInitiator=true), we are the "initiator" in protocol terms
-    // initiatorInfo binds keys to (initiatorNodeId, responderNodeId)
-    let initiatorKey, responderKey;
-    try {
-      const ssEphemeral = x25519DeriveSharedSecret(
-        new Uint8Array(this.ephemeralKeyPair.ephemeralPriv),
-        new Uint8Array(responderEphemeralPubkey)
-      );
-      const ssStatic = x25519DeriveSharedSecret(
-        new Uint8Array(this.identity.staticPrivKey),
-        new Uint8Array(responderStaticPubkey)
-      );
-      ({ initiatorKey, responderKey } = deriveSessionKeys(
-        concatBytes(ssEphemeral, ssStatic),
-        new Uint8Array(this.identity.nodeId),
-        new Uint8Array(responderNodeId)
-      ));
-    } catch (e) {
-      this._penalizeUntrusted('HELLO_ACK key agreement failed');
-      this.destroy(new Error('HELLO_ACK key agreement failed'));
-      return;
-    }
-
-    // As initiator: sendKey = initiatorKey, recvKey = responderKey
-    this.sendKey = Buffer.from(initiatorKey);
-    this.recvKey = Buffer.from(responderKey);
-
-    // Nonce store uniqueness check (Phase 2a persisted check)
-    if (this.nonceStore) {
-      const nsResult = this.nonceStore.claimSessionKey(this.remoteNodeId, fingerprintKey(this.sendKey));
-      if (!nsResult.valid) {
-        logger.error('link', 'security-session-key-reuse', `Session key reuse detected: ${nsResult.reason}`, {
-          reason: nsResult.reason
-        });
-        this._penalizeUntrusted(`Session key reuse detected: ${nsResult.reason}`);
-        this.destroy(new Error(`Session key reuse detected: ${nsResult.reason}`));
-        return;
-      }
-    }
-
-    // Session key uniqueness check (Phase 2a)
-    const keyFingerprint = fingerprintKey(this.sendKey);
-    if (this.sessionKeyLRUSet) {
-      if (this.sessionKeyLRUSet.has(keyFingerprint)) {
-        logger.error('link', 'security-duplicate-session-key', `Duplicate session key detected for peer ${Buffer.from(responderNodeId).toString('hex').slice(0, 16)}...`);
-        this._penalizeUntrusted('Session key reuse detected');
-        this.destroy(new Error('Session key reuse detected - possible attack or crypto bug'));
-        return;
-      }
-      this.sessionKeyLRUSet.add(keyFingerprint);
-    }
-
-    // Decrypt proof to verify session key derivation
-    // The proof is the initiator's nonce, encrypted with the responder's key
-    try {
-      const decryptedProof = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(encryptedProof),
-        null
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      // Verify the decrypted proof matches our original initiatorNonce
-      if (!bufferEquals(Buffer.from(decryptedProof), Buffer.from(this.initiatorNonce))) {
-        this._penalizeUntrusted('HELLO_ACK proof verification failed - nonce mismatch');
-        this.destroy(new Error('HELLO_ACK proof verification failed - nonce mismatch'));
-        return;
-      }
-    } catch (e) {
-      this._penalizeUntrusted('HELLO_ACK proof decryption failed - possible replay or tampering');
-      this.destroy(new Error('HELLO_ACK proof decryption failed - possible replay or tampering'));
-      return;
-    }
-
-    this.state = 'connected';
-    // Key confirmation for the responder, sent before anything else on this
-    // session so it is the first frame the responder decrypts (_handlePING).
-    this._sendPING();
-    this._startPingTimer();
-    this.emit('connected', { peerNodeId: this.remoteNodeId });
-  }
-
-  _handleDATA(payload) {
-    if (this.state !== 'connected') return;
-
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0); // payload includes 16-byte auth tag
-      header[4] = MESSAGETYPES.DATA;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      if (this.node && this.node.forwarder) {
-        const result = this.node.forwarder.processIncoming(plaintext, this);
-        if (result) {
-          if (result.local) {
-            this.node.handleIncomingRoutedPayload(result.sourceNodeId, result.payload);
-          }
-          return;
-        }
-      }
-
-      this.emit('message', plaintext.toString('utf8'));
-    } catch (e) {
-      this._penalizeSuspicious('DATA decryption failed');
-      this.destroy(new Error('DATA decryption failed'));
-    }
-  }
-
-  _handlePING(payload) {
-    if (this.state !== 'connected' && this.state !== 'confirming') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.PING;
-
-      decryptAESGCM(this.recvKey, this.recvNonceCounter, Buffer.from(payload), header);
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-      if (this.state === 'confirming') {
-        // Key confirmation from the initiator: only now is its identity proven.
-        clearTimeout(this.confirmTimer);
-        this.confirmTimer = null;
-        this.state = 'connected';
-        this._startPingTimer();
-        this.emit('connected', { peerNodeId: this.remoteNodeId });
-      }
-      this._sendPONG();
-    } catch (e) {
-      this._penalizeSuspicious('PING decryption failed');
-      this.destroy(new Error('PING decryption failed'));
-    }
-  }
-
-  _handlePONG(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.PONG;
-
-      decryptAESGCM(this.recvKey, this.recvNonceCounter, Buffer.from(payload), header);
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-      this.lastPongReceived = true;
-      if (this.pongTimer) {
-        clearTimeout(this.pongTimer);
-        this.pongTimer = null;
-      }
-    } catch (e) {
-      this._penalizeSuspicious('PONG decryption failed');
-      this.destroy(new Error('PONG decryption failed'));
-    }
-  }
-
-  async _sendHELLO() {
-    // Generate fresh ephemeral keypair for this connection (provides forward secrecy)
-    this.ephemeralKeyPair = generateEphemeralKeyPair();
-    const timestamp = this.node ? this.node.now() : Date.now();
-    const initiatorNonce = crypto.randomBytes(32);
-
-    this.initiatorNonce = initiatorNonce;
-
-    // Build the signed portion of HELLO (bytes 0..200 = 201 bytes)
-    const signedPayload = Buffer.alloc(201);
-    signedPayload[0] = 0x01;                                                    // 0: version (0x01)
-    signedPayload.set(Buffer.from(this.identity.nodeId), 1);                    // 1-64: nodeId
-    signedPayload.set(Buffer.from(this.identity.staticPubKey), 65);             // 65-96: staticPubkey
-    signedPayload.set(Buffer.from(this.identity.signingPubKey), 97);            // 97-128: signingPubkey
-    signedPayload.set(Buffer.from(this.ephemeralKeyPair.ephemeralPub), 129);   // 129-160: ephemeralPubkey
-    signedPayload.writeBigUInt64BE(BigInt(timestamp), 161);                     // 161-168: timestamp
-    signedPayload.set(initiatorNonce, 169);                                     // 169-200: nonce
-
-    // Sign the signed portion with our Ed25519 signing key
-    const signature = signMessage(
-      new Uint8Array(this.identity.signingPrivKey),
-      new Uint8Array(signedPayload)
-    );
-
-    // Build complete HELLO payload (265 bytes)
-    const payload = Buffer.alloc(HELLO_PAYLOAD_LEN);
-    payload.set(signedPayload, 0);
-    payload.set(Buffer.from(signature), 201);
-
-    await this._sendRawMessage(MESSAGETYPES.HELLO, payload);
-  }
-
-  async _sendHELLO_ACK(encryptedProof) {
-    const timestamp = this.node ? this.node.now() : Date.now();
-
-    // Build signed portion (bytes 0..215): all fields except signature
-    // NodeID(64) + staticPub(32) + signingPub(32) + ephemeralPub(32) + timestamp(8) + encryptedProof(48) = 216
-    const signedPayload = Buffer.alloc(216);
-    signedPayload.set(Buffer.from(this.identity.nodeId), 0);
-    signedPayload.set(Buffer.from(this.identity.staticPubKey), 64);
-    signedPayload.set(Buffer.from(this.identity.signingPubKey), 96);
-    signedPayload.set(Buffer.from(this.ephemeralKeyPair.ephemeralPub), 128);
-    signedPayload.writeBigUInt64BE(BigInt(timestamp), 160);
-    signedPayload.set(encryptedProof, 168);
-
-    const signature = signMessage(
-      new Uint8Array(this.identity.signingPrivKey),
-      new Uint8Array(signedPayload)
-    );
-
-    // Build complete payload (280 bytes)
-    const payload = Buffer.alloc(HELLO_ACK_PAYLOAD_LEN);
-    payload.set(Buffer.from(this.identity.nodeId), 0);
-    payload.set(Buffer.from(this.identity.staticPubKey), 64);
-    payload.set(Buffer.from(this.identity.signingPubKey), 96);
-    payload.set(Buffer.from(this.ephemeralKeyPair.ephemeralPub), 128);
-    payload.writeBigUInt64BE(BigInt(timestamp), 160);
-    payload.set(encryptedProof, 168);
-    payload.set(Buffer.from(signature), 216);
-
-    await this._sendRawMessage(MESSAGETYPES.HELLO_ACK, payload);
-  }
-
-  _sendPING() {
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(0, 0); // Empty plaintext = 0 bytes
-    header[4] = MESSAGETYPES.PING;
-
-    const encryptedPayload = encryptAESGCM(this.sendKey, this.sendNonceCounter, Buffer.alloc(0), header);
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.PING, encryptedPayload);
-
-    this.lastPongReceived = false;
-    this.pongTimer = setTimeout(() => {
-      if (!this.lastPongReceived) {
-        this.destroy(new Error('PONG timeout'));
-      }
-    }, this.pongTimeoutMs);
-  }
-
-  _sendPONG() {
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(0, 0);
-    header[4] = MESSAGETYPES.PONG;
-
-    const encryptedPayload = encryptAESGCM(this.sendKey, this.sendNonceCounter, Buffer.alloc(0), header);
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.PONG, encryptedPayload);
-  }
-
-  async send(data) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send on non-connected link');
-    }
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(Buffer.byteLength(data), 0);
-    header[4] = MESSAGETYPES.DATA;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      Buffer.from(data, 'utf8'),
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    await this._sendRawNoEncrypt(MESSAGETYPES.DATA, encryptedPayload);
-  }
-
-  _sendRawMessage(type, payload) {
-    return new Promise((resolve, reject) => {
-      const lenBuf = Buffer.alloc(4);
-      writeUint32BE(lenBuf, payload.length, 0);
-      const frame = Buffer.concat([lenBuf, Buffer.from([type]), payload]);
-      this.socket.write(frame, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-  }
-
-  _sendRawNoEncrypt(type, payload) {
-    const lenBuf = Buffer.alloc(4);
-    writeUint32BE(lenBuf, payload.length, 0);
-    const frame = Buffer.concat([lenBuf, Buffer.from([type]), payload]);
-    this.socket.write(frame);
-  }
-
-  _startPingTimer() {
-    this.pingTimer = setInterval(() => {
-      if (this.state === 'connected') {
-        this._sendPING();
-      }
-    }, this.pingIntervalMs);
-  }
-
-  _handleClose() {
-    this._cleanup();
-    this.emit('close');
-  }
-
-  _cleanup() {
-    this._updateNonceStore();
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    if (this.pongTimer) clearTimeout(this.pongTimer);
-    if (this.confirmTimer) clearTimeout(this.confirmTimer);
-    this.state = 'closed';
-  }
-
-  destroy(err) {
-    this._cleanup();
-    if (err) this.emit('error', err);
-    try {
-      this.socket.destroy();
-    } catch (e) {}
-  }
-
-  _penalizeSuspicious(reason) {
-    if (this.node && this.node.reputation) {
-      const peerHex = this.remoteNodeId ? Buffer.from(this.remoteNodeId).toString('hex') : null;
-      const remoteIp = this.socket ? this.socket.remoteAddress : null;
-      this.node.reputation.penalize(peerHex, 10, reason, remoteIp);
-    }
-  }
-
-  _penalizeUntrusted(reason) {
-    if (this.node && this.node.reputation) {
-      const peerHex = this.remoteNodeId ? Buffer.from(this.remoteNodeId).toString('hex') : null;
-      const remoteIp = this.socket ? this.socket.remoteAddress : null;
-      this.node.reputation.penalize(peerHex, 50, reason, remoteIp);
-    }
-  }
-
-  _penalizeBanned(reason) {
-    if (this.node && this.node.reputation) {
-      const peerHex = this.remoteNodeId ? Buffer.from(this.remoteNodeId).toString('hex') : null;
-      const remoteIp = this.socket ? this.socket.remoteAddress : null;
-      this.node.reputation.penalize(peerHex, 100, reason, remoteIp);
-    }
-  }
-
-  _handleBINDING_REQUEST(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.BINDING_REQUEST;
-
-      decryptAESGCM(this.recvKey, this.recvNonceCounter, Buffer.from(payload), header);
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      this._sendBINDING_RESPONSE();
-    } catch (e) {
-      this._penalizeSuspicious('BINDING_REQUEST decryption failed');
-      this.destroy(new Error('BINDING_REQUEST decryption failed'));
-    }
-  }
-
-  _sendBINDING_RESPONSE() {
-    const remoteAddress = this.socket.remoteAddress;
-    const remotePort = this.socket.remotePort;
-    const dataStr = JSON.stringify({ address: remoteAddress, port: remotePort });
-    const dataBuf = Buffer.from(dataStr, 'utf8');
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(dataBuf.length, 0);
-    header[4] = MESSAGETYPES.BINDING_RESPONSE;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      dataBuf,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.BINDING_RESPONSE, encryptedPayload);
-  }
-
-  _handleBINDING_RESPONSE(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.BINDING_RESPONSE;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      const info = JSON.parse(plaintext.toString('utf8'));
-      this.emit('binding-response', info);
-    } catch (e) {
-      this._penalizeSuspicious('BINDING_RESPONSE decryption or parsing failed');
-      this.destroy(new Error('BINDING_RESPONSE decryption or parsing failed'));
-    }
-  }
-
-  sendBindingRequest() {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send binding request on non-connected link');
-    }
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(0, 0);
-    header[4] = MESSAGETYPES.BINDING_REQUEST;
-
-    const encryptedPayload = encryptAESGCM(this.sendKey, this.sendNonceCounter, Buffer.alloc(0), header);
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.BINDING_REQUEST, encryptedPayload);
-  }
-
-  _handleTOPOLOGY_ANNOUNCE(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.TOPOLOGY_ANNOUNCE;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      const announce = JSON.parse(plaintext.toString('utf8'));
-      if (this.node && this.node.topologyManager) {
-        this.node.topologyManager.handleReceivedAnnounce(announce, this);
-      }
-    } catch (e) {
-      this._penalizeSuspicious('TOPOLOGY_ANNOUNCE decryption failed');
-      this.destroy(new Error('TOPOLOGY_ANNOUNCE decryption failed'));
-    }
-  }
-
-  sendTopologyAnnounce(announce) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send topology announce on non-connected link');
-    }
-    const dataStr = JSON.stringify(announce);
-    const dataBuf = Buffer.from(dataStr, 'utf8');
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(dataBuf.length, 0);
-    header[4] = MESSAGETYPES.TOPOLOGY_ANNOUNCE;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      dataBuf,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.TOPOLOGY_ANNOUNCE, encryptedPayload);
-  }
-
-  sendPeerRequest(maxPeers) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send peer request on non-connected link');
-    }
-    const dataStr = JSON.stringify({ maxPeers });
-    const dataBuf = Buffer.from(dataStr, 'utf8');
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(dataBuf.length, 0);
-    header[4] = MESSAGETYPES.PEER_REQUEST;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      dataBuf,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.PEER_REQUEST, encryptedPayload);
-  }
-
-  sendPeerResponse(peers) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send peer response on non-connected link');
-    }
-    const dataStr = JSON.stringify({ peers });
-    const dataBuf = Buffer.from(dataStr, 'utf8');
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(dataBuf.length, 0);
-    header[4] = MESSAGETYPES.PEER_RESPONSE;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      dataBuf,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.PEER_RESPONSE, encryptedPayload);
-  }
-
-  _handlePEER_REQUEST(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.PEER_REQUEST;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      const msg = JSON.parse(plaintext.toString('utf8'));
-      if (this.node && this.node.peerExchange) {
-        this.node.peerExchange.handlePeerRequest(this, msg);
-      }
-    } catch (e) {
-      this._penalizeSuspicious('PEER_REQUEST decryption failed');
-      this.destroy(new Error('PEER_REQUEST decryption failed'));
-    }
-  }
-
-  _handlePEER_RESPONSE(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.PEER_RESPONSE;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      const msg = JSON.parse(plaintext.toString('utf8'));
-      if (this.node && this.node.peerExchange) {
-        this.node.peerExchange.handlePeerResponse(this, msg);
-      }
-    } catch (e) {
-      this._penalizeSuspicious('PEER_RESPONSE decryption failed');
-      this.destroy(new Error('PEER_RESPONSE decryption failed'));
-    }
-  }
-
-  sendKeyRotation(cert, sequenceNumber, ttl) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send key rotation on non-connected link');
-    }
-    const dataStr = JSON.stringify({ cert, sequenceNumber, ttl });
-    const dataBuf = Buffer.from(dataStr, 'utf8');
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(dataBuf.length, 0);
-    header[4] = MESSAGETYPES.KEY_ROTATION;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      dataBuf,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.KEY_ROTATION, encryptedPayload);
-  }
-
-  _handleKEY_ROTATION(payload) {
-    if (this.state !== 'connected') return;
-    try {
-      const header = Buffer.alloc(5);
-      writeUint32BE(header, payload.length - 16, 0);
-      header[4] = MESSAGETYPES.KEY_ROTATION;
-
-      const plaintext = decryptAESGCM(
-        this.recvKey,
-        this.recvNonceCounter,
-        Buffer.from(payload),
-        header
-      );
-      this.recvNonceCounter++;
-      this._updateNonceStore();
-
-      const msg = JSON.parse(plaintext.toString('utf8'));
-      if (this.node && this.node.keyRotationManager) {
-        this.node.keyRotationManager.handleReceivedRotation(msg, this);
-      }
-    } catch (e) {
-      this._penalizeSuspicious('KEY_ROTATION decryption failed');
-      this.destroy(new Error('KEY_ROTATION decryption failed'));
-    }
-  }
-
-  sendRoutedDATA(finalDest, hopCount, payload, sourceNodeId) {
-    if (this.state !== 'connected') {
-      throw new Error('Cannot send on non-connected link');
-    }
-
-    const source = sourceNodeId || this.identity.nodeId.slice(0, 32);
-    const dest = toHex(finalDest);
-    const destBuf = Buffer.from(dest, 'hex').slice(0, 32);
-
-    const plaintext = Buffer.alloc(1 + 32 + 32 + 1 + payload.length);
-    plaintext[0] = 0x01; // isRouted
-    plaintext.set(source, 1);
-    plaintext.set(destBuf, 33);
-    plaintext[65] = hopCount;
-    plaintext.set(payload, 66);
-
-    const header = Buffer.alloc(5);
-    header.writeUInt32BE(plaintext.length, 0);
-    header[4] = MESSAGETYPES.DATA;
-
-    const encryptedPayload = encryptAESGCM(
-      this.sendKey,
-      this.sendNonceCounter,
-      plaintext,
-      header
-    );
-    this.sendNonceCounter++;
-    this._updateNonceStore();
-    this._sendRawNoEncrypt(MESSAGETYPES.DATA, encryptedPayload);
-  }
-}
+// Tests isolate themselves through the environment (GMP_LAN_DISCOVERY=false,
+// empty GMP_PUBLIC_PEERS_PATH); there is no test-process detection here.
 
 class VirtualSocket extends EventEmitter {
   constructor({ node, sourceNodeId, destNodeId }) {
@@ -1247,7 +72,7 @@ class VirtualSocket extends EventEmitter {
     const destHex = toHex(this.destNodeId);
     const route = this.node.routingTable.getBestRoute(destHex);
     if (!route) {
-      this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32) });
+      this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32).toString('hex') });
       const err = new Error('no-route');
       this.emit('error', err);
       if (callback) callback(err);
@@ -1256,7 +81,7 @@ class VirtualSocket extends EventEmitter {
 
     const nextHopLink = this.node.getLinkByNodeId(route.nextHopNodeId);
     if (!nextHopLink || nextHopLink.state !== 'connected') {
-      this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32) });
+      this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32).toString('hex') });
       const err = new Error('no-route');
       this.emit('error', err);
       if (callback) callback(err);
@@ -1272,14 +97,42 @@ class VirtualSocket extends EventEmitter {
     }
   }
 
+  /** Called by GMPLink's HTTP health-check shim. */
+  end() {
+    this.destroy();
+  }
+
   destroy() {
     this.emit('close');
   }
 }
 
+/**
+ * A reservation this node holds on a relay.
+ * @typedef {{
+ *   hop: RelayHop,
+ *   key: string,
+ *   relayNodeId: string,
+ *   operator: string | null,
+ *   current: { voucherId: string, voucher: import('./relay/relay-protocol.js').Voucher },
+ *   timer: ReturnType<typeof setTimeout> | null,
+ * }} RelayReservationEntry
+ */
+
+/** @extends {EventEmitter<import('./events.js').GMPNodeEvents>} */
 class GMPNode extends EventEmitter {
+  /**
+   * - `config`: a resolved GMPConfig; DEFAULTS when omitted. GMPNode never
+   *   reads the environment or a config file itself.
+   * - Individual options (port, minPeers, ...) beat the config value.
+   * - `dataDir`: where this node's state lives; required to differ for two
+   *   nodes in one process. Defaults to the paths.ts locations.
+   */
   constructor({
-    port = DEFAULT_PORT,
+    config = null,
+    dataDir = null,
+    port = null,
+    transport = null,
     rateLimiter = null,
     nonceStore = null,
     nonceStorePath = null,
@@ -1290,50 +143,92 @@ class GMPNode extends EventEmitter {
     bindingRateLimiter = null,
     pingIntervalMs = null,
     pongTimeoutMs = null,
-    forwardRateLimitMax = 500,
-    forwardRateLimitWindowMs = 60000,
-    announceIntervalMs = 60000,
+    forwardRateLimitMax = null,
+    forwardRateLimitWindowMs = null,
+    announceIntervalMs = null,
     peerCachePath = null,
     publicPeersPath = null,
-    minPeers = 3,
+    minPeers = null,
     bootstrapParallelCount = 5,
-    disableBootstrap = IS_TEST_PROCESS,
-    lanDiscovery = config.GMP_LAN_DISCOVERY !== undefined
-      ? config.GMP_LAN_DISCOVERY !== false
-      : !IS_TEST_PROCESS,
-    lanDiscoveryPort = config.GMP_LAN_DISCOVERY_PORT,
-    lanDiscoveryGroup = config.GMP_LAN_DISCOVERY_GROUP,
+    disableBootstrap = false,
+    lanDiscovery = null,
+    lanDiscoveryPort = null,
+    lanDiscoveryGroup = null,
     seedPhrase = null,
-    timestampWindowMs = 120000,
-    reputationBanDurationMs = 24 * 60 * 60 * 1000,
-    reputationRecoveryIntervalMs = 60 * 1000,
+    timestampWindowMs = null,
+    reputationBanDurationMs = null,
+    reputationRecoveryIntervalMs = null,
   } = {}) {
     super();
-    this.port = port;
-    this.server = null;
+    const cfg = Object.freeze({ ...DEFAULTS, ...(config || {}) });
+    /** The configuration this node runs with (read-only). */
+    this.config = cfg;
+    this.dataDir = dataDir ? path.resolve(dataDir) : null;
+    if (this.dataDir) {
+      fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+    }
+    const inDataDir = (name) => (this.dataDir ? path.join(this.dataDir, name) : null);
+
+    // ?? not ||: GMP_PORT=0 asks for an ephemeral port, as it always has
+    // through the manager.
+    this.port = port ?? cfg.GMP_PORT;
+    // Injectable transport; the TCP default is loaded lazily so platforms
+    // without `net` can still construct a node with their own transport.
+    this.transport = transport || new (requireLocal('./transport/tcp-transport.js').TcpTransport)();
+    this.listener = null;
     this.links = new Map();
     this.identity = null;
     this.connections = new Map();
-    this.rateLimiter = rateLimiter;
+    // Always built: it owns the HELLO/handshake timeouts, a global concurrent
+    // cap and a per-address token bucket. No per-address concurrent cap (CGNAT).
+    this.rateLimiter = rateLimiter || new RateLimiter({
+      maxGlobal: cfg.GMP_RATE_LIMIT_MAX_GLOBAL,
+      ratePerMinute: cfg.GMP_INBOUND_RATE_PER_MINUTE,
+      burst: cfg.GMP_INBOUND_BURST,
+      helloTimeoutMs: cfg.GMP_HELLO_TIMEOUT_MS,
+      handshakeTimeoutMs: cfg.GMP_HANDSHAKE_TIMEOUT_MS,
+      warnFraction: cfg.GMP_FD_WARN_FRACTION,
+      refusalLogIntervalMs: cfg.GMP_REFUSAL_LOG_INTERVAL_MS,
+    });
     this.nonceStore = nonceStore;
-    this.sessionKeyLRUSet = sessionKeyLRUSet;
+    // Defence-in-depth only: entries are inserted before key confirmation, so
+    // this is not the replay guard. Ephemeral non-repetition is.
+    this.sessionKeyLRUSet = sessionKeyLRUSet || new SessionKeyLRUSet();
+    // Set in loadIdentity from the durable boot counter; null until then.
+    this.ephemeralSource = null;
     this.isPublicPeer = isPublicPeer;
     this.establishedPeers = establishedPeers;
     this.bindingRateLimiter = bindingRateLimiter || (isPublicPeer ? new RateLimiter({
-      windowMs: 60000,
-      maxPerIp: 2,
+      // Unchanged in effect: at most 2 binding connections per address per
+      // minute (was a 2-per-60 s window; now a bucket of 2 refilling 2/min).
+      ratePerMinute: 2,
+      burst: 2,
       maxGlobal: 20,
+      helloTimeoutMs: cfg.GMP_HELLO_TIMEOUT_MS,
+      handshakeTimeoutMs: cfg.GMP_HANDSHAKE_TIMEOUT_MS,
     }) : null);
-    this.pingIntervalMs = pingIntervalMs;
-    this.pongTimeoutMs = pongTimeoutMs;
+    // Resolved here rather than in GMPLink so link/ never reads configuration.
+    this.pingIntervalMs = pingIntervalMs || cfg.GMP_PING_INTERVAL_MS || 30000;
+    this.pongTimeoutMs = pongTimeoutMs || cfg.GMP_PING_TIMEOUT_MS || 10000;
 
-    this.forwardRateLimitMax = forwardRateLimitMax;
-    this.forwardRateLimitWindowMs = forwardRateLimitWindowMs;
-    this.timestampWindowMs = timestampWindowMs;
+    this.forwardRateLimitMax = forwardRateLimitMax ?? cfg.GMP_FORWARD_RATE_LIMIT_PER_SOURCE;
+    this.forwardRateLimitWindowMs = forwardRateLimitWindowMs ?? cfg.GMP_RATE_LIMIT_WINDOW_MS;
+    this.timestampWindowMs = timestampWindowMs ?? cfg.GMP_TIMESTAMP_WINDOW_MS;
 
     // Phase 3 Modules
-    this.routingTable = new RoutingTable();
-    this.topologyManager = new TopologyManager(this, { announceIntervalMs });
+    this.routingTable = new RoutingTable({
+      expiryTimeoutMs: cfg.GMP_ROUTE_EXPIRY_MS,
+      pruneIntervalMs: cfg.GMP_REANNOUNCE_INTERVAL_MS,
+    });
+    this.topologyManager = new TopologyManager(this, {
+      announceIntervalMs: announceIntervalMs ?? cfg.GMP_REANNOUNCE_INTERVAL_MS,
+      sequenceNumLruSize: cfg.GMP_SEQUENCE_NUM_LRU_SIZE,
+      topologyTtl: cfg.GMP_TOPOLOGY_TTL,
+      validityMs: cfg.GMP_TOPOLOGY_ANNOUNCE_VALIDITY_MS,
+      sampleSize: cfg.GMP_TOPOLOGY_SAMPLE_SIZE,
+      sampleEpochMs: cfg.GMP_TOPOLOGY_SAMPLE_EPOCH_MS,
+      routeQueryTtl: cfg.GMP_ROUTE_QUERY_TTL,
+    });
     this.forwarder = new Forwarder(this);
     this.virtualConnections = new Map();
 
@@ -1342,21 +237,28 @@ class GMPNode extends EventEmitter {
     let nonceKey = null;
     if (seedPhrase) {
       cacheKey = crypto.pbkdf2Sync(seedPhrase, 'ghostlink-peer-cache-v1', 100000, 32, 'sha256');
-      nonceKey = crypto.pbkdf2Sync(seedPhrase, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
+      nonceKey = deriveNonceStoreKey(seedPhrase);
     }
 
     // Phase 4 Modules
-    this.peerCache = new PeerCache({ filePath: peerCachePath });
+    this.peerCache = new PeerCache({
+      filePath: peerCachePath || inDataDir('peer-cache.json'),
+      strictState: cfg.GMP_STRICT_STATE,
+      maxSize: cfg.GMP_PEER_CACHE_MAX_SIZE,
+      pruneAgeDays: cfg.GMP_PEER_CACHE_PRUNE_AGE_DAYS,
+      pruneFailureThreshold: cfg.GMP_PEER_CACHE_PRUNE_FAILURE_THRESHOLD,
+    });
 
-    // Build a NonceStore unless one was injected. The default was null and
-    // nothing ever supplied one, so every guard below short-circuited and the
-    // persisted half of the session-key uniqueness check simply did not exist:
-    // a session key could be reused across restarts with nothing to notice,
-    // which with AES-GCM means nonce reuse.
+    // Always build a NonceStore unless one was injected.
     if (!this.nonceStore) {
+      const stateFile = nonceStorePath || inDataDir('nonce-state.json');
       this.nonceStore = new NonceStore({
-        ...(nonceStorePath ? { stateFile: nonceStorePath } : {}),
-        ...(noncePruneAgeMs ? { pruneAgeMs: noncePruneAgeMs } : {}),
+        ...(stateFile ? { stateFile } : {}),
+        // A dataDir gets the default layout (nonce-claims.log beside the state
+        // file); an explicit nonceStorePath keeps NonceStore's own naming.
+        ...(!nonceStorePath && this.dataDir ? { claimsFile: inDataDir('nonce-claims.log') } : {}),
+        pruneAgeMs: noncePruneAgeMs || cfg.GMP_NONCE_PRUNE_AGE_MS,
+        strictState: cfg.GMP_STRICT_STATE,
       });
     }
     if (cacheKey) {
@@ -1366,36 +268,68 @@ class GMPNode extends EventEmitter {
       this.nonceStore.setEncryptionKey(nonceKey);
     }
 
-    this.peerExchange = new PeerExchangeManager(this);
-    this.bootstrap = new BootstrapManager(this, { minPeers, parallelCount: bootstrapParallelCount, disableBootstrap, publicPeersPath });
+    this.peerExchange = new PeerExchangeManager(this, {
+      requestIntervalMs: cfg.GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS,
+      maxPool: cfg.GMP_PEER_CACHE_MAX_SIZE,
+    });
+    this.bootstrap = new BootstrapManager(this, {
+      minPeers: minPeers ?? cfg.GMP_MIN_PEERS,
+      parallelCount: bootstrapParallelCount,
+      disableBootstrap,
+      publicPeersPath,
+      stage1TimeoutMs: cfg.GMP_BOOTSTRAP_STAGE1_TIMEOUT_MS,
+      stage2TimeoutMs: cfg.GMP_BOOTSTRAP_STAGE2_TIMEOUT_MS,
+      lanTimeoutMs: cfg.GMP_BOOTSTRAP_LAN_TIMEOUT_MS,
+      peerExchangeTimeoutMs: cfg.GMP_BOOTSTRAP_PX_TIMEOUT_MS,
+      dialTimeoutMs: cfg.GMP_BOOTSTRAP_DIAL_TIMEOUT_MS,
+      dialStaggerMs: cfg.GMP_BOOTSTRAP_DIAL_STAGGER_MS,
+      lanAny: cfg.GMP_LAN_BOOTSTRAP_ANY,
+      healthFile: inDataDir('public-peer-health.json'),
+      rebootstrapBackoffInitialMs: cfg.GMP_REBOOTSTRAP_BACKOFF_INITIAL_MS,
+    });
     // A directory of peers on this subnet, so a Ghost Address still resolves
     // when there is no public peer to flood announcements through. Built in
     // listen(); see lan-discovery.js for why it never dials anything itself.
-    this.lanDiscoveryEnabled = !!lanDiscovery;
-    this.lanDiscoveryOptions = { port: lanDiscoveryPort, group: lanDiscoveryGroup };
+    const lanDiscoveryOn = lanDiscovery ?? cfg.GMP_LAN_DISCOVERY !== false;
+    this.lanDiscoveryEnabled = !!lanDiscoveryOn;
+    this.lanDiscoveryOptions = {
+      port: lanDiscoveryPort ?? cfg.GMP_LAN_DISCOVERY_PORT,
+      group: lanDiscoveryGroup ?? cfg.GMP_LAN_DISCOVERY_GROUP,
+    };
     this.lanDiscovery = null;
-    this.healthMonitor = new NetworkHealthMonitor(this);
-    this.keyRotationManager = new KeyRotationManager(this);
+    this.healthMonitor = new NetworkHealthMonitor(this, {
+      checkIntervalMs: cfg.GMP_REANNOUNCE_INTERVAL_MS / 2,
+    });
+    this.keyRotationManager = new KeyRotationManager(this, { topologyTtl: cfg.GMP_TOPOLOGY_TTL });
     this.reputation = new ReputationManager(this, {
-      banDurationMs: reputationBanDurationMs,
-      recoveryIntervalMs: reputationRecoveryIntervalMs
+      banDurationMs: reputationBanDurationMs ?? cfg.GMP_BAN_DURATION_MS,
+      recoveryIntervalMs: reputationRecoveryIntervalMs ?? cfg.GMP_REPUTATION_RECOVERY_INTERVAL_MS,
     });
 
-    // Record success in Peer Cache upon successful connection
+    // Record the peer in the cache. Only outbound peers get an address: an
+    // inbound source address is undialable and may be a user's IP.
     this.on('connection', ({ link, peerNodeId }) => {
-      if (link && !link.isVirtual && peerNodeId) {
+      // A relayed link has no address to remember (and must not leave one).
+      if (link && !link.isVirtual && !link.socket.isRelayed && peerNodeId) {
         const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
-        const address = link.socket.remoteAddress;
-        const port = link.socket.remotePort;
         const signingPubKeyHex = link.remoteSigningPubkey ? Buffer.from(link.remoteSigningPubkey).toString('hex') : null;
-        this.peerCache.recordSuccess(peerNodeIdHex, address, port, signingPubKeyHex);
+        if (link.isInitiator) {
+          this.peerCache.recordSuccess(peerNodeIdHex, link.socket.remoteAddress, link.socket.remotePort, signingPubKeyHex);
+        } else {
+          // Its key only: key rotation trusts the cache (key-rotation.ts).
+          this.peerCache.recordInbound(peerNodeIdHex, signingPubKeyHex);
+        }
       }
     });
 
-    this.on('rate-limited', ({ ip, sourceNodeId }) => {
+    this.on('rate-limited', (info) => {
+      // Accept-time limits refuse that one connection and ban nobody (CGNAT).
+      if ('ip' in info) return;
+      // Forwarding limits name a source NodeID: that node, and only it, is banned.
       if (this.reputation) {
+        const sourceNodeId = 'sourceNodeId' in info ? info.sourceNodeId : null;
         const nodeIdHex = sourceNodeId ? Buffer.from(sourceNodeId).toString('hex') : null;
-        this.reputation.ban(nodeIdHex, ip, 'Rate limit exceeded');
+        if (nodeIdHex) this.reputation.ban(nodeIdHex, null, 'Rate limit exceeded');
       }
     });
 
@@ -1419,7 +353,286 @@ class GMPNode extends EventEmitter {
       this._setupRateLimiterTimeoutHandlers(this.bindingRateLimiter);
     }
 
+    // Relay tier. The server only on nodes that opt in; any node can
+    // hold reservations on, and dial through, someone else's relay.
+    this.relayServer = cfg.GMP_RELAY_ENABLED
+      ? new RelayServer(() => this.identity, {
+          reservationTtlMs: cfg.GMP_RELAY_RESERVATION_TTL_MS,
+          maxReservations: cfg.GMP_RELAY_MAX_RESERVATIONS,
+          maxReservationsPerSubnet: cfg.GMP_RELAY_MAX_RESERVATIONS_PER_SUBNET,
+          reservationRatePerMinute: cfg.GMP_RELAY_RESERVATION_RATE_PER_MINUTE,
+          reservationBurst: cfg.GMP_RELAY_RESERVATION_BURST,
+          maxCircuitsPerReservation: cfg.GMP_RELAY_MAX_CIRCUITS_PER_RESERVATION,
+          maxCircuitBytes: cfg.GMP_RELAY_MAX_CIRCUIT_BYTES,
+          maxCircuitDurationMs: cfg.GMP_RELAY_MAX_CIRCUIT_DURATION_MS,
+        })
+      : null;
+    /** Sealed store-and-forward host; null unless this node offers storage. */
+    this.storageServer = null;
+    /** How long a relay waits for an inbound session to show it is a hop. */
+    this.relayRoleObservationMs = cfg.GMP_RELAY_ROLE_OBSERVATION_MS;
+    /** @type {Map<string, RelayReservationEntry>} */
+    this.relayReservations = new Map();
+    /** Storage hosts used this session: key -> { key, nodeId, operator }. */
+    this.storageHosts = new Map();
+    /** Hosts and operators that have seen this node's real identity this session. */
+    this.exposure = new SessionExposure();
+
     this.natType = 'UNKNOWN';
+  }
+
+  /**
+   * Store-and-forward frames (0x11-0x15), hop-decrypted. With no storage
+   * server, requests are refused with storage-disabled.
+   * @param {GMPLink} link
+   * @param {number} type
+   * @param {Buffer} plaintext
+   */
+  handleStorageFrame(link, type, plaintext) {
+    if (this.storageServer) {
+      this.storageServer.handleFrame(link, type, plaintext);
+      return;
+    }
+    const msg = decodeStorage(plaintext);
+    if (!msg) return;
+    const requestId = msg.control.requestId;
+    if (type === MESSAGETYPES.STORE_REQUEST) {
+      link.sendRelay(MESSAGETYPES.STORE_ACK, encodeStorage({ requestId, ok: false, reason: 'storage-disabled' }));
+    } else if (type === MESSAGETYPES.FETCH_REQUEST) {
+      link.sendRelay(MESSAGETYPES.FETCH_RESPONSE, encodeStorage({ requestId, done: true, error: 'storage-disabled' }));
+    }
+  }
+
+  handleRelayFrame(link, type, plaintext) {
+    if (this.relayServer) {
+      this.relayServer.handleFrame(link, type, plaintext);
+      return;
+    }
+    if (type === MESSAGETYPES.RELAY_RESERVE || type === MESSAGETYPES.RELAY_CONNECT) {
+      const msg = decodeControl(plaintext) || {};
+      link.sendRelay(MESSAGETYPES.RELAY_STOP, encodeControl({
+        op: type === MESSAGETYPES.RELAY_RESERVE ? 'reserve' : 'connect',
+        requestId: msg.requestId,
+        reason: 'relay-disabled',
+      }));
+    }
+  }
+
+  /**
+   * Hold a reservation on a relay so contacts can reach this node through it.
+   * The hop to the relay uses a throwaway identity; the relay never learns
+   * this node's NodeID. Renews at 80% of the voucher's lifetime unless
+   * autoRenew is false. Incoming circuits become ordinary 'incoming'
+   * connections once the dialer completes the GMP handshake.
+   * @param {import('./relay/relay-client.js').RelayAddress} addr
+   * @param {{ autoRenew?: boolean }} [options]
+   */
+  async reserveRelay(addr, { autoRenew = true } = {}) {
+    if (!this.identity) throw new Error('Identity not loaded');
+    const key = hostKey(addr.address, addr.port);
+    const existing = this.relayReservations.get(key);
+    if (existing) return this._reservationView(existing);
+
+    // Never reserve on a host (or operator) that has seen this node's real identity.
+    const refuse = () => new RoleSeparationError('RESERVE_ON_BOOTSTRAP_HOST',
+      `Refusing to reserve on ${addr.address}:${addr.port}: that host (or its operator) has seen this node's identity this session`);
+    if (this.exposure.hasSeen(key, addr.nodeId || null)) throw refuse();
+    if (addr.operator && this.exposure.operators.has(addr.operator)) throw refuse();
+    // Hard rule 4: never reserve on a storage host in use.
+    const refuseStorage = () => new RoleSeparationError('RESERVE_ON_STORAGE_HOST',
+      `Refusing to reserve on ${addr.address}:${addr.port}: that host (or its operator) is this session's storage host`);
+    if (this._storageHost(key, addr.nodeId || null, addr.operator || null)) throw refuseStorage();
+    const hop = await RelayHop.open(this.transport, addr, { pingIntervalMs: this.pingIntervalMs, pongTimeoutMs: this.pongTimeoutMs, ephemeralSource: this.ephemeralSource });
+    if (this.exposure.hasSeen(null, hop.relayNodeId)) {
+      hop.close();
+      throw refuse();
+    }
+    if (this._storageHost(null, hop.relayNodeId, null)) {
+      hop.close();
+      throw refuseStorage();
+    }
+    let voucher;
+    try {
+      voucher = await hop.reserve();
+    } catch (e) {
+      hop.close();
+      throw e;
+    }
+
+    /** @type {RelayReservationEntry} */
+    const entry = {
+      hop,
+      key,
+      relayNodeId: hop.relayNodeId,
+      operator: addr.operator || null,
+      current: { voucherId: voucher.voucherId, voucher },
+      timer: null,
+    };
+    hop.on('incoming', (conn) => {
+      if (!this.identity) { conn.destroy(); return; }
+      conn.setSeparationSource(() => this._separationOf(entry));
+      conn.acceptAsCallee(this.identity.staticPrivKey, this.identity.staticPubKey);
+      this._acceptConnection(conn);
+    });
+    hop.on('close', () => {
+      if (entry.timer) clearTimeout(entry.timer);
+      if (this.relayReservations.get(key) === entry) this.relayReservations.delete(key);
+    });
+
+    const scheduleRenewal = () => {
+      const ttl = entry.current.voucher.expiresAt - Date.now();
+      entry.timer = setTimeout(async () => {
+        try {
+          const renewed = await hop.reserve(entry.current.voucherId);
+          entry.current = { voucherId: renewed.voucherId, voucher: renewed };
+          scheduleRenewal();
+        } catch (e) {
+          logger.warn('relay', 'renewal-failed', `Relay reservation renewal failed: ${e.message}`, { reason: e.reason });
+        }
+      }, Math.max(0, ttl * 0.8));
+      if (entry.timer.unref) entry.timer.unref();
+    };
+    if (autoRenew) scheduleRenewal();
+
+    this.relayReservations.set(key, entry);
+    return this._reservationView(entry);
+  }
+
+  /** The current voucher held on a relay (and its separation), or null. */
+  relayReservation(addr) {
+    const entry = this.relayReservations.get(hostKey(addr.address, addr.port));
+    return entry ? this._reservationView(entry) : null;
+  }
+
+  /**
+   * @param {RelayReservationEntry} entry
+   * @returns {{ voucherId: string, voucher: import('./relay/relay-protocol.js').Voucher, readonly separation: 'separated' | 'unseparated' }}
+   */
+  _reservationView(entry) {
+    const node = this;
+    return {
+      voucherId: entry.current.voucherId,
+      voucher: entry.current.voucher,
+      get separation() { return node._separationOf(entry); },
+    };
+  }
+
+  /**
+   * Separated only while the relay host itself has never seen the real
+   * identity and its operator is known and differs from every operator whose
+   * infrastructure has. Computed live, so a later exposure demotes it.
+   * @param {{ key: string, relayNodeId: string, operator: string | null }} entry
+   * @returns {'separated' | 'unseparated'}
+   */
+  _separationOf(entry) {
+    if (this.exposure.hasSeen(entry.key, entry.relayNodeId)) return 'unseparated';
+    return this.exposure.separationFor(entry.operator);
+  }
+
+  /**
+   * The NodeID public-peers.json gives for this address, or null.
+   * @param {string} address
+   * @param {number} port
+   * @returns {string | null}
+   */
+  _listedNodeIdFor(address, port) {
+    const key = hostKey(address, port);
+    const entry = loadPublicPeers(this.bootstrap.publicPeersPath || undefined)
+      .find((p) => p.nodeId && hostKey(p.address, p.port) === key);
+    return entry ? entry.nodeId.toLowerCase() : null;
+  }
+
+  /**
+   * True when the host (by key or hex NodeID) holds one of this node's
+   * reservations, or — given an operator — one of that operator's hosts does.
+   */
+  _reservationHost(key, nodeIdHex, operator = null) {
+    for (const entry of this.relayReservations.values()) {
+      if ((key && entry.key === key) || (nodeIdHex && entry.relayNodeId === nodeIdHex)) return true;
+      if (operator && entry.operator === operator) return true;
+    }
+    return false;
+  }
+
+  /** True when the host (by key, hex NodeID or operator) is a storage host this node uses. */
+  _storageHost(key, nodeIdHex, operator = null) {
+    for (const h of this.storageHosts.values()) {
+      if ((key && h.key === key) || (nodeIdHex && h.nodeId === nodeIdHex)) return true;
+      if (operator && h.operator && h.operator === operator) return true;
+    }
+    return false;
+  }
+
+  /**
+   * May this host serve as storage? Throws RoleSeparationError if it (or its
+   * named operator) has seen the real identity or holds a reservation.
+   * @param {{ address: string, port: number, nodeId?: string, operator?: string }} addr
+   */
+  checkStorageHost(addr) {
+    const key = hostKey(addr.address, addr.port);
+    const nodeId = addr.nodeId ? addr.nodeId.toLowerCase() : null;
+    const operator = addr.operator && addr.operator !== SELF_OPERATOR ? addr.operator : null;
+    if (this.exposure.hasSeen(key, nodeId) || (operator && this.exposure.operators.has(operator))) {
+      throw new RoleSeparationError('STORAGE_ON_BOOTSTRAP_HOST',
+        `Refusing to use ${addr.address}:${addr.port} as storage: that host (or its operator) has seen this node's identity this session`);
+    }
+    if (this._reservationHost(key, nodeId, operator)) {
+      throw new RoleSeparationError('STORAGE_ON_RELAY_HOST',
+        `Refusing to use ${addr.address}:${addr.port} as storage: that host (or its operator) holds this node's relay reservation`);
+    }
+  }
+
+  /** Record a storage host as in use this session; later bootstrap/relay use of it is refused. */
+  noteStorageHost(addr, nodeIdHex) {
+    const key = hostKey(addr.address, addr.port);
+    this.storageHosts.set(key, { key, nodeId: (nodeIdHex || addr.nodeId || '').toLowerCase() || null, operator: addr.operator || null });
+  }
+
+  /**
+   * 'separated' only when the storage host is self-hosted, or its operator is
+   * known and differs from every operator of infrastructure that has seen the
+   * real identity or holds a reservation, none of which was unnamed.
+   */
+  storageSeparation(addr) {
+    if (addr.operator === SELF_OPERATOR) return 'separated';
+    if (!addr.operator) return 'unseparated';
+    if (this.exposure.hasSeen(hostKey(addr.address, addr.port), addr.nodeId || null)) return 'unseparated';
+    for (const entry of this.relayReservations.values()) if (!entry.operator || entry.operator === addr.operator) return 'unseparated';
+    return this.exposure.separationFor(addr.operator);
+  }
+
+  /**
+   * Reach a peer through a relay using its voucher. The circuit is sealed to
+   * the peer's static X25519 key and this hop uses a throwaway identity, so the
+   * relay sees neither party. Rejects with a RelayError on refusal.
+   * @param {import('./relay/relay-client.js').RelayAddress} addr
+   * @param {string} voucherId
+   * @param {Uint8Array} peerStaticPubKey
+   * @param {{ trafficClass?: 'interactive' | 'bulk' }} [options] padding class for the circuit
+   */
+  async dialRelayed(addr, voucherId, peerStaticPubKey, { trafficClass = 'interactive' } = {}) {
+    if (!this.identity) throw new Error('Identity not loaded');
+    const hop = await RelayHop.open(this.transport, addr, { pingIntervalMs: this.pingIntervalMs, pongTimeoutMs: this.pongTimeoutMs, ephemeralSource: this.ephemeralSource });
+    let circuitId;
+    try {
+      circuitId = await hop.connect(voucherId);
+    } catch (e) {
+      hop.close();
+      throw e;
+    }
+    const conn = RelayConnection.dial(hop, circuitId, peerStaticPubKey, { closeHopWhenDone: true, trafficClass });
+    // The dialler cannot choose the callee's relay, so an unseparated one is
+    // surfaced rather than refused.
+    const via = { key: hostKey(addr.address, addr.port), relayNodeId: hop.relayNodeId, operator: addr.operator || null };
+    conn.setSeparationSource(() => this._separationOf(via));
+    const result = await this._initiateOver(conn);
+    // The circuit layer already proved the peer holds peerStaticPubKey's
+    // private key; this pins the NodeID it claimed in the handshake to it.
+    if (!nodeIdMatchesKeys(result.peerNodeId, peerStaticPubKey, result.link.remoteSigningPubkey)) {
+      result.link.destroy(new Error('Relayed peer NodeID does not match the key it was dialled with'));
+      throw new RelayError('wrong-peer');
+    }
+    return result;
   }
 
   _setupRateLimiterTimeoutHandlers(limiter) {
@@ -1454,14 +667,68 @@ class GMPNode extends EventEmitter {
       this.identity.nodeIdHex = Buffer.from(this.identity.nodeId).toString('hex');
     }
     const cacheKey = crypto.pbkdf2Sync(seedPhrase, 'ghostlink-peer-cache-v1', 100000, 32, 'sha256');
-    const nonceKey = crypto.pbkdf2Sync(seedPhrase, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
+    const nonceKey = deriveNonceStoreKey(seedPhrase);
     if (this.peerCache) {
       this.peerCache.setEncryptionKey(cacheKey);
     }
     if (this.nonceStore) {
       this.nonceStore.setEncryptionKey(nonceKey);
     }
+    // Bind every ephemeral to a durable boot counter plus a per-process
+    // sequence so a repeated RNG output cannot repeat a scalar. Throws if the
+    // counter cannot be persisted.
+    const boot = advanceBootCounter(this.dataDir ? path.join(this.dataDir, 'boot-counter') : dataPath('boot-counter'));
+    this.ephemeralSource = new EphemeralKeySource(boot);
+    if (this.config.GMP_STORAGE_ENABLED && !this.storageServer) this._startStorage(seedPhrase);
+    this._assertSecurityControls();
     return this.identity;
+  }
+
+  /** Fail loudly if a mandatory security control is missing. */
+  _assertSecurityControls() {
+    const missing = [];
+    if (!this.nonceStore) missing.push('nonceStore (persisted replay claims)');
+    if (!this.sessionKeyLRUSet) missing.push('sessionKeyLRUSet (in-process session-key dedupe)');
+    if (!this.ephemeralSource) missing.push('ephemeralSource (ephemeral non-repetition, GM-M3-2\')');
+    if (!this.reputation) missing.push('reputation (peer banning)');
+    if (!this.rateLimiter) missing.push('rateLimiter (HELLO / handshake timeouts)');
+    if (missing.length) {
+      throw new Error(`GMPNode refusing to run: missing security control(s): ${missing.join(', ')}`);
+    }
+    return this.identity;
+  }
+
+  /**
+   * A fresh ephemeral keypair bound to the boot counter. Throws rather than
+   * falling back to a plain RNG keypair.
+   */
+  nextEphemeralKeyPair() {
+    if (!this.ephemeralSource) {
+      throw new Error('No ephemeral key source: refusing to derive an ephemeral from the bare RNG (GM-M3-2\'). Call loadIdentity first.');
+    }
+    return this.ephemeralSource.next();
+  }
+
+  /**
+   * Become a storage host. Blobs live under <dataDir>/storage, sealed at rest
+   * with a seed-derived key.
+   * @param {string} seedPhrase
+   */
+  _startStorage(seedPhrase) {
+    const cfg = this.config;
+    const store = new BlobStore({
+      dir: path.join(this.dataDir || DATA_DIR, 'storage'),
+      ttlMs: cfg.GMP_SF_TTL_MS,
+      maxBlobsPerBucket: cfg.GMP_SF_BUCKET_MAX_BLOBS,
+      maxBytesPerBucket: cfg.GMP_SF_BUCKET_MAX_BYTES,
+      encryptionKey: crypto.pbkdf2Sync(seedPhrase, 'ghostlink-storage-at-rest-v1', 100000, 32, 'sha256'),
+    }).load();
+    this.storageServer = new StorageServer(store, {
+      fetchBuckets: cfg.GMP_SF_FETCH_BUCKETS,
+      fetchMaxBlobs: cfg.GMP_SF_FETCH_MAX_BLOBS,
+      depositRatePerMinute: cfg.GMP_SF_DEPOSIT_RATE_PER_MINUTE,
+      depositBurst: cfg.GMP_SF_DEPOSIT_BURST,
+    });
   }
 
   rotateKey(newKeypair) {
@@ -1471,13 +738,7 @@ class GMPNode extends EventEmitter {
     const oldSigningPrivKey = this.identity.signingPrivKey;
 
     const newPublicKey = newKeypair.signingPubKeyHex;
-    // The NodeID the node actually operates under after rotation, and the one
-    // the certificate tells peers to re-point the old NodeID to, must be the
-    // same. They were not: the cert carried the new identity's NodeID
-    // (SHA-512 of its static key — also what a restart with the new seed
-    // yields) while the node switched to SHA-512 of the signing key, so every
-    // peer that honoured the cert filed us under a NodeID we never presented.
-    // (The fallback also called hexToBytes, which this module never imported.)
+    // Operate under the same NodeID the rotation certificate announces.
     const newNodeIdBytes = newKeypair.nodeId
       ? new Uint8Array(newKeypair.nodeId)
       : sha512(newKeypair.signingPubKey);
@@ -1535,119 +796,171 @@ class GMPNode extends EventEmitter {
   async listen() {
     if (!this.identity) throw new Error('Identity not loaded');
 
-    return new Promise((resolve, reject) => {
-      this.server = net.createServer((socket) => {
-        if (this.reputation && this.reputation.isBanned(null, socket.remoteAddress)) {
-          socket.destroy();
-          return;
-        }
-
-        let activeLimiter = this.rateLimiter;
-        if (this.isPublicPeer && this.bindingRateLimiter) {
-          activeLimiter = this.bindingRateLimiter;
-        }
-
-        if (activeLimiter) {
-          if (!activeLimiter.checkConnection(socket)) {
-            socket.destroy();
-            this.emit('rate-limited', { ip: socket.remoteAddress, type: activeLimiter === this.bindingRateLimiter ? 'binding' : 'standard' });
-            return;
-          }
-        }
-
-        const ephemeralKeyPair = generateEphemeralKeyPair();
-        const link = new GMPLink({
-          identity: this.identity,
-          socket,
-          isInitiator: false,
-          ephemeralKeyPair,
-          rateLimiter: activeLimiter,
-          nonceStore: this.nonceStore,
-          sessionKeyLRUSet: this.sessionKeyLRUSet,
-          pingIntervalMs: this.pingIntervalMs,
-          pongTimeoutMs: this.pongTimeoutMs,
-          node: this,
-          isVirtual: false
-        });
-
-        const connId = `incoming-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        this.links.set(connId, link);
-
-        if (activeLimiter) {
-          activeLimiter.recordPendingConnection(socket, connId);
-        }
-
-        link.on('connected', ({ peerNodeId }) => {
-          const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
-          if (this.isPublicPeer && this.establishedPeers && this.establishedPeers.has(peerNodeIdHex)) {
-            if (this.bindingRateLimiter) {
-              this.bindingRateLimiter.recordConnectionClosed(connId);
-            }
-            if (this.rateLimiter) {
-              this.rateLimiter._globalCount++;
-              this.rateLimiter.recordHandshakeComplete(connId);
-            }
-            link.rateLimiter = this.rateLimiter;
-          } else {
-            if (activeLimiter) {
-              activeLimiter.recordHandshakeComplete(connId);
-            }
-          }
-
-          this.connections.set(connId, link);
-          
-          if (!link.isVirtual) {
-            this.topologyManager.handleLinkEstablished(peerNodeIdHex);
-          }
-
-          this.emit('connection', { connId, link, peerNodeId, type: 'incoming' });
-        });
-
-        link.on('message', (msg) => {
-          this.emit('message', { connId, msg });
-        });
-
-        link.on('close', () => {
-          this.links.delete(connId);
-          this.connections.delete(connId);
-          if (link.rateLimiter) {
-            link.rateLimiter.recordConnectionClosed(connId);
-          }
-          if (!link.isVirtual && link.remoteNodeId) {
-            const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-            this.topologyManager.handleLinkClosed(peerNodeIdHex);
-            this.routingTable.removeRoutesVia(peerNodeIdHex);
-          }
-          this.emit('close', { connId });
-          if (link.state === 'handshaking') {
-            reject(new Error('Link closed during handshake'));
-          }
-        });
-
-        link.on('error', (err) => {
-          if (this.listenerCount('error') > 0) {
-            this.emit('error', { connId, err });
-          } else {
-            logger.warn('node', 'link-error', `Link error on ${connId}: ${err.message}`, { connId, err: err.message });
-          }
-        });
+    const bindHost = this.isPublicPeer ? '0.0.0.0' : '::';
+    const onError = (err, stillListening) => {
+      const e = /** @type {NodeJS.ErrnoException} */ (err);
+      logger.error('link', 'listener-error', `Listener error on port ${this.port}: ${e.message}; ${stillListening ? 'still listening' : 'NO LONGER LISTENING'}`, {
+        code: e.code || null, syscall: e.syscall || null, stillListening,
       });
+    };
+    this.listener = await this.transport.listen({ host: bindHost, port: this.port, onError }, (connection) => {
+      this._acceptConnection(connection);
+    });
+    // port 0 asks the transport for a free port; record the one actually
+    // bound so announces, LAN beacons and callers see the real port, not 0.
+    this.port = this.listener.port;
+    this._clampCapToFdLimit();
+    this.bootstrap.start();
+    if (this.lanDiscoveryEnabled && !this.lanDiscovery) {
+      // Loaded here, not at module load: it needs Node's `dgram`.
+      const { LanDiscovery } = requireLocal('./lan-discovery.js');
+      this.lanDiscovery = new LanDiscovery(this, this.lanDiscoveryOptions);
+      // Fire and forget: discovery failing (no multicast, port in use) must
+      // never hold up or fail listen().
+      this.lanDiscovery.start().catch(() => {});
+    }
+    return { port: this.port };
+  }
 
-      this.server.on('error', reject);
-      const bindHost = this.isPublicPeer ? '0.0.0.0' : '::';
-      this.server.listen({ host: bindHost, port: this.port }, () => {
-        // port 0 asks the OS for a free port; record the one actually bound so
-        // announces, LAN beacons and callers see the real port, not 0.
-        this.port = this.server.address().port;
-        this.bootstrap.start();
-        if (this.lanDiscoveryEnabled && !this.lanDiscovery) {
-          this.lanDiscovery = new LanDiscovery(this, this.lanDiscoveryOptions);
-          // Fire and forget: discovery failing (no multicast, port in use) must
-          // never hold up or fail listen().
-          this.lanDiscovery.start().catch(() => {});
+  /**
+   * effective cap = min(configured cap, soft fd limit - reserve), reserve =
+   * max(GMP_FD_HEADROOM, open fds + 16). Logs one line at every start: INFO,
+   * or WARN when the clamp applies.
+   */
+  _clampCapToFdLimit() {
+    const limiter = this.rateLimiter;
+    if (!limiter || typeof limiter.setEffectiveCap !== 'function') return;
+    const configured = limiter.configuredMaxGlobal;
+    const { soft, hard } = readFdLimits();
+    const open = countOpenFds();
+    if (soft === null || open === null) {
+      logger.info('link', 'connection-cap',
+        `Connection cap ${configured} (configured); descriptor limits unknown on this platform, so not clamped`,
+        { configuredCap: configured, fdSoftLimit: soft, fdHardLimit: hard, effectiveCap: configured, clamped: false, limitsKnown: false });
+      return;
+    }
+    const reserve = Math.max(Number(this.config.GMP_FD_HEADROOM) || 0, open + 16);
+    const effective = Math.min(configured, Math.max(1, soft - reserve));
+    const clamped = effective < configured;
+    if (clamped) limiter.setEffectiveCap(effective, 'FD_LIMIT');
+    const meta = { configuredCap: configured, fdSoftLimit: soft, fdHardLimit: hard, reserve, openAtStart: open, effectiveCap: effective, clamped, limitsKnown: true };
+    if (clamped) {
+      logger.warn('link', 'connection-cap',
+        `Connection cap CLAMPED from ${configured} to ${effective}: descriptor soft limit ${soft} (hard ${hard ?? '?'}) minus ${reserve} reserved (${open} open at start). Raise the limit (ulimit -n) to serve more`, meta);
+    } else {
+      logger.info('link', 'connection-cap',
+        `Connection cap ${effective} (configured ${configured}; not clamped): descriptor soft limit ${soft} (hard ${hard ?? '?'}) leaves ${soft - reserve} after ${reserve} reserved`, meta);
+    }
+  }
+
+  _acceptConnection(socket) {
+    if (this.reputation && this.reputation.isBanned(null, socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
+
+    let activeLimiter = this.rateLimiter;
+    if (this.isPublicPeer && this.bindingRateLimiter) {
+      activeLimiter = this.bindingRateLimiter;
+    }
+
+    if (activeLimiter) {
+      if (!activeLimiter.checkConnection(socket)) {
+        socket.destroy();
+        this.emit('rate-limited', { ip: socket.remoteAddress, type: activeLimiter === this.bindingRateLimiter ? 'binding' : 'standard' });
+        return;
+      }
+    }
+
+    const ephemeralKeyPair = this.nextEphemeralKeyPair();
+    const link = new GMPLink({
+      identity: this.identity,
+      socket,
+      isInitiator: false,
+      ephemeralKeyPair,
+      rateLimiter: activeLimiter,
+      nonceStore: this.nonceStore,
+      sessionKeyLRUSet: this.sessionKeyLRUSet,
+      pingIntervalMs: this.pingIntervalMs,
+      pongTimeoutMs: this.pongTimeoutMs,
+      node: this,
+      isVirtual: false,
+      // Only a relay or storage host has hops to tell apart, and a circuit
+      // never carries one.
+      observeRoleMs: (this.relayServer || this.storageServer) && !socket.isRelayed ? this.relayRoleObservationMs : 0,
+    });
+
+    const connId = `incoming-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.links.set(connId, link);
+
+    if (activeLimiter) {
+      activeLimiter.recordPendingConnection(socket, connId);
+    }
+
+    // Nothing in the handshake says whether this is a relay hop; the link
+    // observes it from the first frame after key confirmation.
+    link.on('classified', ({ role }) => {
+      const peerNodeId = link.remoteNodeId;
+      // A relay hop is infrastructure, not a peer: no 'connection' event, no
+      // peer cache entry, no topology announce, not counted as a peer
+      //. It stays in this.links so it is closed with the node.
+      if (role === 'hop') {
+        if (activeLimiter) activeLimiter.recordHandshakeComplete(connId);
+        return;
+      }
+      const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
+      // Whoever completed a handshake with us knows our NodeID.
+      if (!link.socket.isRelayed) this.exposure.noteHost(null, peerNodeIdHex);
+      if (this.isPublicPeer && this.establishedPeers && this.establishedPeers.has(peerNodeIdHex)) {
+        if (this.bindingRateLimiter) {
+          this.bindingRateLimiter.recordConnectionClosed(connId);
         }
-        resolve({ port: this.port });
-      });
+        if (this.rateLimiter) {
+          this.rateLimiter._globalCount++;
+          this.rateLimiter.recordHandshakeComplete(connId);
+        }
+        link.rateLimiter = this.rateLimiter;
+      } else {
+        if (activeLimiter) {
+          activeLimiter.recordHandshakeComplete(connId);
+        }
+      }
+
+      this.connections.set(connId, link);
+
+      // Relayed links are never announced: an announce would tell the whole
+      // mesh, relay included, which two nodes are talking.
+      if (!link.isVirtual && !link.socket.isRelayed) {
+        this.topologyManager.handleLinkEstablished(peerNodeIdHex);
+      }
+
+      this.emit('connection', { connId, link, peerNodeId, type: 'incoming' });
+    });
+
+    link.on('message', (msg) => {
+      this.emit('message', { connId, msg });
+    });
+
+    link.on('close', () => {
+      this.links.delete(connId);
+      this.connections.delete(connId);
+      if (link.rateLimiter) {
+        link.rateLimiter.recordConnectionClosed(connId);
+      }
+      if (!link.isVirtual && link.remoteNodeId) {
+        const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
+        if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
+        this.routingTable.removeRoutesVia(peerNodeIdHex);
+      }
+      this.emit('close', { connId });
+    });
+
+    link.on('error', (err) => {
+      if (this.listenerCount('error') > 0) {
+        this.emit('error', { connId, err });
+      } else {
+        logger.warn('node', 'link-error', `Link error on ${connId}: ${err.message}`, { connId, err: err.message });
+      }
     });
   }
 
@@ -1657,114 +970,170 @@ class GMPNode extends EventEmitter {
       throw new Error(`Target IP ${address} is banned`);
     }
 
+    // Never show the real identity to a host holding one of our reservations:
+    // checked by address and NodeID before sending, and again after handshake.
+    const expectedNodeId = (options.nodeId ? String(options.nodeId).toLowerCase() : null)
+      || this._listedNodeIdFor(address, port);
+    const infraOperator = options.infrastructure && options.infrastructure.operator ? options.infrastructure.operator : null;
+    // Separation checks every NodeID any list file gives this name, not just
+    // the merged one: an overlay replacing a host's shipped entry must not
+    // hide the shipped name from these rules.
+    const separationIds = [...new Set([expectedNodeId, ...listedNodeIdsForAddress(address, port, this.bootstrap.publicPeersPath || undefined)])];
+    // Hard rule 4: nor to this session's storage host.
+    if (separationIds.some((id) => this._storageHost(hostKey(address, port), id, infraOperator))) {
+      throw new RoleSeparationError('BOOTSTRAP_VIA_STORAGE_HOST',
+        `Refusing to connect to ${address}:${port} with this node's identity: that host (or its operator) is this session's storage host`);
+    }
+    if (separationIds.some((id) => this._reservationHost(hostKey(address, port), id, infraOperator))) {
+      throw new RoleSeparationError('BOOTSTRAP_VIA_RELAY_HOST',
+        `Refusing to connect to ${address}:${port} with this node's identity: it holds this node's relay reservation`);
+    }
+
     const useTls = options.tls || port === 443;
+    // Rejects on pre-connect failure (e.g. ECONNREFUSED), resolving once the
+    // stream is connected — before this point no GMPLink exists.
+    const socket = await this.transport.dial({ host: address, port, tls: useTls, servername: address, ...(options.signal ? { signal: options.signal } : {}) });
+    // A caller may give up on the dial (the bootstrap ladder does when another
+    // dial wins, or this one exceeds its budget): the link is torn down and
+    // the dial rejects as closed during the handshake.
+    const signal = options.signal || null;
+    if (signal && signal.aborted) {
+      socket.destroy();
+      throw new Error('Dial cancelled');
+    }
 
     return new Promise((resolve, reject) => {
       let settled = false;
 
-      const connectOptions = { host: address, port };
-      if (useTls) {
-        connectOptions.servername = address;
-        connectOptions.rejectUnauthorized = false; // verified cryptographically in protocol layer
-      }      let socket;
-      const connectionCallback = async () => {
-        const ephemeralKeyPair = generateEphemeralKeyPair();
-        const link = new GMPLink({
-          identity: this.identity,
-          socket,
-          isInitiator: true,
-          ephemeralKeyPair,
-          rateLimiter: this.rateLimiter,
-          nonceStore: this.nonceStore,
-          sessionKeyLRUSet: this.sessionKeyLRUSet,
-          pingIntervalMs: this.pingIntervalMs,
-          pongTimeoutMs: this.pongTimeoutMs,
-          node: this,
-          isVirtual: false
-        });
+      const ephemeralKeyPair = this.nextEphemeralKeyPair();
+      const link = new GMPLink({
+        identity: this.identity,
+        socket,
+        isInitiator: true,
+        ephemeralKeyPair,
+        rateLimiter: this.rateLimiter,
+        nonceStore: this.nonceStore,
+        sessionKeyLRUSet: this.sessionKeyLRUSet,
+        pingIntervalMs: this.pingIntervalMs,
+        pongTimeoutMs: this.pongTimeoutMs,
+        node: this,
+        isVirtual: false
+      });
 
-        const connId = `outgoing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        this.links.set(connId, link);
+      const connId = `outgoing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      this.links.set(connId, link);
+      if (signal) {
+        signal.addEventListener('abort', () => { if (!settled) link.destroy(new Error('Dial cancelled')); }, { once: true });
+      }
 
+      if (this.rateLimiter) {
+        this.rateLimiter.recordPendingConnection(socket, connId);
+      }
+
+      link.on('connected', ({ peerNodeId }) => {
+        settled = true;
+        const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
+        // The handshake has already shown this host our NodeID; record that
+        // (it demotes any reservation there to unseparated), then refuse to
+        // keep a link to a reservation host (hard rule 2, NodeID match).
+        this.exposure.noteHost(hostKey(address, port), peerNodeIdHex);
+        if (options.infrastructure) this.exposure.noteInfrastructure(options.infrastructure.operator);
+        if (this._reservationHost(null, peerNodeIdHex)) {
+          link.destroy();
+          reject(new RoleSeparationError('BOOTSTRAP_VIA_RELAY_HOST',
+            `${address}:${port} turned out to be a host holding this node's relay reservation; link refused, reservation now unseparated`));
+          return;
+        }
+        if (this._storageHost(null, peerNodeIdHex)) {
+          link.destroy();
+          reject(new RoleSeparationError('BOOTSTRAP_VIA_STORAGE_HOST',
+            `${address}:${port} turned out to be this session's storage host; link refused, storage now unseparated`));
+          return;
+        }
+        this.connections.set(connId, link);
         if (this.rateLimiter) {
-          this.rateLimiter.recordPendingConnection(socket, connId);
+          this.rateLimiter.recordHandshakeComplete(connId);
         }
+        if (!link.isVirtual && !link.socket.isRelayed) {
+          this.topologyManager.handleLinkEstablished(peerNodeIdHex);
+        }
+        this.emit('connection', { connId, link, peerNodeId, type: 'outgoing' });
+        resolve({ connId, link, peerNodeId });
+      });
 
-        link.on('connected', ({ peerNodeId }) => {
+      link.on('message', (msg) => {
+        this.emit('message', { connId, msg });
+      });
+
+      link.on('close', () => {
+        this.links.delete(connId);
+        this.connections.delete(connId);
+        if (link.rateLimiter) {
+          // Outbound: never counted on admission, so only its pending timers are
+          // released. Calling recordConnectionClosed here drove the global count
+          // one lower per outbound connection.
+          link.rateLimiter.releasePending(connId);
+        }
+        if (!link.isVirtual && link.remoteNodeId) {
+          const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
+          if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
+          this.routingTable.removeRoutesVia(peerNodeIdHex);
+        }
+        this.emit('close', { connId });
+        if (!settled) {
           settled = true;
-          const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
-          this.connections.set(connId, link);
-          if (this.rateLimiter) {
-            this.rateLimiter.recordHandshakeComplete(connId);
-          }
-          if (!link.isVirtual) {
-            this.topologyManager.handleLinkEstablished(peerNodeIdHex);
-          }
-          this.emit('connection', { connId, link, peerNodeId, type: 'outgoing' });
-          resolve({ connId, link, peerNodeId });
-        });
-
-        link.on('message', (msg) => {
-          this.emit('message', { connId, msg });
-        });
-
-        link.on('close', () => {
-          this.links.delete(connId);
-          this.connections.delete(connId);
-          if (link.rateLimiter) {
-            link.rateLimiter.recordConnectionClosed(connId);
-          }
-          if (!link.isVirtual && link.remoteNodeId) {
-            const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-            this.topologyManager.handleLinkClosed(peerNodeIdHex);
-            this.routingTable.removeRoutesVia(peerNodeIdHex);
-          }
-          this.emit('close', { connId });
-          if (!settled) {
-            settled = true;
-            reject(new Error('Link closed during handshake'));
-          }
-        });
-
-        link.on('error', (err) => {
-          if (this.listenerCount('error') > 0) {
-            this.emit('error', { connId, err });
-          }
-          if (!settled) {
-            settled = true;
-            reject(err);
-          }
-        });
-
-        try {
-          await link._sendHELLO();
-        } catch (e) {
-          if (!settled) {
-            settled = true;
-            reject(e);
-          }
+          reject(new Error('Link closed during handshake'));
         }
-      };
+      });
 
-      socket = useTls
-        ? tls.connect(connectOptions, connectionCallback)
-        : net.connect(connectOptions, connectionCallback);
-
-      socket.on('error', (err) => {
+      link.on('error', (err) => {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', { connId, err });
+        }
         if (!settled) {
           settled = true;
           reject(err);
         }
       });
+
+      link._sendHELLO().catch((e) => {
+        if (!settled) {
+          settled = true;
+          reject(e);
+        }
+      });
     });
   }
 
-  async dialWithSocket(socket) {
+  /**
+   * Run the initiator handshake over a connection a transport already made.
+   * @param {import('./transport/transport.js').GMPConnection} connection
+   */
+  async dialWithConnection(connection) {
+    if (!this.identity) throw new Error('Identity not loaded');
+    return this._initiateOver(connection);
+  }
+
+  async dialWithSocket(rawSocket) {
     if (!this.identity) throw new Error('Identity not loaded');
 
+    // Hole punching races raw sockets outside the node and hands the winner
+    // in; the transport wraps it into the connection shape links expect.
+    const socket = this.transport.adopt ? this.transport.adopt(rawSocket) : rawSocket;
+    return this._initiateOver(socket);
+  }
+
+  /**
+   * Run the initiator handshake over an already-connected GMPConnection and
+   * register the link. Shared by dialWithSocket (hole punching) and
+   * dialRelayed (a relay circuit).
+   * @param {import('./transport/transport.js').GMPConnection} socket
+   * @returns {Promise<{ connId: string, link: GMPLink, peerNodeId: Buffer }>}
+   */
+  _initiateOver(socket) {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ephemeralKeyPair = generateEphemeralKeyPair();
+      const ephemeralKeyPair = this.nextEphemeralKeyPair();
       const link = new GMPLink({
         identity: this.identity,
         socket,
@@ -1789,11 +1158,12 @@ class GMPNode extends EventEmitter {
       link.on('connected', ({ peerNodeId }) => {
         settled = true;
         const peerNodeIdHex = Buffer.from(peerNodeId).toString('hex');
+        if (!socket.isRelayed) this.exposure.noteHost(null, peerNodeIdHex);
         this.connections.set(connId, link);
         if (this.rateLimiter) {
           this.rateLimiter.recordHandshakeComplete(connId);
         }
-        if (!link.isVirtual) {
+        if (!link.isVirtual && !link.socket.isRelayed) {
           this.topologyManager.handleLinkEstablished(peerNodeIdHex);
         }
         this.emit('connection', { connId, link, peerNodeId, type: 'outgoing' });
@@ -1808,11 +1178,14 @@ class GMPNode extends EventEmitter {
         this.links.delete(connId);
         this.connections.delete(connId);
         if (link.rateLimiter) {
-          link.rateLimiter.recordConnectionClosed(connId);
+          // Outbound: never counted on admission, so only its pending timers are
+          // released. Calling recordConnectionClosed here drove the global count
+          // one lower per outbound connection.
+          link.rateLimiter.releasePending(connId);
         }
         if (!link.isVirtual && link.remoteNodeId) {
           const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-          this.topologyManager.handleLinkClosed(peerNodeIdHex);
+          if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
           this.routingTable.removeRoutesVia(peerNodeIdHex);
         }
         this.emit('close', { connId });
@@ -1856,7 +1229,7 @@ class GMPNode extends EventEmitter {
         destNodeId: destNodeId
       });
 
-      const ephemeralKeyPair = generateEphemeralKeyPair();
+      const ephemeralKeyPair = this.nextEphemeralKeyPair();
       const link = new GMPLink({
         identity: this.identity,
         socket,
@@ -1889,10 +1262,8 @@ class GMPNode extends EventEmitter {
         settled = true;
         clearTimeout(timeoutTimer);
         const peerHex = toHex(peerNodeId).slice(0, 64);
-        // The handshake proves who answered, not that it is who we dialled. A
-        // relay on the path can intercept the routed HELLO and complete it with
-        // its own (valid) identity; without this check the link would be filed
-        // under the destination and every message for it encrypted to the relay.
+        // The handshake proves who answered, not that it is who we dialled; a
+        // relay could otherwise answer with its own identity.
         if (peerHex !== destHex) {
           link.destroy(new Error('Virtual handshake answered by a different node than dialled'));
           reject(new Error('Virtual handshake answered by a different node than dialled'));
@@ -1946,7 +1317,7 @@ class GMPNode extends EventEmitter {
         destNodeId: sourceNodeId
       });
 
-      const ephemeralKeyPair = generateEphemeralKeyPair();
+      const ephemeralKeyPair = this.nextEphemeralKeyPair();
       virtualLink = new GMPLink({
         identity: this.identity,
         socket,
@@ -1967,10 +1338,7 @@ class GMPNode extends EventEmitter {
 
       virtualLink.on('connected', ({ peerNodeId }) => {
         const peerHex = toHex(peerNodeId).slice(0, 64);
-        // The routed source prefix is only a claim made in the relayed frame;
-        // it is also the key this link is filed under in virtualConnections,
-        // which _getOrConnect uses for outgoing traffic to that node. Refuse a
-        // handshake whose proven identity does not match it.
+        // The routed source prefix is only a claim; require the proven identity to match.
         if (peerHex !== sourceHex) {
           virtualLink.destroy(new Error('Virtual handshake identity does not match routed source'));
           return;
@@ -2048,6 +1416,17 @@ class GMPNode extends EventEmitter {
     if (this.reputation) {
       this.reputation.close();
     }
+    for (const entry of this.relayReservations.values()) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.hop.close();
+    }
+    this.relayReservations.clear();
+    if (this.relayServer) {
+      this.relayServer.close();
+    }
+    if (this.storageServer) {
+      this.storageServer.close();
+    }
 
     for (const link of this.links.values()) {
       link.destroy();
@@ -2056,9 +1435,9 @@ class GMPNode extends EventEmitter {
     this.connections.clear();
     this.virtualConnections.clear();
 
-    if (this.server) {
-      this.server.close();
-      this.server = null;
+    if (this.listener) {
+      this.listener.close();
+      this.listener = null;
     }
     if (this.rateLimiter) {
       this.rateLimiter.close();

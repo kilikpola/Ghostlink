@@ -31,12 +31,8 @@
     'noscript', 'noframes', 'plaintext', 'xmp', 'template', 'slot', 'shadow'
   ];
 
-  // Every entity here must stay written as an entity. These tables previously
-  // held their own decoded output ('&' -> '&', '<' -> '<'), which made
-  // escapeHTML a no-op for exactly the four characters that matter: a caller
-  // that escaped peer-controlled text got that text back verbatim, markup and
-  // all. Note the ampersand rule must be applied first on escape and last on
-  // unescape, or the replacement's own '&' gets rewritten.
+  // Values must stay written as entities. Apply the ampersand rule first on
+  // escape and last on unescape.
   var HTML_ESCAPE_MAP = {
     '&': '&amp;',
     '<': '&lt;',

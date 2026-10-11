@@ -1,16 +1,10 @@
 /**
- * Regression tests for GMPBridgeConnector, the browser's half of the Ghost
- * Mesh transport. It lives inline in index.html, so it is extracted from there
- * and driven against a fake WebSocket.
+ * GMPBridgeConnector (inline in index.html), driven against a fake WebSocket:
  *
- * Two behaviours matter most here and neither is visible from the UI:
- *
- *   - a code is an identity, not a location: joinRoom resolves a Ghost Address
- *     through the mesh and connects by NodeID, and refuses anything else rather
- *     than falling back to some other kind of code
- *   - a connection is built once: when the bridge socket drops, the connector
- *     dials it back on its own and silently re-establishes every peer session,
- *     so nobody is ever asked to reconnect by hand
+ *   - joinRoom resolves a Ghost Address and connects by NodeID, refusing other
+ *     kinds of code
+ *   - when the bridge socket drops, the connector reconnects and silently
+ *     restores every peer session
  *
  * Run with: node test/mesh-connector.test.js
  */
@@ -55,6 +49,7 @@ const SOURCE = [
   'KNOWN_PEERS_KEY', 'BLOCKED_PEERS_KEY', 'KNOWN_PEERS_MAX',
   'loadBlockedPeers', 'setPeerBlocked', 'loadKnownPeers', 'rememberKnownPeer', 'forgetKnownPeer',
   'getGmpPort', 'isTrustedBridgeTarget', 'getBridgeWsUrl',
+  'MESH_TRANSPORT_LABELS', 'meshModeLabel',
   'GMPBridgeConnector'
 ].map(extract).join('\n\n');
 

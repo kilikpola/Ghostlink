@@ -1,15 +1,6 @@
-// build-vendor.js — produces vendor/ from the pinned node_modules copies.
-//
-// The page used to pull React, ReactDOM, htm and tweetnacl straight from
-// esm.sh and unpkg at runtime, with no integrity checking: whatever those
-// hosts served executed with full access to the user's keys and message
-// history. These are the same versions, resolved once, reviewed, and served
-// from the app's own origin.
-//
-// The web fonts are here for the same reason, with an extra one: a request to
-// fonts.googleapis.com happens before the user has typed anything, and carries
-// their IP and the timing of every session to a third party. That is precisely
-// the metadata the rest of this app is built to avoid producing.
+// build-vendor.js — produces vendor/ from the pinned node_modules copies, so
+// scripts and fonts are served from the app's own origin rather than fetched
+// from third-party CDNs at runtime.
 //
 // Run: npm run build:vendor          (skips fonts; they rarely change)
 //      npm run build:vendor -- --fonts   (re-fetches the fonts too)

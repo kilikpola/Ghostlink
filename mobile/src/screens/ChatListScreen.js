@@ -76,15 +76,8 @@ function formatTimestamp(ts) {
 
 // ==================== SWIPEABLE CHAT ITEM ====================
 /**
- * One row.
- *
- * Memoised, and deliberately so: each row owns two shared values, a gesture
- * detector and an animated style, and it was being rebuilt on every render of
- * the list. Typing in the search box, a refresh, or a single inbound message
- * re-ran that setup for every visible row. The props are primitives and
- * stable callbacks, so a shallow compare is enough — except `item`, which the
- * comparator below checks field by field, because the chat objects are rebuilt
- * from state on each pass and never compare equal by reference.
+ * One row, memoised. The comparator checks `item` field by field because chat
+ * objects are rebuilt from state on every pass.
  */
 function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
   const translateX = useSharedValue(0);
@@ -256,7 +249,7 @@ const ChatItem = React.memo(ChatItemImpl, (prev, next) => {
 // ==================== MAIN CHAT LIST SCREEN ====================
 export default function ChatListScreen({navigation}) {
   const {theme} = useTheme();
-  const {state, dispatch, identity} = useApp();
+  const {state, dispatch, identity, legacyRecovery} = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [addPeerModalVisible, setAddPeerModalVisible] = useState(false);
@@ -554,6 +547,20 @@ export default function ChatListScreen({navigation}) {
             <Text style={[styles.settingsIcon, {color: theme.textSecondary}]}>S</Text>
           </TouchableOpacity>
         </View>
+
+        {/* ===== OLDER RECOVERY DATA WAITING ON THE PHRASE ===== */}
+        {legacyRecovery?.state === 'needs-phrase' && (
+          <TouchableOpacity
+            style={{margin: 12, padding: 12, borderRadius: 10, borderWidth: 1, backgroundColor: theme.warning + '18', borderColor: theme.warning + '60'}}
+            onPress={() => navigation.navigate('Recovery')}
+            accessibilityRole="button"
+            activeOpacity={0.7}>
+            <Text style={{color: theme.warning, fontWeight: '600', marginBottom: 4}}>Record your recovery phrase</Text>
+            <Text style={{color: theme.textSecondary}}>
+              This update keeps older recovery data on this phone until you confirm your 12-word phrase. Tap to confirm it.
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* ===== SEARCH BAR ===== */}
         <View style={[styles.searchContainer, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>

@@ -1,5 +1,7 @@
 import { EventEmitter } from 'events';
-import config from './config.js';
+import type { PeerExchangeEvents, GMPNodeEvents } from './events.js';
+import { DEFAULTS } from './config-defaults.js';
+import { requesterKey } from './topology-sample.js';
 import type {
   PeerInfo,
   PeerRequestPayload,
@@ -19,16 +21,20 @@ function toHex(nodeId: string | Uint8Array | Buffer | unknown): string {
 /** The most peers we request in a PEER_REQUEST, and so the most we accept back. */
 const MAX_PEERS_PER_RESPONSE = 20;
 
-export class PeerExchangeManager extends EventEmitter {
+export class PeerExchangeManager extends EventEmitter<PeerExchangeEvents> {
   private node: GMPNodeLike;
   private lastRequestTimes: Map<string, number>;
   private candidatePool: Map<string, PeerInfo>;
   private pendingRequestTimers: Set<ReturnType<typeof setTimeout>>;
-  private connectionListener: (info: { link: GMPLinkLike; peerNodeId: string }) => void;
+  private connectionListener: (...args: GMPNodeEvents['connection']) => void;
+  private readonly requestIntervalMs: number;
+  private readonly maxPool: number;
 
-  constructor(node: GMPNodeLike) {
+  constructor(node: GMPNodeLike, options: { requestIntervalMs?: number; maxPool?: number } = {}) {
     super();
     this.node = node;
+    this.requestIntervalMs = options.requestIntervalMs || DEFAULTS.GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS;
+    this.maxPool = options.maxPool || DEFAULTS.GMP_PEER_CACHE_MAX_SIZE;
 
     this.lastRequestTimes = new Map();
 
@@ -55,33 +61,39 @@ export class PeerExchangeManager extends EventEmitter {
       }
     };
 
-    this.node.on('connection', this.connectionListener as (info: { link: GMPLinkLike; peerNodeId: string }) => void);
+    this.node.on('connection', this.connectionListener);
   }
 
+  /**
+   * Answer a PEER_REQUEST with a sample of at most `sampleSize` dialable peers,
+   * keyed on the requester's address so reconnecting returns the same set
+   * within an epoch. Only outbound peers have addresses. Rate-limited per
+   * address key.
+   */
   handlePeerRequest(link: GMPLinkLike, msg: PeerRequestPayload): void {
     if (!link.remoteNodeId) return;
     const requesterHex = toHex(link.remoteNodeId);
+    const key = requesterKey(link);
 
     const now = Date.now();
-    const lastTime = this.lastRequestTimes.get(requesterHex) || 0;
-    const intervalMs = config.GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS || 60000;
+    const lastTime = this.lastRequestTimes.get(key) || 0;
+    const intervalMs = this.requestIntervalMs;
     if (now - lastTime < intervalMs) {
       return;
     }
-    this.lastRequestTimes.set(requesterHex, now);
+    this.lastRequestTimes.set(key, now);
 
-    const maxPeers = Math.min(msg.maxPeers || 20, 20);
-    const cachedPeers = this.node.peerCache.getDirectPeers24h() || [];
-
-    const peersToSend = cachedPeers
-      .filter(p => p.nodeId !== requesterHex)
-      .slice(0, maxPeers)
-      .map(p => ({
-        nodeId: p.nodeId,
-        address: p.address,
-        port: p.port,
-        lastSeen: p.lastSeen
-      }));
+    // No sampler (no topology manager): answer with nothing rather than the set.
+    const topology = this.node.topologyManager;
+    const size = Math.min(msg.maxPeers || MAX_PEERS_PER_RESPONSE, topology?.sampleSize ?? 0);
+    const candidates = (this.node.peerCache.getDirectPeers24h() || []).filter((p) => p.nodeId !== requesterHex);
+    const chosen = topology ? topology.pickSample(link, candidates, (p) => p.nodeId, size) : [];
+    const peersToSend = chosen.map((p) => ({
+      nodeId: p.nodeId,
+      address: p.address,
+      port: p.port,
+      lastSeen: p.lastSeen,
+    }));
 
     try {
       link.sendPeerResponse(peersToSend);
@@ -90,13 +102,11 @@ export class PeerExchangeManager extends EventEmitter {
     }
   }
 
-  handlePeerResponse(link: GMPLinkLike, msg: PeerResponsePayload): void {
+  handlePeerResponse(_link: GMPLinkLike, msg: PeerResponsePayload): void {
     if (!msg || !Array.isArray(msg.peers)) return;
 
-    // Bounded twice over. We only ever request 20 peers, but the response is
-    // the remote's to shape: one peer could send tens of thousands of entries
-    // per frame, repeatedly, and every one used to be kept here forever.
-    const maxPool = config.GMP_PEER_CACHE_MAX_SIZE || 500;
+    // Bounded: the response size is the remote's to choose.
+    const maxPool = this.maxPool;
     let addedCount = 0;
     for (const peer of msg.peers.slice(0, MAX_PEERS_PER_RESPONSE)) {
       const nodeIdHex = toHex(peer.nodeId);
@@ -132,8 +142,13 @@ export class PeerExchangeManager extends EventEmitter {
     }
   }
 
+  /** Peers learned by exchange, newest first: bootstrap rung 4. */
+  candidates(): PeerInfo[] {
+    return [...this.candidatePool.values()].reverse();
+  }
+
   close(): void {
-    this.node.off('connection', this.connectionListener as (info: { link: GMPLinkLike; peerNodeId: string }) => void);
+    this.node.off('connection', this.connectionListener);
     for (const timer of this.pendingRequestTimers) {
       clearTimeout(timer);
     }

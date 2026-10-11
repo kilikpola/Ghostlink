@@ -1,12 +1,6 @@
 /**
- * Regression tests for the license subsystem's client-side checks.
- *
- *   - LicenseManager trusted the tier and expiry written in localStorage, so
- *     `{key:'x', tier:'enterprise', activatedAt:0, expiresAt:9e15}` unlocked
- *     every paid feature without a key. The stored key is now re-verified on
- *     load and tier/expiry are taken from it.
- *   - dev-console.js exported window.generateLicense('GHOSTPRO', …), which
- *     minted a valid key of any tier for any device from the browser console.
+ * License subsystem client-side checks: the stored key is re-verified on load
+ * (tier and expiry come from it), and no console helper can mint keys.
  *
  * Run with: node test/license-storage.test.js
  */

@@ -1,11 +1,6 @@
 /**
- * What this build can actually do.
- *
- * A feature whose UI is present but whose implementation does not work is
- * worse than a missing feature: it costs the user time, and in a messenger it
- * can cost them their identity or their privacy while looking like it
- * succeeded. When something cannot be relied on, it is disabled here and the
- * control says why, rather than being left reachable.
+ * What this build can actually do. Features that cannot be relied on are
+ * disabled here and the control says why.
  *
  * Mirrors mobile/src/utils/capabilities.js. Keep the two in step.
  */
@@ -13,30 +8,10 @@
   'use strict';
 
   /**
-   * The manual Yggdrasil / Ghost Mesh setup dialog.
-   *
-   * The dialog asks for a Yggdrasil IPv6 address and a recovery phrase, then
-   * claims "Cryptographic Matching Confirmed!" when its own derivation of the
-   * phrase matches the pasted address. Two things about that derivation are
-   * unverified against a real Yggdrasil node:
-   *
-   *   - It derives the address from SHA-512 of an *X25519* public key.
-   *     Yggdrasil derives it from the *Ed25519* key. If that is right, a user
-   *     pasting their genuine address always fails verification, and the only
-   *     way to reach the success screen is to paste back the address the app
-   *     printed in its own failure toast — the app verifying itself.
-   *
-   *   - The success screen then hands out that X25519 keypair to be pasted
-   *     into Yggdrasil's Ed25519 `PrivateKeyHex` field, which would not
-   *     produce the address shown and could break a working node's config.
-   *
-   * Disabled until it is checked against `yggdrasilctl getSelf` on a real
-   * node. The derivation itself is kept — see CryptoEngine.deriveLegacyYggdrasilIP
-   * and test/ghost-address-kdf.test.mjs — so that check can be done without
-   * reconstructing anything.
-   *
-   * Flips when the address scheme is confirmed to match a real node, or when
-   * it is corrected to.
+   * The manual Yggdrasil / Ghost Mesh setup dialog. Its address derivation
+   * (SHA-512 of an X25519 key; Yggdrasil uses Ed25519) is unverified against a
+   * real node. Disabled until checked with `yggdrasilctl getSelf`; the
+   * derivation is kept in CryptoEngine.deriveLegacyYggdrasilIP.
    */
   var MESH_SETUP_AVAILABLE = false;
 
@@ -44,17 +19,9 @@
     'Yggdrasil setup is unverified against a real node and is disabled.';
 
   /**
-   * Guardian (Shamir) social recovery: sending recovery fragments to peers.
-   *
-   * The receiving side never stored a fragment — the `fragment-sealed`
-   * handler decrypted it, showed a toast, and dropped it — so a sender could
-   * be shown "3/7 distributed ✓" while no peer held anything. That is a false
-   * assurance about the one thing a user relies on when their device is gone.
-   *
-   * Disabled on the sending and receiving side until there is a transport
-   * that delivers a fragment, stores it on the guardian's device, and can
-   * return it. Copying a fragment and handing it over by hand still works;
-   * fragments are restored by pasting them.
+   * Guardian (Shamir) social recovery over the network. Disabled on both sides
+   * until a transport delivers, stores and returns fragments; manual copy and
+   * paste still works.
    *
    * Mirrors GUARDIAN_RECOVERY_AVAILABLE in mobile/src/utils/capabilities.js.
    */

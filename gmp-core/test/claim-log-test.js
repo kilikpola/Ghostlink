@@ -1,16 +1,10 @@
 /**
- * GMP Claim Log Tests
- *
- * Claims live in an append-only log so that a handshake costs one index lookup
- * and one small append, instead of rewriting every claim ever made. These cover
- * the properties that makes possible — flat latency, a partial tail being
- * ordinary, a corrupt record being fatal to everything after it — and the
+ * GMP Claim Log Tests: flat latency, partial tails, corrupt records, and
  * migration out of the old in-JSON claims map.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { NonceStore } from '../dist/nonce-store.js';
-import config from '../dist/config.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -35,12 +29,7 @@ const freshFile = () => {
   return path.join(dir, 'nonce-state.json');
 };
 const dropDir = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ } };
-/**
- * The claim log is named after the key that seals it, so that two identities
- * sharing a data directory do not write records into one file that neither can
- * fully read. Mirrors ClaimLog._scopePathToKey; prefer `store.claimsFile` where
- * a store is in scope.
- */
+/** The key-scoped claim log path (mirrors ClaimLog.scopedPath). */
 function claimsPathFor(stateFile, seed) {
   const key = crypto.pbkdf2Sync(seed, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
   const id = crypto.createHash('sha256').update('gmp-claim-log-id').update(key).digest('hex').slice(0, 16);
@@ -147,11 +136,9 @@ function testMidFileCorruption() {
   const seen = [];
   const realErr = console.error;
   console.error = (...x) => { seen.push(x.join(' ')); };
-  const previousStrict = config.GMP_STRICT_STATE;
   let recovered = 0;
   try {
-    config.GMP_STRICT_STATE = false;
-    const b = new NonceStore({ stateFile, seedPhrase: SEED });
+    const b = new NonceStore({ stateFile, seedPhrase: SEED, strictState: false });
     b.load();
     recovered = b.claimCount;
     b.close();
@@ -175,9 +162,8 @@ function testMidFileCorruption() {
   fs.rmSync(`${claims}.ckpt`, { force: true });
   let threw = null;
   try {
-    config.GMP_STRICT_STATE = true;
-    new NonceStore({ stateFile, seedPhrase: SEED }).load();
-  } catch (e) { threw = e; } finally { config.GMP_STRICT_STATE = previousStrict; }
+    new NonceStore({ stateFile, seedPhrase: SEED, strictState: true }).load();
+  } catch (e) { threw = e; }
   assertEqual(threw && threw.name, 'StateAuthenticationError', 'Strict mode refuses to start');
   dropDir();
 }
@@ -251,14 +237,7 @@ function testClaimDurableBeforeReturn() {
 }
 
 
-/**
- * FIX 2: a partial record from a crash must not swallow later claims.
- *
- * _consumeTail stops before an incomplete final record. Marking the whole file
- * consumed after appending behind it meant replay stopped at the partial record
- * on the next start and never reached the new claim — a claim reported
- * successful, silently gone, and the session key claimable again.
- */
+/** A partial record from a crash must not swallow claims appended after it. */
 function testAppendBehindPartialRecord() {
   console.log('\n=== Test 6: A claim appended after a partial record survives a reload ===');
   const stateFile = freshFile();
@@ -338,14 +317,8 @@ function testAppendRefusedOnCorruption() {
 
 
 /**
- * FIX 1: a log that cannot be READ is not a log that is damaged.
- *
- * _consumeTail used to answer 'corrupt' for any failure of open() or read() —
- * EMFILE, EACCES, EIO, a mount that went away. load() then quarantined, which
- * rebuilds the log from the in-memory index; on a cold start that index is
- * empty, so a single failed open() replaced every persisted claim with nothing
- * and every burnt session key became claimable again. Silently: nothing had
- * failed authentication, so strict mode did not fire either.
+ * A log that cannot be read (EMFILE, EACCES, EIO...) is not treated as
+ * corrupt, so it is never rebuilt from an empty index.
  */
 function testUnreadableLogIsNotCorruption() {
   console.log('\n=== Test 8: An unreadable log is left alone, not quarantined ===');
@@ -372,13 +345,11 @@ function testUnreadableLogIsNotCorruption() {
   const seen = [];
   const realErr = console.error;
   console.error = (...x) => { seen.push(x.join(' ')); };
-  const previousStrict = config.GMP_STRICT_STATE;
   try {
-    config.GMP_STRICT_STATE = false;
-    const b = new NonceStore({ stateFile, seedPhrase: SEED });
+    const b = new NonceStore({ stateFile, seedPhrase: SEED, strictState: false });
     b.load();
     b.close();
-  } finally { console.error = realErr; config.GMP_STRICT_STATE = previousStrict; }
+  } finally { console.error = realErr; }
 
   assert(seen.some(l => l.includes('state-log-unreadable')), 'An ERROR naming state-log-unreadable is logged');
   assert(!seen.some(l => l.includes('claim-log-quarantined')), 'The log was NOT quarantined');
@@ -399,11 +370,10 @@ function testUnreadableLogIsNotCorruption() {
   fs.chmodSync(claims, 0o000);
   let threw = null;
   try {
-    config.GMP_STRICT_STATE = true;
     const realErr2 = console.error;
     console.error = () => {};
-    try { new NonceStore({ stateFile, seedPhrase: SEED }).load(); } finally { console.error = realErr2; }
-  } catch (e) { threw = e; } finally { config.GMP_STRICT_STATE = previousStrict; }
+    try { new NonceStore({ stateFile, seedPhrase: SEED, strictState: true }).load(); } finally { console.error = realErr2; }
+  } catch (e) { threw = e; }
   assertEqual(threw && threw.name, 'StateAuthenticationError', 'Strict mode refuses to start');
 
   fs.chmodSync(claims, 0o600);

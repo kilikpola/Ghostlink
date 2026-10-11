@@ -3,10 +3,9 @@
 import http from 'http';
 import readline from 'readline';
 import { Writable } from 'stream';
-import crypto from 'crypto';
 import config from './config.js';
 import type { GMPNodeManagerOptions } from './types.js';
-import { BIP39_WORDS } from './bip39-english.js';
+import { generateSeedPhrase } from './seed-phrase.js';
 
 function getMetricsPort(): number {
   return config.GMP_METRICS_PORT || 9090;
@@ -58,11 +57,7 @@ interface JsonResponse {
   [key: string]: unknown;
 }
 
-/**
- * The caller names the shape it expects. JSON.parse returns `any`, so one
- * assertion at the parse boundary is unavoidable; doing it here, once, is
- * better than each call site casting a JsonResponse into an unrelated type.
- */
+/** GET JSON, asserting the caller's expected shape once at the parse boundary. */
 function getJson<T = JsonResponse>(url: string): Promise<T> {
   return new Promise((resolve, reject) => {
     http.get(url, (res: http.IncomingMessage) => {
@@ -136,48 +131,16 @@ function formatNumber(num: number): string {
 }
 
 
-/**
- * Uniform random index in [0, max) from the platform CSPRNG.
- *
- * Rejection sampling rather than `% max`: 2^32 is not a multiple of the word
- * list length, so the plain modulo made the first (2^32 % max) words more
- * likely than the rest and shaved entropy off every phrase it generated.
- */
-function secureRandomIndex(max: number): number {
-  const webCrypto = globalThis.crypto || (crypto as unknown as { webcrypto: Crypto }).webcrypto;
-  if (!webCrypto || typeof webCrypto.getRandomValues !== 'function') {
-    // A predictable seed phrase is a predictable identity key. There is no
-    // safe degraded mode here, so fail loudly instead of producing one.
-    throw new Error('No secure random source available — refusing to generate a seed phrase.');
-  }
-  const limit = Math.floor(0x100000000 / max) * max;
-  const buf = new Uint32Array(1);
-  let v: number;
-  do {
-    webCrypto.getRandomValues(buf);
-    v = buf[0];
-  } while (v >= limit);
-  return v % max;
-}
-
-/**
- * Generate a 12-word recovery phrase.
- *
- * This is the node's master identity: whoever can reproduce the phrase can
- * reproduce the key. It previously had a second, Math.random-backed
- * implementation that `rotate-key` called, which made a rotated identity
- * predictable from the PRNG state. There is now one generator, and it is
- * CSPRNG-backed.
- */
-function generateSeedPhrase(): string {
-  const words: string[] = [];
-  for (let i = 0; i < 12; i++) {
-    words.push(BIP39_WORDS[secureRandomIndex(BIP39_WORDS.length)]);
-  }
-  return words.join(' ');
-}
-
 const generateCryptoSeedPhrase = generateSeedPhrase;
+
+/**
+ * Unattended hosts check their claim log read-only at startup and log the
+ * verdict. Runs before the node starts, since loading may compact the log.
+ */
+async function startupDiagnostics(seedPhrase: string): Promise<void> {
+  const { logStartupClaimLogCheck } = await import('./claim-log-diagnostic.js');
+  await logStartupClaimLogCheck('cli', seedPhrase);
+}
 
 async function startNode(isPublic: boolean = false): Promise<void> {
   let seedPhrase: string | undefined = process.env.GMP_SEED_PHRASE;
@@ -201,31 +164,19 @@ async function startNode(isPublic: boolean = false): Promise<void> {
   const { GMPNodeManager } = await import('./gmp-node-manager.js');
   const { startBridge } = await import('./gmp-bridge.js');
 
-  const options: Record<string, unknown> = { seedPhrase };
-  if (isPublic) {
-    options.isPublicPeer = true;
-    if (process.env.PORT) {
-      const port = parseInt(process.env.PORT, 10);
-      options.GMP_PORT = port;
-      const loggerModule = await import('./logger.js');
-      const logger = loggerModule.default;
-      logger.info('cli', 'port-select', `Using port ${port} from PORT environment variable for GMP public-peer`);
-    } else {
-      const port = config.GMP_PORT || 49500;
-      options.GMP_PORT = port;
-      const loggerModule = await import('./logger.js');
-      const logger = loggerModule.default;
-      logger.info('cli', 'port-select', `Using port ${port} for GMP public-peer`);
-    }
-  } else {
-    const port = config.GMP_PORT || 49500;
-    options.GMP_PORT = port;
+  // The options come from entry-points.ts, which production-construction-test
+  // calls too: the test builds this node from this code.
+  const { cliManagerOptions } = await import('./entry-points.js');
+  const options = cliManagerOptions({ seedPhrase: seedPhrase!, isPublic, env: process.env, configuredPort: config.GMP_PORT });
+  {
     const loggerModule = await import('./logger.js');
     const logger = loggerModule.default;
-    logger.info('cli', 'port-select', `Using port ${port} for GMP node`);
+    const source = isPublic && process.env.PORT ? ' from PORT environment variable' : '';
+    logger.info('cli', 'port-select', `Using port ${options.GMP_PORT}${source} for GMP ${isPublic ? 'public-peer' : 'node'}`);
   }
 
   console.log(`Starting Ghost Link Node (isPublicPeer=${isPublic || false})...`);
+  if (isPublic) await startupDiagnostics(seedPhrase!);
   const manager = new GMPNodeManager(options as GMPNodeManagerOptions);
 
   try {
@@ -246,6 +197,47 @@ async function startNode(isPublic: boolean = false): Promise<void> {
   } catch (e) {
     const err = e as Error;
     console.error('Failed to start GMP Node:', err.message);
+    process.exit(1);
+  }
+}
+
+/**
+ * `gmp storage-peer` — run a sealed store-and-forward mailbox, e.g. on a home
+ * server.
+ *
+ *   GMP_SEED_PHRASE="<12 words>" GMP_PORT=49600 gmp storage-peer
+ *
+ * Stores blobs only: no client bridge, bootstrap dialling or LAN beacons. Point
+ * your app at it with GMP_SF_STORAGE_PEER=<host>:<port>#<NodeID> (printed
+ * below). See docs/store-and-forward.md.
+ */
+async function startStoragePeer(): Promise<void> {
+  const seedPhrase = process.env.GMP_SEED_PHRASE || config.GMP_SEED_PHRASE || await askQuestion('Enter 12-word seed phrase for the storage peer: ', true);
+  if (!seedPhrase || seedPhrase.trim().split(/\s+/).length !== 12) {
+    console.error('Invalid seed phrase. Must be exactly 12 words (gmp generate-seed makes one).');
+    process.exit(1);
+  }
+  const { GMPNodeManager } = await import('./gmp-node-manager.js');
+  const { storagePeerManagerOptions } = await import('./entry-points.js');
+  await startupDiagnostics(seedPhrase);
+  const manager = new GMPNodeManager(storagePeerManagerOptions({ seedPhrase }) as GMPNodeManagerOptions);
+  try {
+    const status = await manager.start();
+    const node = manager.node!;
+    console.log(`GMP storage peer listening on port ${status.port}`);
+    console.log(`NodeID ${status.nodeId}`);
+    const { DATA_DIR } = await import('./paths.js');
+    const { RELEASE_BUCKET_COUNT } = await import('./storage/sf-crypto.js');
+    console.log(`bucketCount ${RELEASE_BUCKET_COUNT} (release-pinned), TTL ${Math.round(node.config.GMP_SF_TTL_MS / 3600000)} h, data ${node.dataDir || DATA_DIR}/storage`);
+    console.log(`Clients: GMP_SF_STORAGE_PEER=<this host>:${status.port}#${status.nodeId}`);
+    const shutdown = async (): Promise<void> => {
+      await manager.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  } catch (e) {
+    console.error('Failed to start storage peer:', (e as Error).message);
     process.exit(1);
   }
 }
@@ -297,6 +289,10 @@ async function main(): Promise<void> {
     }
     case 'public-peer': {
       await startNode(true);
+      break;
+    }
+    case 'storage-peer': {
+      await startStoragePeer();
       break;
     }
     case 'status': {
@@ -425,6 +421,7 @@ function printHelp(): void {
   console.log('\nUsage:');
   console.log('  gmp start           Starts the GMP node and client bridge');
   console.log('  gmp public-peer     Starts the node as a Public Peer');
+  console.log('  gmp storage-peer    Starts a self-hosted store-and-forward mailbox (GM-N2)');
   console.log('  gmp status          Queries local node metrics and prints status box');
   console.log('  gmp peers           Lists currently connected peers');
   console.log('  gmp rotate-key      Walks through seed generation and rotating identity keys');

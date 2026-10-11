@@ -69,7 +69,8 @@ const {appReducer, Actions, INITIAL_STATE, WIPE_KEYS, IDENTITY_SCOPED_KEYS, STOR
 
 // ── Wipe covers every key the app writes ───────────────────────────────────
 {
-  // Every literal or constant handed to AsyncStorage.setItem anywhere in src.
+  // Every literal or constant handed to storage.setItem (utils/storage.js)
+  // or AsyncStorage.setItem anywhere in src.
   const constants = {
     BUNDLE_STORAGE_KEY, FRAGMENTS_STORAGE_KEY,
     STORAGE_KEY: constOf(read('src/services/MobileDistributor.js'), 'STORAGE_KEY'),
@@ -83,7 +84,7 @@ const {appReducer, Actions, INITIAL_STATE, WIPE_KEYS, IDENTITY_SCOPED_KEYS, STOR
 
   const written = new Set();
   for (const f of files) {
-    for (const m of fs.readFileSync(f, 'utf8').matchAll(/AsyncStorage\.setItem\(\s*([^,]+?)\s*,/g)) {
+    for (const m of fs.readFileSync(f, 'utf8').matchAll(/(?:AsyncStorage|storage)\.setItem\(\s*([^,]+?)\s*,/g)) {
       const arg = m[1];
       const literal = arg.match(/^'([^']+)'$/);
       const key = literal ? literal[1] : constants[arg];
@@ -91,7 +92,9 @@ const {appReducer, Actions, INITIAL_STATE, WIPE_KEYS, IDENTITY_SCOPED_KEYS, STOR
       if (key) written.add(key);
     }
   }
-  ok(written.size >= 8, `found the app's storage keys (${written.size})`);
+  // The retired fragment and invite-code keys are not written, but are still
+  // wiped below for older installs.
+  ok(written.size >= 7, `found the app's storage keys (${written.size})`);
   for (const key of written) ok(WIPE_KEYS.includes(key), `wipe removes ${key}`);
 
   for (const key of [BUNDLE_STORAGE_KEY, FRAGMENTS_STORAGE_KEY, 'gl_invite_code']) {

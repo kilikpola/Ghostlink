@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -88,8 +88,8 @@ async function testClockSkewDetection() {
   cleanTempFiles();
 
   // Set timestampWindowMs to 10 minutes so 6 minutes skew is allowed but triggers the warning event
-  const nodeA = new GMPNode({ port: 49910, peerCachePath: tempCacheAPath, disableBootstrap: true, timestampWindowMs: 10 * 60 * 1000 });
-  const nodeB = new GMPNode({ port: 49911, peerCachePath: tempCacheBPath, disableBootstrap: true, timestampWindowMs: 10 * 60 * 1000 });
+  const nodeA = createGMPNode({ port: 49910, peerCachePath: tempCacheAPath, disableBootstrap: true, timestampWindowMs: 10 * 60 * 1000 });
+  const nodeB = createGMPNode({ port: 49911, peerCachePath: tempCacheBPath, disableBootstrap: true, timestampWindowMs: 10 * 60 * 1000 });
 
   await nodeA.loadIdentity('clock A');
   await nodeB.loadIdentity('clock B');
@@ -130,8 +130,8 @@ async function testTimestampOutsideWindowRejected() {
   cleanTempFiles();
 
   // Enforce default 2-minute window (120,000 ms)
-  const nodeA = new GMPNode({ port: 49922, peerCachePath: tempCacheAPath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49923, peerCachePath: tempCacheBPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49922, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 49923, peerCachePath: tempCacheBPath, disableBootstrap: true });
 
   await nodeA.loadIdentity('clock A 2');
   await nodeB.loadIdentity('clock B 2');
@@ -161,8 +161,8 @@ async function testTimestampWithinWindowAccepted() {
   console.log('\n=== Test 3: Timestamp Within 2-minute Window Accepted ===');
   cleanTempFiles();
 
-  const nodeA = new GMPNode({ port: 49924, peerCachePath: tempCacheAPath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49925, peerCachePath: tempCacheBPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49924, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 49925, peerCachePath: tempCacheBPath, disableBootstrap: true });
 
   await nodeA.loadIdentity('clock A 3');
   await nodeB.loadIdentity('clock B 3');

@@ -3,34 +3,13 @@
  *
  *   GHOST-XXX-XXX-XXX
  *
- * A NodeID is SHA-512(staticPubKey) — 64 bytes, 128 hex chars. Nobody is going
- * to read that down a phone line, and it does not fit in a QR code people can
- * scan comfortably. The Ghost Address is the first 45 bits of the NodeID
- * rendered as 9 Crockford-base32 characters, grouped in threes.
+ * The first 45 bits of the NodeID (SHA-512 of the static public key) as 9
+ * Crockford-base32 characters. Derived, not allocated: the same seed phrase
+ * always yields the same address. It carries no IP or port; it is a lookup key
+ * resolved through the mesh. Collisions are detected and never guessed.
  *
- * Two properties matter:
- *
- *  1. It is DERIVED, not allocated. The same seed phrase always produces the
- *     same NodeID and therefore the same Ghost Address, on any device, forever.
- *     There is no registry to sign up with and nothing to keep alive — your
- *     address is a property of your identity, like a phone number you own.
- *
- *  2. It is NOT an address in the network sense. It carries no IP and no port,
- *     so it works identically on a LAN, behind CGNAT, and across continents.
- *     Resolving it to a full NodeID is done by scanning the node IDs the mesh
- *     has already learned through topology flooding (see
- *     GMPNodeManager.resolveGhostAddress), and the connection itself is then a
- *     routed GMP virtual circuit. The address is a lookup key, not a location.
- *
- * 45 bits is short enough to type and long enough that a collision needs
- * millions of simultaneously-online nodes (birthday bound ≈ 6M). Resolution
- * still detects collisions and refuses to guess — see resolveGhostAddress.
- *
- * This module is deliberately dependency-free and plain ESM so the exact same
- * derivation runs in the browser (imported directly by index.html), in the
- * Electron main process, and in the Node bridge. Two implementations of this
- * function would mean two peers computing two different addresses for the same
- * identity, so there must only ever be one.
+ * Dependency-free ESM so the browser, Electron and the bridge share this one
+ * implementation.
  */
 
 // Crockford base32: no I, L, O or U. Removes the 1/l/I and 0/O confusions when
@@ -89,12 +68,8 @@ export function ghostAddressFromNodeId(nodeId) {
 }
 
 /**
- * Accept whatever the user typed or pasted and return the canonical address,
- * or null if it is not one.
- *
- * Tolerates: lower case, a missing GHOST- prefix, missing/extra dashes, spaces,
- * and the four ambiguous characters Crockford excludes (O→0, I/L→1, U→V) so a
- * hand-copied address still resolves.
+ * Canonicalise user input, or return null. Tolerates case, a missing GHOST-
+ * prefix, dashes, spaces, and Crockford's ambiguous characters (O→0, I/L→1, U→V).
  */
 export function normalizeGhostAddress(input) {
   if (typeof input !== 'string') return null;
@@ -117,22 +92,9 @@ export function isGhostAddress(input) {
   return normalizeGhostAddress(input) !== null;
 }
 
-/** True when `nodeId` is one of the NodeIDs that produce `address`. */
-export function nodeIdMatchesAddress(nodeId, address) {
-  const wanted = normalizeGhostAddress(address);
-  if (!wanted) return false;
-  try {
-    return ghostAddressFromNodeId(nodeId) === wanted;
-  } catch (e) {
-    return false;
-  }
-}
-
 /**
- * Pick out every NodeID in `nodeIds` that maps to `address`.
- *
- * Returns all matches rather than the first, because more than one is a
- * collision and callers must not silently connect to an arbitrary one of them.
+ * Every NodeID in `nodeIds` that maps to `address`; more than one is a
+ * collision and callers must not pick one.
  *
  * @param {Iterable<string>} nodeIds
  * @param {string} address

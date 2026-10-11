@@ -1,22 +1,11 @@
 /**
- * A Ghost Address is PBKDF2-HMAC-SHA512, everywhere, always.
- *
- * There are two phrase-to-key derivations in this codebase and they are not
- * interchangeable:
+ * A Ghost Address is PBKDF2-HMAC-SHA512, everywhere.
  *
  *   Ghost Address / identity   PBKDF2-HMAC-SHA512, salt "ghostlink-yggdrasil-v1"
  *   Legacy Yggdrasil routing   PBKDF2-HMAC-SHA256, same salt
  *
- * Same phrase, same salt, same iteration count — different PRF, so different
- * bytes, a different key, and a different address. The SHA-256 one exists only
- * for the manual Ghost Mesh setup panel, where the user is configuring a
- * self-hosted Yggdrasil daemon; it identifies nobody. If it ever got wired
- * into identity derivation, every affected user would be handed an address
- * their own node does not answer to, and the app would look like it worked.
- *
- * These tests are the tripwire for that. They assert the derivations really do
- * differ (so this is not theoretical), that the legacy function is reachable
- * from exactly one place, and that no identity path reaches for SHA-256.
+ * Asserts the two really differ, the legacy function is reachable from exactly
+ * one place, and no identity path uses SHA-256.
  *
  * Run with: node test/ghost-address-kdf.test.mjs
  */
@@ -24,6 +13,7 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
+import {FIXTURE_A} from './helpers/fixture-phrases.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -41,7 +31,7 @@ test('SHA-256 and SHA-512 derivation of the same phrase give different keys', as
   const utf8 = (s) => new TextEncoder().encode(s);
   const hex = (b) => Buffer.from(b).toString('hex');
 
-  const phrase = 'abuse morning urban captain vendor olympic forest unlock flavor ocean vibrant elite';
+  const phrase = FIXTURE_A.join(' ');
   const salt = utf8('ghostlink-yggdrasil-v1');
   const opts = {c: 100000, dkLen: 32};
 
@@ -56,7 +46,7 @@ test('the shipped Ghost Address derivation is SHA-512 and matches gmp-core', asy
   const {deriveIdentityFromSeedPhrase} = await import(path.join(root, 'gmp-core/dist/identity.js'));
   const {ghostAddressFromNodeId} = await import(path.join(root, 'gmp-core/dist/ghost-address.js'));
   const id = await deriveIdentityFromSeedPhrase(
-    'abuse morning urban captain vendor olympic forest unlock flavor ocean vibrant elite');
+    FIXTURE_A.join(' '));
   const nodeIdHex = id.nodeIdHex || Buffer.from(id.nodeId).toString('hex');
   assert.strictEqual(ghostAddressFromNodeId(nodeIdHex), 'GHOST-Z3H-NMX-81T',
     'the canonical Ghost Address for this phrase changed — identities would be orphaned');

@@ -1,5 +1,5 @@
-import net from 'net';
 import logger from './logger.js';
+import type { GMPConnection } from './transport/transport.js';
 import type {
   GMPNodeLike,
   DialResult,
@@ -64,7 +64,9 @@ export async function holePunchConnect({
   });
 
   return new Promise((resolve, reject) => {
-    const sockets: net.Socket[] = [];
+    // Each attempt is a transport dial: no `net` here. Aborting an
+    // attempt destroys a connect still in progress, as socket.destroy() did.
+    const attempts = new Set<AbortController>();
     let isFinished = false;
 
     const overallTimeout = setTimeout(() => {
@@ -81,9 +83,8 @@ export async function holePunchConnect({
       clearInterval(intervalTimer);
       clearTimeout(overallTimeout);
 
-      for (const socket of sockets) {
-        socket.destroy();
-      }
+      for (const a of attempts) a.abort();
+      attempts.clear();
 
       if (err) {
         reject(err);
@@ -93,49 +94,37 @@ export async function holePunchConnect({
     function attemptConnect(): void {
       if (isFinished) return;
 
-      const socket = new net.Socket();
-      sockets.push(socket);
+      const attempt = new AbortController();
+      attempts.add(attempt);
 
-      socket.once('connect', () => {
-        if (isFinished) {
-          socket.destroy();
-          return;
-        }
+      node.transport.dial({ host: peerObservedAddress.address, port: peerObservedAddress.port, signal: attempt.signal })
+        .then((conn: GMPConnection) => {
+          attempts.delete(attempt);
+          if (isFinished) {
+            conn.destroy();
+            return;
+          }
 
-        const idx = sockets.indexOf(socket);
-        if (idx !== -1) {
-          sockets.splice(idx, 1);
-        }
-
-        logger.info('hole-punch', 'tcp-established', `TCP connection established! Running GMP handshake...`, {
-          peerNodeId,
-          address: peerObservedAddress.address,
-          port: peerObservedAddress.port
-        });
-        cleanup(null);
-
-        node.dialWithSocket(socket)
-          .then((res: DialResult) => {
-            resolve(res);
-          })
-          .catch((err: Error) => {
-            socket.destroy();
-            reject(err);
+          logger.info('hole-punch', 'tcp-established', `TCP connection established! Running GMP handshake...`, {
+            peerNodeId,
+            address: peerObservedAddress.address,
+            port: peerObservedAddress.port
           });
-      });
+          cleanup(null);
 
-      socket.once('error', (err: Error) => {
-        socket.destroy();
-        const idx = sockets.indexOf(socket);
-        if (idx !== -1) {
-          sockets.splice(idx, 1);
-        }
-      });
-
-      socket.connect({
-        host: peerObservedAddress.address,
-        port: peerObservedAddress.port
-      });
+          node.dialWithConnection(conn)
+            .then((res: DialResult) => {
+              resolve(res);
+            })
+            .catch((err: Error) => {
+              conn.destroy();
+              reject(err);
+            });
+        })
+        .catch(() => {
+          // Refused, unreachable or aborted: the next interval tries again.
+          attempts.delete(attempt);
+        });
     }
 
     attemptConnect();

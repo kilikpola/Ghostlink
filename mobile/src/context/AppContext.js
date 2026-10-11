@@ -2,13 +2,14 @@
  * GhostLink Mobile — Global Application Context
  *
  * Centralized state for identity, peers, messages, settings,
- * and connection status. Persistent state backed by AsyncStorage.
+ * and connection status. Persistent state goes through utils/storage.js:
+ * secret values are sealed before they reach AsyncStorage.
  * Peers and messages use Map for O(1) lookups.
  */
 
 import WebRTCService from '../services/WebRTCService';
 import {DEFAULT_SETTINGS, parseStoredState} from '../utils/settings-migration';
-import {BUNDLE_STORAGE_KEY, FRAGMENTS_STORAGE_KEY} from '../utils/recovery';
+import {BUNDLE_STORAGE_KEY, FRAGMENTS_STORAGE_KEY, assessLegacyRecovery, finishLegacyMigration} from '../utils/recovery';
 import React, {
   createContext,
   useContext,
@@ -17,7 +18,7 @@ import React, {
   useEffect,
   useRef,
 } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import {storage} from '../utils/storage';
 
 // ─── Storage Keys ────────────────────────────────────────────
 const STORAGE_KEYS = {
@@ -29,18 +30,15 @@ const STORAGE_KEYS = {
 };
 
 /**
- * Everything else this identity writes to AsyncStorage outside the reducer.
- *
- * The recovery bundle carries the wrapped private key with the name, public
- * key and Ghost Address beside it in plaintext; the fragments are all seven
- * Shamir shares of that bundle. Neither was removed by a wipe or a restore, so
- * "Wipe All Data" left the identity on the device, and a restore kept the
- * previous identity's backup.
+ * Everything else this identity writes to AsyncStorage outside the reducer
+ * (the recovery bundle and fragments), cleared on wipe and restore.
  */
 const IDENTITY_SCOPED_EXTRA_KEYS = [
   BUNDLE_STORAGE_KEY,
   FRAGMENTS_STORAGE_KEY,
   'gl_invite_code', // SetupScreen
+  'gl_wrapped_privkey', // 0.0.0-0.0.2
+  'gl_seed_check', // 0.0.0-0.0.2
 ];
 
 /** Shares other people asked this device to hold (MobileDistributor). */
@@ -74,6 +72,11 @@ const INITIAL_STATE = {
     publicKeyHex: '',  // X25519 public key hex
     status: 'not_configured', // 'not_configured' | 'configured' | 'active'
   },
+  /**
+   * Older recovery data kept until the user confirms their phrase:
+   * {state: 'none' | 'resolved' | 'needs-phrase', present?: string[]}.
+   */
+  legacyRecovery: {state: 'none'},
 };
 
 // ─── Action Types ────────────────────────────────────────────
@@ -91,6 +94,7 @@ const Actions = {
   RESTORE_STATE: 'RESTORE_STATE',
   WIPE_ALL: 'WIPE_ALL',
   CLEAR_IDENTITY_DATA: 'CLEAR_IDENTITY_DATA',
+  SET_LEGACY_RECOVERY: 'SET_LEGACY_RECOVERY',
 };
 
 // ─── Map Serialisation Helpers ───────────────────────────────
@@ -116,12 +120,9 @@ function objectToMap(obj) {
 /**
  * The identity as app state may hold it: no private key.
  *
- * The key lives in the keystore. RecoveryScreen's restore paths hand
- * setIdentity the object unlockBundle returns, which carries privateKeyRaw,
- * and the identity is persisted to AsyncStorage — unencrypted — so a restore
- * wrote the raw private key to disk beside the public one. Stripping here also
- * scrubs a copy an earlier build already saved: hydration re-persists the
- * identity through the same path.
+ * The key lives in the keystore. Restore paths hand setIdentity an object
+ * carrying privateKeyRaw, so it is stripped before the identity is persisted.
+ * Hydration re-persists through here, scrubbing copies older builds saved.
  */
 function withoutSecrets(identity) {
   if (!identity || typeof identity !== 'object') return identity;
@@ -154,8 +155,7 @@ function appReducer(state, action) {
     }
 
     case Actions.REMOVE_PEER: {
-      // The conversation goes with the peer. Deleting a chat used to drop only
-      // the peer entry, leaving its whole history persisted and unreachable.
+      // The conversation (and its persisted history) goes with the peer.
       const removed = state.peers.get(action.payload);
       const nextPeers = new Map(state.peers);
       nextPeers.delete(action.payload);
@@ -173,13 +173,7 @@ function appReducer(state, action) {
       return {...state, messages: nextMessages};
     }
 
-    /**
-     * Amend a message already in the list — its delivery status, mostly.
-     *
-     * Without this a status could never change after send, which is why the
-     * old code faked DELIVERED with a timer: there was no way to record a real
-     * one. Statuses now only move because something actually happened.
-     */
+    /** Amend a message already in the list (mostly its delivery status). */
     case Actions.UPDATE_MESSAGE: {
       const {roomId, messageId, patch} = action.payload;
       const existing = state.messages.get(roomId);
@@ -238,6 +232,9 @@ function appReducer(state, action) {
         ghostMesh: {enabled: false, address: '', publicKeyHex: '', status: 'not_configured'},
       };
 
+    case Actions.SET_LEGACY_RECOVERY:
+      return {...state, legacyRecovery: action.payload};
+
     case Actions.WIPE_ALL:
       return {
         ...INITIAL_STATE,
@@ -266,12 +263,8 @@ function AppProvider({children}) {
 
   // ── Hydrate from AsyncStorage on mount ──
   /**
-   * Point the transport at this device's identity and, if one is configured, a
-   * Ghost Mesh bridge.
-   *
-   * The transport needs our own id to derive session keys for the direct path —
-   * the derivation sorts the two peer ids so both ends agree — and it cannot
-   * know it on its own.
+   * Point the transport at this device's identity (needed to derive direct-path
+   * session keys) and, if configured, a Ghost Mesh bridge.
    */
   useEffect(() => {
     const localId = state.identity?.fingerprint || state.identity?.publicKeyHex || null;
@@ -280,37 +273,53 @@ function AppProvider({children}) {
 
   useEffect(() => {
     const url = (state.settings?.meshBridgeUrl || '').trim();
-    // No seed is passed, and none is available to pass: SetupScreen keeps the
-    // recovery phrase out of app state on purpose, so that a plaintext copy
-    // never lands in AsyncStorage alongside the identity. This call used to
-    // read state.identity.seedPhrase, which is always undefined — so the
-    // bridge connected and then sat there, never sending the `start` frame it
-    // needs to bring a node up, with nothing saying why.
-    //
-    // Starting the mesh therefore needs an explicit unlock that supplies the
-    // phrase for the moment it is used. Until that exists the transport
-    // reports 'needs-unlock' rather than pretending to be connecting.
+    // No seed is available here: the recovery phrase is kept out of app state.
+    // Until an explicit unlock supplies it, the transport reports 'needs-unlock'.
     WebRTCService.setMeshBridge(url || null, null);
   }, [state.settings?.meshBridgeUrl]);
 
   useEffect(() => {
     (async () => {
-      const raw = {};
+      // Upgrade first: seal plaintext secrets, delete the retired
+      // Shamir fragments and invite code. Restartable; a failure here is
+      // logged and the reads below still seal lazily.
       try {
-        const [rawIdentity, rawMessages, rawSettings, rawPeers, rawGhostMesh] =
-          await Promise.all([
-            AsyncStorage.getItem(STORAGE_KEYS.IDENTITY),
-            AsyncStorage.getItem(STORAGE_KEYS.MESSAGES),
-            AsyncStorage.getItem(STORAGE_KEYS.SETTINGS),
-            AsyncStorage.getItem(STORAGE_KEYS.PEERS),
-            AsyncStorage.getItem(STORAGE_KEYS.GHOST_MESH),
-          ]);
-        Object.assign(raw, {rawIdentity, rawMessages, rawSettings, rawPeers, rawGhostMesh});
+        const report = await storage.migrate();
+        if (report.sealed.length || report.deleted.length) {
+          console.log(`[AppContext] storage upgraded: sealed ${report.sealed.join(', ') || 'nothing'}; deleted ${report.deleted.join(', ') || 'nothing'}`);
+        }
       } catch (err) {
-        console.error('[AppContext] could not read local storage:', err);
-        hydrated.current = true;
-        return;
+        console.error('[AppContext] storage upgrade did not complete:', err && err.message);
       }
+
+      // Older recovery copies: deleted only when nothing depends on them;
+      // otherwise kept (sealed) and the user is asked for the phrase.
+      try {
+        const legacy = await assessLegacyRecovery();
+        if (legacy.state !== 'none') {
+          console.log(`[AppContext] older recovery data: ${legacy.state}${legacy.how ? ` (${legacy.how})` : ''}`);
+          dispatch({type: Actions.SET_LEGACY_RECOVERY, payload: legacy});
+        }
+      } catch (err) {
+        console.error('[AppContext] could not assess older recovery data (kept):', err && err.message);
+      }
+
+      // Each key on its own: one unreadable value must not blank the others.
+      const read = async key => {
+        try {
+          return await storage.getItem(key);
+        } catch (err) {
+          console.error(`[AppContext] ${key} could not be read:`, err && err.message);
+          return null;
+        }
+      };
+      const raw = {
+        rawIdentity: await read(STORAGE_KEYS.IDENTITY),
+        rawMessages: await read(STORAGE_KEYS.MESSAGES),
+        rawSettings: await read(STORAGE_KEYS.SETTINGS),
+        rawPeers: await read(STORAGE_KEYS.PEERS),
+        rawGhostMesh: await read(STORAGE_KEYS.GHOST_MESH),
+      };
 
       const {restored, lost} = parseStoredState(
         {
@@ -343,12 +352,12 @@ function AppProvider({children}) {
       return;
     }
     if (state.identity) {
-      AsyncStorage.setItem(
+      storage.setItem(
         STORAGE_KEYS.IDENTITY,
         JSON.stringify(withoutSecrets(state.identity)),
       ).catch(() => {});
     } else {
-      AsyncStorage.removeItem(STORAGE_KEYS.IDENTITY).catch(() => {});
+      storage.removeItem(STORAGE_KEYS.IDENTITY).catch(() => {});
     }
   }, [state.identity]);
 
@@ -357,7 +366,7 @@ function AppProvider({children}) {
     if (!hydrated.current) {
       return;
     }
-    AsyncStorage.setItem(
+    storage.setItem(
       STORAGE_KEYS.MESSAGES,
       JSON.stringify(mapToObject(state.messages)),
     ).catch(() => {});
@@ -368,7 +377,7 @@ function AppProvider({children}) {
     if (!hydrated.current) {
       return;
     }
-    AsyncStorage.setItem(
+    storage.setItem(
       STORAGE_KEYS.SETTINGS,
       JSON.stringify(state.settings),
     ).catch(() => {});
@@ -379,7 +388,7 @@ function AppProvider({children}) {
     if (!hydrated.current) {
       return;
     }
-    AsyncStorage.setItem(
+    storage.setItem(
       STORAGE_KEYS.PEERS,
       JSON.stringify(mapToObject(state.peers)),
     ).catch(() => {});
@@ -390,7 +399,7 @@ function AppProvider({children}) {
     if (!hydrated.current) {
       return;
     }
-    AsyncStorage.setItem(
+    storage.setItem(
       STORAGE_KEYS.GHOST_MESH,
       JSON.stringify(state.ghostMesh),
     ).catch(() => {});
@@ -433,18 +442,9 @@ function AppProvider({children}) {
   }, []);
 
   /**
-   * Remove this identity and everything derived from it, from this device.
-   *
-   * The private key does not live in AsyncStorage — it is in the platform
-   * keystore, written by CryptoEngine.saveKeys() under the service
-   * "com.ghostlink.keys" and guarded by biometry. Clearing only the
-   * AsyncStorage keys therefore left the key material behind: a "wipe" that
-   * dropped the messages and the settings while the identity itself stayed on
-   * the device, recoverable by anything that could authenticate. CryptoEngine
-   * has always exported clearKeys(); nothing called it.
-   *
-   * Reports what it managed to remove so the caller can tell the user the
-   * truth rather than claiming a clean wipe after a partial one.
+   * Remove this identity and everything derived from it from this device,
+   * including the keystore key (CryptoEngine.clearKeys). Reports what was and
+   * was not removed.
    *
    * @returns {Promise<{ok: boolean, cleared: string[], failed: string[]}>}
    */
@@ -453,11 +453,21 @@ function AppProvider({children}) {
     const failed = [];
 
     try {
-      await AsyncStorage.multiRemove(WIPE_KEYS);
+      await storage.multiRemove(WIPE_KEYS);
       cleared.push('messages', 'settings', 'peer cache', 'mesh state', 'recovery backup');
     } catch (err) {
       console.warn('[AppContext] wipe: local store failed:', err);
       failed.push('local store');
+    }
+
+    // Forget the data key, separately: if the removal above failed, this is
+    // what still makes the sealed values left behind unreadable.
+    try {
+      await storage.forgetKey();
+      cleared.push('storage key');
+    } catch (err) {
+      console.warn('[AppContext] wipe: storage key failed:', err);
+      failed.push('storage key');
     }
 
     // The part that actually matters.
@@ -478,23 +488,14 @@ function AppProvider({children}) {
   }, []);
 
   /**
-   * Drop everything tied to whoever was on this device before, keeping nothing
-   * but the app's own preferences.
-   *
-   * Restoring a phrase installs a different identity. Messages, the peer cache
-   * and mesh state all belong to the previous one: a conversation list left
-   * behind would be attributed to the restored identity, showing history it
-   * never had and peers it never spoke to. The restore screen already tells
-   * people their messages do not come back — this is what makes that true.
-   *
-   * Settings are deliberately kept: text size and theme are properties of the
-   * person holding the phone, not of the identity.
+   * Drop everything tied to the previous identity before a restore, keeping
+   * only app preferences (text size, theme).
    *
    * @returns {Promise<void>}
    */
   const clearIdentityScopedData = useCallback(async () => {
     try {
-      await AsyncStorage.multiRemove(IDENTITY_SCOPED_KEYS);
+      await storage.multiRemove(IDENTITY_SCOPED_KEYS);
     } catch (err) {
       // Non-fatal: the restore still has to complete, and leaving stale rows
       // is better than refusing to restore the identity at all. Say so.
@@ -502,6 +503,20 @@ function AppProvider({children}) {
     }
     dispatch({type: Actions.CLEAR_IDENTITY_DATA});
   }, []);
+
+  /**
+   * The user confirms their recovery phrase: verified, re-wrapped into a
+   * modern bundle, and only then are the older copies deleted.
+   * Throws (with a RecoveryError code) and deletes nothing on a wrong phrase.
+   */
+  const confirmRecoveryPhrase = useCallback(async words => {
+    const result = await finishLegacyMigration(words, {
+      name: state.identity?.name || '',
+      ghostAddress: state.identity?.ghostAddress || '',
+    });
+    dispatch({type: Actions.SET_LEGACY_RECOVERY, payload: {state: 'resolved', how: 'phrase-confirmed', deleted: result.deleted}});
+    return result;
+  }, [state.identity]);
 
   const setGhostMesh = useCallback(meshData => {
     dispatch({type: Actions.SET_GHOST_MESH, payload: meshData});
@@ -512,12 +527,8 @@ function AppProvider({children}) {
   }, []);
 
   const value = {
-    // Screens were written against two different shapes of this context: some
-    // read the flattened fields below, others destructure `{state, dispatch}`.
-    // Only the flattened half was ever provided, so ChatListScreen's
-    // `state.peers` threw on render and SetupScreen's `dispatch(...)` was
-    // "undefined is not a function". Exposing both keeps every existing caller
-    // working rather than rewriting screens to match.
+    // Both shapes are exposed: some screens read the flattened fields, others
+    // destructure `{state, dispatch}`.
     state,
     dispatch,
 
@@ -528,6 +539,7 @@ function AppProvider({children}) {
     settings: state.settings,
     connectionStatus: state.connectionStatus,
     ghostMesh: state.ghostMesh,
+    legacyRecovery: state.legacyRecovery,
 
     // Actions
     setIdentity,
@@ -541,6 +553,7 @@ function AppProvider({children}) {
     clearGhostMesh,
     wipeAll,
     clearIdentityScopedData,
+    confirmRecoveryPhrase,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

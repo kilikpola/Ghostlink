@@ -1,15 +1,6 @@
 /**
- * A message that did not leave the device must say so.
- *
- * sendMessage writes the block to the local chain first and toasts
- * "Block #N attached to chain and verified". That is a *storage* success, and
- * it was the only feedback a user got when the send then went nowhere: the
- * offline path lived in an `else if (offlineQueue)` branch, `offlineQueue` was
- * state nothing ever set, and there was no else. Messages to a disconnected
- * peer vanished silently after a success toast.
- *
- * These tests drive the real sendMessage body, lifted out of index.html, with
- * a fake connector — so they check behaviour, not the presence of a string.
+ * A message that did not leave the device must say so. Drives the real
+ * sendMessage body, lifted out of index.html, with a fake connector.
  *
  * Run with: node test/send-failure.test.mjs
  */

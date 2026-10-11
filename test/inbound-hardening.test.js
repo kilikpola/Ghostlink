@@ -1,21 +1,10 @@
 /**
- * Regression tests for peer-controlled input handled in index.html.
- *
- *   - Chat, voice and reaction payloads arrive sealed to *our* key, which
- *     anyone can do: sealing authenticates nothing about the sender. Wrongly
- *     typed fields (an object where a string is rendered, a string where an
- *     array is mapped, an emoji of "toString") threw during render and dropped
- *     the whole app to its error boundary; a voice note's `url` was handed to
- *     `new Audio()`, so playing it fetched a peer-chosen address.
- *   - A key-announce was pinned on sight, so a node could claim someone else's
- *     public key and, through the NodeID→fingerprint map, act as them in every
- *     workspace authorization check. Keys are now pinned only after a sealed
- *     challenge is answered.
- *   - The QR scanner read `.c` off QRInvite.parseInvite(), which returns
- *     `code`, and parseInvite rejects Ghost Addresses anyway — so the app's
- *     own QR codes never scanned.
- *   - MessageVault could finish a write after lock(), putting a wiped history
- *     back on disk.
+ * Peer-controlled input handled in index.html:
+ *   - sealed chat, voice and reaction payloads are shape-checked, and a voice
+ *     note's `url` is never fetched
+ *   - announced keys are pinned only after a sealed challenge is answered
+ *   - the QR scanner reads Ghost Addresses
+ *   - MessageVault cannot finish a write after lock()
  *
  * The code under test is extracted from index.html, not copied.
  * Run with: node test/inbound-hardening.test.js

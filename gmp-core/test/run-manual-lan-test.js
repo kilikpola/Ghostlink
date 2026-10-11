@@ -15,6 +15,7 @@ import { GMPNodeManager } from '../dist/gmp-node-manager.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import {FIXTURE_ZERO} from '../../test/helpers/fixture-phrases.mjs';
 
 // Helper to delay execution
 async function delay(ms) {
@@ -74,7 +75,7 @@ async function main() {
   console.log('[Test 1] Initializing Node A (Alice) and Node B (Bob) identities...');
   
   // Use the test seed phrases consistently
-  const seedA = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+  const seedA = FIXTURE_ZERO.join(' ');
   const seedB = 'zebra yellow xylophone water violin umbrella tiger snake rabbit queen python octopus';
 
   const managerA = new GMPNodeManager({

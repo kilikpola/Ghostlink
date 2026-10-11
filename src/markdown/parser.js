@@ -1,14 +1,8 @@
 (function(exports) {
   'use strict';
 
-  // Resolve the sanitizer for both loaders.
-  //
-  // This used to be a bare require() in a try/catch. In the browser `require`
-  // is not defined, so the catch fired on every page load and Sanitizer stayed
-  // null — which silently disabled the only URL check in this file, letting
-  // `[text](javascript:...)` through as a live href. sanitize.js publishes
-  // itself on globalThis, so look there first and fall back to require() for
-  // CommonJS consumers.
+  // Resolve the sanitizer: sanitize.js publishes itself on globalThis in the
+  // browser; fall back to require() for CommonJS.
   var Sanitizer = null;
   if (typeof globalThis !== 'undefined' && typeof globalThis.isSafeURL === 'function') {
     Sanitizer = globalThis;

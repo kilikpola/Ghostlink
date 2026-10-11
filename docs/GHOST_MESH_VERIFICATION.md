@@ -27,11 +27,10 @@ This document defines the verification procedure to confirm that GhostLink's Gho
 
 ### Step 1: Choose a Test Seed Phrase
 
-Use any valid 12-word BIP39 mnemonic. Example test seed:
-
-```
-abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
-```
+Use any valid 12-word BIP39 mnemonic. Example test seed: the BIP-39 all-zero-entropy
+test vector — the word `abandon` eleven times, then `about`. (Written out here as
+prose on purpose: no file in this repository holds a phrase-shaped string, so
+the seed-leak test needs no exceptions.)
 
 > [!WARNING]
 > This is a well-known test vector. **Never** use this seed phrase for real identity or funds.

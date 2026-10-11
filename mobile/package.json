@@ -6,7 +6,7 @@
     "start": "react-native start",
     "android": "react-native run-android",
     "ios": "react-native run-ios",
-    "test": "node test/text-encoding.test.mjs && node test/ghost-address.test.mjs && node test/qr-scan.test.mjs && node test/crypto.test.mjs && node test/recovery.test.mjs && node test/session-crypto.test.mjs && node test/wire-protocol.test.mjs && node test/settings-migration.test.mjs && node test/dead-path-gates.test.mjs && node test/font-scaling.test.mjs && node test/identity-derivation.test.mjs && node test/restore-flow.test.mjs && node test/untrusted-input.test.mjs && node test/app-state.test.mjs && node test/recovery-transport.test.mjs"
+    "test": "node test/text-encoding.test.mjs && node test/ghost-address.test.mjs && node test/qr-scan.test.mjs && node test/crypto.test.mjs && node test/recovery.test.mjs && node test/session-crypto.test.mjs && node test/wire-protocol.test.mjs && node test/settings-migration.test.mjs && node test/dead-path-gates.test.mjs && node test/font-scaling.test.mjs && node test/identity-derivation.test.mjs && node test/restore-flow.test.mjs && node test/untrusted-input.test.mjs && node test/app-state.test.mjs && node test/recovery-transport.test.mjs && node test/secret-storage.test.mjs && node test/legacy-recovery-migration.test.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

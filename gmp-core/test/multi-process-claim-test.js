@@ -1,15 +1,6 @@
 /**
- * GMP Multi-Process Claim Tests
- *
- * Two nodes sharing a data directory is not exotic — GMP_DATA_DIR points
- * wherever an operator says, and DEPLOYMENT.md's tmux/nohup/PM2 recipes make
- * two processes from one checkout easy. Before the lock, each process wrote a
- * state file derived from a snapshot taken before the other's write, so they
- * silently erased each other's session-key claims while telling both callers
- * the claim had succeeded.
- *
- * These use real forked processes, not two stores in one process: the bug is
- * about separate address spaces racing on one file.
+ * GMP Multi-Process Claim Tests: real forked processes sharing a data
+ * directory must not erase each other's session-key claims.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
@@ -38,13 +29,7 @@ function assertEqual(actual, expected, message) {
 }
 
 const peer = Buffer.alloc(64, 9);
-// Claims append to their own log, and that is what the lock now guards.
-/**
- * The claim log is named after the key that seals it, so that two identities
- * sharing a data directory do not write records into one file that neither can
- * fully read. Mirrors ClaimLog._scopePathToKey; prefer `store.claimsFile` where
- * a store is in scope.
- */
+/** The key-scoped claim log path (mirrors ClaimLog.scopedPath). */
 function claimsPathFor(stateFile, seed) {
   const key = crypto.pbkdf2Sync(seed, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
   const id = crypto.createHash('sha256').update('gmp-claim-log-id').update(key).digest('hex').slice(0, 16);
@@ -73,8 +58,8 @@ async function testConcurrentClaimsBothSurvive() {
   console.log('\n=== Test 1: Concurrent claims from two processes both survive ===');
   const stateFile = freshDir();
 
-  // Both children load before either writes — the window that used to lose a
-  // claim outright. The hold makes the overlap deterministic.
+  // Both children load before either writes; the hold makes the overlap
+  // deterministic.
   const [a, b] = await Promise.all([
     claimInChild(stateFile, 'aa'.repeat(16), 150),
     claimInChild(stateFile, 'bb'.repeat(16), 150),

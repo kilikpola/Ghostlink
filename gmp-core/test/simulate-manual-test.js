@@ -1,17 +1,13 @@
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import { holePunchConnect } from '../dist/hole-punch.js';
-
-async function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 async function main() {
   console.log('=== Starting Localhost Manual Test Simulation ===\n');
 
   // 1. Initialize both nodes
   console.log('[1/5] Initializing Node A (Initiator) and Node B (Responder)...');
-  const nodeA = new GMPNode({ port: 49501 });
-  const nodeB = new GMPNode({ port: 49502 });
+  const nodeA = createGMPNode({ port: 49501 });
+  const nodeB = createGMPNode({ port: 49502 });
 
   await nodeA.loadIdentity('simulation node A identity');
   await nodeB.loadIdentity('simulation node B identity');

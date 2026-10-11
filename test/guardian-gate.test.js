@@ -1,11 +1,6 @@
 /**
- * Guardian recovery must not report a backup that nobody holds.
- *
- * The receiving side never stored a recovery fragment, yet the sender counted
- * each "sent" fragment toward "3/7 distributed ✓". Until fragments are stored
- * and returnable, sending is gated off in src/utils/capabilities.js. These
- * check the gate exists, fails closed, and is applied on both the sending and
- * the receiving side of index.html — a flag nothing reads is not a gate.
+ * Guardian recovery is gated off in src/utils/capabilities.js; checks the gate
+ * exists, fails closed, and is applied on both sides in index.html.
  */
 const fs = require('fs');
 const path = require('path');

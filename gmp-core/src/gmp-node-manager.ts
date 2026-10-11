@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events';
-import { GMPNode } from './link.js';
-import config from './config.js';
+import type { GMPNodeManagerEvents } from './events.js';
+import type { GMPNode } from './link.js';
+import { createGMPNode, type CreateNodeOptions } from './node-factory.js';
+import { loadConfigDetailed } from './config.js';
+import type { ConfigIssue } from './config.js';
 import metrics from './metrics.js';
 import logger from './logger.js';
 import { ghostAddressFromNodeId, normalizeGhostAddress, findNodeIdsForAddress } from './ghost-address.js';
@@ -12,9 +15,29 @@ import type {
 } from './types.js';
 import type { BootstrapDiagnosis } from './bootstrap.js';
 import { loadPublicPeers, queryPublicAddress } from './public-peer-list.js';
+import { deriveIdentityFromSeedPhrase } from './identity.js';
+import crypto from 'crypto';
+import path from 'path';
+import { DATA_DIR } from './paths.js';
+import { StoreForward, parseStoragePeer } from './storage/store-forward.js';
+import type { StorageAddress } from './storage/storage-client.js';
+import { SfPollScheduler } from './storage/sf-scheduler.js';
+import { sampleResources, reportAgainst, fdPressure } from './resource-sample.js';
 
 /** How long a direct dial to a LAN-discovered peer may take before falling back to the mesh. */
 const LAN_DIAL_TIMEOUT_MS = 5000;
+
+/**
+ * How a peer is reached, as shown in the UI. A relay not separated from hosts
+ * that know this node's identity is reported as 'relayed-unseparated'.
+ */
+export type PeerTransport = 'direct' | 'relayed' | 'relayed-unseparated';
+
+function transportOf(link: { socket?: { isRelayed?: boolean; separation?: string } | null }): PeerTransport {
+  const socket = link.socket;
+  if (!socket || !socket.isRelayed) return 'direct';
+  return socket.separation === 'separated' ? 'relayed' : 'relayed-unseparated';
+}
 
 function toHex(nodeId: string | Buffer | Uint8Array): string {
   if (typeof nodeId === 'string') return nodeId;
@@ -24,22 +47,37 @@ function toHex(nodeId: string | Buffer | Uint8Array): string {
   return String(nodeId);
 }
 
-export class GMPNodeManager extends EventEmitter {
-  private config: GMPConfig & GMPNodeManagerOptions;
-  /**
-   * The live node. Private so only this class can swap it in and out; the
-   * bridge and the CLI read it through the `node` getter below, which is
-   * read-only. Both of them null-check it on every use, because it is null
-   * before start() and again after stop().
-   */
+export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
+  private readonly options: GMPNodeManagerOptions;
+  /** Resolved once, at construction: explicit option > env > config file > default. */
+  private readonly config: GMPConfig;
+  private readonly configIssues: ConfigIssue[];
+  /** The live node; null before start() and after stop(). */
   private _node: GMPNode | null;
   private connToNodeId: Map<string, string>;
   private externalAddress: { address: string; port: number } | null;
   private discoveringExternal: boolean;
+  /** Sealed store-and-forward client; null before start(). */
+  private _sf: StoreForward | null = null;
+  private _sfScheduler: SfPollScheduler | null = null;
+  private _resourceTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: GMPNodeManagerOptions = {}) {
     super();
-    this.config = { ...config, ...options } as GMPConfig & GMPNodeManagerOptions;
+    this.options = options;
+    const resolved = loadConfigDetailed({ ...options });
+    // Unattended hosts (public peer, relay, storage) default to strict state;
+    // user clients do not. An explicit GMP_STRICT_STATE always wins.
+    const unattended = !!options.isPublicPeer || resolved.config.GMP_RELAY_ENABLED || resolved.config.GMP_STORAGE_ENABLED;
+    this.config = resolved.sources.GMP_STRICT_STATE === 'default'
+      ? { ...resolved.config, GMP_STRICT_STATE: unattended }
+      : resolved.config;
+    // Hosts others bootstrap from default to GMP_MIN_PEERS 0, so a lone host
+    // does not retry bootstrap forever. An explicit value wins.
+    if (unattended && resolved.sources.GMP_MIN_PEERS === 'default') {
+      this.config = { ...this.config, GMP_MIN_PEERS: 0 };
+    }
+    this.configIssues = resolved.issues;
     this._node = null;
     this.connToNodeId = new Map();
     this.externalAddress = null;
@@ -52,12 +90,8 @@ export class GMPNodeManager extends EventEmitter {
   }
 
   /**
-   * Ask a public peer what address this node appears to come from, over
-   * BINDING_REQUEST. Nothing called queryPublicAddress before, so the node
-   * never learned its own external address and every status reply said
-   * 127.0.0.1 — fine on a LAN, useless for anyone dialling in from outside.
-   * Runs once per peer-connected until it succeeds; a peer that is up but
-   * refuses the query should not wedge the node into retrying forever.
+   * Learn this node's external address from a public peer via BINDING_REQUEST.
+   * Runs once per peer-connected until it succeeds.
    */
   private async discoverExternalAddress(): Promise<void> {
     if (!this._node || this.externalAddress || this.discoveringExternal) return;
@@ -78,45 +112,61 @@ export class GMPNodeManager extends EventEmitter {
     }
   }
 
-  async start(): Promise<{ nodeId: string; address: string; port: number }> {
+  /** This manager's state directory; null means the process-wide default. */
+  get dataDir(): string | null {
+    return this.options.dataDir ?? null;
+  }
+
+  /**
+   * The NodeID this manager runs (or will run) as; null without a seed. Used by
+   * the node registry.
+   */
+  async resolveNodeId(): Promise<string | null> {
+    if (this._node && this._node.identity) return this._node.identity.nodeIdHex;
+    const seedPhrase = this.options.GMP_SEED_PHRASE || this.options.seedPhrase;
+    if (!seedPhrase) return null;
+    const identity = await deriveIdentityFromSeedPhrase(seedPhrase);
+    return Buffer.from(identity.nodeId).toString('hex');
+  }
+
+  private _starting: Promise<{ nodeId: string; address: string; port: number }> | null = null;
+
+  /**
+   * Start the node. Concurrent calls share one attempt (the bridge and its
+   * host can both ask for the same node); a call after a completed start
+   * still throws.
+   */
+  start(): Promise<{ nodeId: string; address: string; port: number }> {
+    if (this._starting) return this._starting;
     if (this._node) {
-      throw new Error('GMPNodeManager already started');
+      return Promise.reject(new Error('GMPNodeManager already started'));
+    }
+    this._starting = this._start().finally(() => { this._starting = null; });
+    return this._starting;
+  }
+
+  private async _start(): Promise<{ nodeId: string; address: string; port: number }> {
+
+    const seedPhrase = this.options.GMP_SEED_PHRASE || this.options.seedPhrase;
+
+    for (const issue of this.configIssues) {
+      logger.warn('gmp-node-manager', 'config-value-ignored',
+        `Ignoring ${issue.source} config value for ${issue.key}: ${issue.reason}`,
+        { key: issue.key, source: issue.source, reason: issue.reason });
     }
 
-    const seedPhrase = this.config.GMP_SEED_PHRASE || this.config.seedPhrase;
-
+    // isPublicPeer is deliberately not forwarded: it never has been, and
+    // turning it on changes the bind address and adds a strict per-IP limiter
+    // on the deployed public peer. See ARCHITECTURE_BASELINE.md §11.
     const nodeOptions: GMPNodeConstructorOptions = {
-      port: this.config.GMP_PORT,
-      minPeers: this.config.GMP_MIN_PEERS,
-      maxPeers: this.config.GMP_MAX_PEERS,
-      maxConnections: this.config.GMP_MAX_CONNECTIONS,
-      helloTimeoutMs: this.config.GMP_HELLO_TIMEOUT_MS,
-      handshakeTimeoutMs: this.config.GMP_HANDSHAKE_TIMEOUT_MS,
-      pingIntervalMs: this.config.GMP_PING_INTERVAL_MS,
-      pongTimeoutMs: this.config.GMP_PING_TIMEOUT_MS,
-      timestampWindowMs: this.config.GMP_TIMESTAMP_WINDOW_MS,
-      stage1TimeoutMs: this.config.GMP_BOOTSTRAP_STAGE1_TIMEOUT_MS,
-      stage2TimeoutMs: this.config.GMP_BOOTSTRAP_STAGE2_TIMEOUT_MS,
-      rebootstrapBackoffInitialMs: this.config.GMP_REBOOTSTRAP_BACKOFF_INITIAL_MS,
-      rateLimitWindowMs: this.config.GMP_RATE_LIMIT_WINDOW_MS,
-      rateLimitMaxPerIp: this.config.GMP_RATE_LIMIT_MAX_PER_IP,
-      rateLimitMaxGlobal: this.config.GMP_RATE_LIMIT_MAX_GLOBAL,
-      forwardRateLimitPerSource: this.config.GMP_FORWARD_RATE_LIMIT_PER_SOURCE,
-      peerRequestRateLimitIntervalMs: this.config.GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS,
-      sessionKeyLruSize: this.config.GMP_SESSION_KEY_LRU_SIZE,
-      sequenceNumLruSize: this.config.GMP_SEQUENCE_NUM_LRU_SIZE,
-      noncePruneAgeMs: this.config.GMP_NONCE_PRUNE_AGE_MS,
-      routeExpiryMs: this.config.GMP_ROUTE_EXPIRY_MS,
-      topologyTtl: this.config.GMP_TOPOLOGY_TTL,
-      messageHopLimit: this.config.GMP_MESSAGE_HOP_LIMIT,
-      reannounceIntervalMs: this.config.GMP_REANNOUNCE_INTERVAL_MS,
-      peerCacheMaxSize: this.config.GMP_PEER_CACHE_MAX_SIZE,
-      peerCachePruneFailureThreshold: this.config.GMP_PEER_CACHE_PRUNE_FAILURE_THRESHOLD,
-      peerCachePruneAgeDays: this.config.GMP_PEER_CACHE_PRUNE_AGE_DAYS,
-      seedPhrase
+      config: this.config,
+      dataDir: this.options.dataDir,
+      seedPhrase,
+      transport: this.options.transport,
+      ...(this.options.disableBootstrap ? { disableBootstrap: true } : {}),
     };
 
-    this._node = new GMPNode(nodeOptions);
+    this._node = createGMPNode(nodeOptions as CreateNodeOptions);
 
     this._node.on('connection', ({ connId, link, peerNodeId }: { connId: string; link: GMPLinkLike; peerNodeId: Uint8Array }) => {
       const nodeIdHex = toHex(peerNodeId);
@@ -126,8 +176,9 @@ export class GMPNodeManager extends EventEmitter {
       const port = link.socket ? link.socket.remotePort : null;
 
       metrics.increment('peers.totalConnected');
-      this.emit('peer-connected', { nodeId: nodeIdHex, address, port });
+      this.emit('peer-connected', { nodeId: nodeIdHex, address, port, transport: transportOf(link) });
       void this.discoverExternalAddress();
+      this._onSfPeer(nodeIdHex, link);
     });
 
     this._node.on('close', ({ connId }: { connId: string }) => {
@@ -139,7 +190,7 @@ export class GMPNodeManager extends EventEmitter {
       }
     });
 
-    this._node.on('message', ({ connId, msg }: { connId: string; msg: Uint8Array }) => {
+    this._node.on('message', ({ connId, msg }) => {
       const nodeIdHex = this.connToNodeId.get(connId);
       let fromHex = nodeIdHex;
       if (!fromHex && this._node) {
@@ -158,6 +209,18 @@ export class GMPNodeManager extends EventEmitter {
               .catch(() => {});
             return;
           }
+          // A contact telling us, end to end, where its mailbox is.
+          if (parsed && parsed.type === 'gmp-sf-mailbox') {
+            const m = parsed.mailbox;
+            if (this._sf && m && typeof m.address === 'string' && Number.isInteger(m.port) && m.port > 0 && m.port < 65536) {
+              this._sf.setMailbox(fromHex, {
+                address: m.address,
+                port: m.port,
+                ...(typeof m.nodeId === 'string' && /^[0-9a-f]{128}$/.test(m.nodeId) ? { nodeId: m.nodeId } : {}),
+              });
+            }
+            return;
+          }
         } catch { }
       }
 
@@ -174,7 +237,7 @@ export class GMPNodeManager extends EventEmitter {
       this.emit('bootstrap-failed', { peersConnected, diagnosis: diagnosis ?? null });
     });
 
-    this._node.on('routing-degraded', (data: unknown) => {
+    this._node.on('routing-degraded', (data) => {
       this.emit('routing-degraded', data);
     });
 
@@ -185,10 +248,10 @@ export class GMPNodeManager extends EventEmitter {
       metrics.startServer(this.config.GMP_METRICS_PORT);
 
       await this._node.listen();
+      if (this.options.storeForward !== false) this._startStoreForward(seedPhrase);
+      this._startResourceLog();
     } catch (err) {
-      // Leave no half-started node behind. _node used to stay set after a
-      // failure here (port in use, bad seed), so every later start() threw
-      // "already started" and the bridge reported a node with no identity.
+      // Leave no half-started node behind, so start() can be retried.
       metrics.stopServer();
       try { this._node.close(); } catch { }
       this._node = null;
@@ -205,6 +268,11 @@ export class GMPNodeManager extends EventEmitter {
 
   async stop(): Promise<void> {
     if (!this._node) return;
+    if (this._resourceTimer) clearInterval(this._resourceTimer);
+    this._resourceTimer = null;
+    if (this._sfScheduler) this._sfScheduler.stop();
+    this._sfScheduler = null;
+    this._sf = null;
 
     metrics.stopServer();
 
@@ -229,6 +297,136 @@ export class GMPNodeManager extends EventEmitter {
     this._node.close();
     this._node = null;
     this.connToNodeId.clear();
+  }
+
+  // ── Resource self-measurement ───────
+
+  /**
+   * Every GMP_RESOURCE_LOG_INTERVAL_MS, log RSS, heap, open fds and links with
+   * per-link deltas. Off (0) by default.
+   */
+  private _startResourceLog(): void {
+    const ms = Number(this.config.GMP_RESOURCE_LOG_INTERVAL_MS) || 0;
+    const node = this._node;
+    if (ms <= 0 || !node) return;
+    const baseline = sampleResources(node as never);
+    const frac = Number(this.config.GMP_FD_WARN_FRACTION);
+    const warnAt = frac > 0 && frac <= 1 ? frac : 0.8;
+    // A soft limit below the connection cap is handled where the cap lives:
+    // GMPNode.listen clamps it and logs link/connection-cap (every start).
+    let fdMismatchWarned = false;
+    const log = (): void => {
+      if (!this._node) return;
+      const r = reportAgainst(baseline, sampleResources(this._node as never));
+      logger.info('gmp-node-manager', 'resource-sample',
+        `rss ${(r.rssBytes / 1048576).toFixed(1)} MiB, fds ${r.openFds ?? '?'}/${r.fdLimit ?? '?'} (hard ${r.fdHardLimit ?? '?'}), links ${r.links} (${r.connected} connected) from ${r.distinctAddresses} address(es), max ${r.maxLinksPerAddress} per address` +
+        (r.rssPerLinkBytes !== null ? `, ${(r.rssPerLinkBytes / 1024).toFixed(1)} KiB and ${r.fdsPerLink ?? '?'} fds per link over baseline` : ''),
+        { ...r, baselineRssBytes: baseline.rssBytes, baselineFds: baseline.openFds, cap: this.config.GMP_RATE_LIMIT_MAX_GLOBAL });
+      // Ground truth vs what the node can explain: fds at start plus one per
+      // link. The live pressure check (rate-limiter) only sees connections;
+      // descriptors held by anything else show up here.
+      if (r.openFds !== null && baseline.openFds !== null) {
+        const expected = baseline.openFds + r.links;
+        const gap = r.openFds - expected;
+        const tolerance = Math.max(16, Math.round(0.1 * (r.fdLimit ?? 0)));
+        if (Math.abs(gap) > tolerance && !fdMismatchWarned) {
+          fdMismatchWarned = true;
+          logger.warn('gmp-node-manager', 'fd-count-mismatch',
+            `Open descriptors ${r.openFds} vs ${expected} explained by links (${baseline.openFds} at start + ${r.links} links): ${gap > 0 ? `${gap} held by something other than connections` : `${-gap} fewer than expected`}; the connection-based pressure check cannot see these`,
+            { openFds: r.openFds, expected, gap, links: r.links, baselineFds: baseline.openFds, fdLimit: r.fdLimit });
+        } else if (Math.abs(gap) <= tolerance / 2) {
+          fdMismatchWarned = false;
+        }
+      }
+      const p = fdPressure(r);
+      if (p !== null && p >= warnAt) {
+        logger.warn('gmp-node-manager', 'fd-pressure',
+          `Open descriptors ${r.openFds} of soft limit ${r.fdLimit} (${Math.round(p * 100)}%, warn at ${Math.round(warnAt * 100)}%): at the limit new connections are dropped with no error logged`,
+          { openFds: r.openFds, fdLimit: r.fdLimit, fdHardLimit: r.fdHardLimit, fraction: Math.round(p * 1000) / 1000, warnAt, links: r.links });
+      }
+    };
+    log();
+    this._resourceTimer = setInterval(log, ms);
+    this._resourceTimer.unref?.();
+  }
+
+  // ── Sealed store-and-forward ─────────────
+
+  /** This user's mailbox: the self-hosted peer if configured, else the first listed storage host. */
+  private _ownMailbox(): StorageAddress | null {
+    const self = parseStoragePeer(this.config.GMP_SF_STORAGE_PEER);
+    if (self) return self;
+    const listed = loadPublicPeers(this._node?.bootstrap?.publicPeersPath || undefined)
+      .filter((p) => p.roles.includes('storage'))
+      .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0))[0];
+    return listed
+      ? { address: listed.address, port: listed.port, nodeId: listed.nodeId, tls: listed.tls, operator: listed.operator }
+      : null;
+  }
+
+  private _startStoreForward(seedPhrase: string | undefined): void {
+    const node = this._node;
+    if (!node) return;
+    const dir = this.options.dataDir ?? DATA_DIR;
+    this._sf = new StoreForward({
+      host: node as never,
+      stateFile: path.join(dir, 'store-forward.state'),
+      encryptionKey: seedPhrase ? crypto.pbkdf2Sync(seedPhrase, 'ghostlink-sf-client-v1', 100000, 32, 'sha256') : null,
+      strictState: this.config.GMP_STRICT_STATE === true,
+      fetchBuckets: this.config.GMP_SF_FETCH_BUCKETS,
+      decoyChannels: this.config.GMP_SF_DECOY_CHANNELS,
+      cursorQuantumMs: this.config.GMP_SF_CURSOR_QUANTUM_MS,
+      ttlMs: this.config.GMP_SF_TTL_MS,
+      ownMailbox: () => this._ownMailbox(),
+    });
+    this._sf.on('stored', (e) => this.emit('sf-stored', e));
+    this._sf.on('delivered', (e) => this.emit('sf-delivered', e));
+    this._sf.on('expired', (e) => this.emit('sf-expired', e));
+    this._sf.on('message', (m) => this.emit('message', { fromNodeId: m.fromNodeId, payload: m.payload, via: 'mailbox' }));
+    this._sf.on('poll-complete', () => this.emit('storage-status', this.storageStatus()));
+    this._sfScheduler = new SfPollScheduler(this.config.GMP_SF_POLL_INTERVAL_MS, (reason) => this._sf ? this._sf.poll(reason) : Promise.resolve());
+    this._sfScheduler.start();
+  }
+
+  /** Every authenticated contact: remember its static key; tell app contacts where our mailbox is. */
+  private _onSfPeer(nodeIdHex: string, link: GMPLinkLike): void {
+    if (!this._sf || !link.remoteStaticPubkey) return;
+    this._sf.learnContact(nodeIdHex, link.remoteStaticPubkey);
+    const announce = this._sf.mailboxAnnouncement();
+    if (announce && this._sf.isPollContact(nodeIdHex)) {
+      link.send(JSON.stringify({ type: 'gmp-sf-mailbox', mailbox: announce })).catch(() => {});
+    }
+  }
+
+  /** Deposit a message for an offline contact. Resolves on the host's STORE_ACK (SENT, stored). */
+  async storeForwardSend(destinationNodeId: string, payload: string, localId?: string): Promise<{ localId: string }> {
+    if (!this._sf) throw new Error('GMPNodeManager not started');
+    return this._sf.send(toHex(destinationNodeId), payload, localId);
+  }
+
+  /** Poll now ('foreground', 'network', ...). The interval schedule re-arms from here. */
+  async pollMailbox(reason: string): Promise<void> {
+    if (!this._sfScheduler) throw new Error('GMPNodeManager not started');
+    await this._sfScheduler.trigger(reason);
+  }
+
+  /** The app's contacts: whose channels to poll, and whom to tell about our mailbox. */
+  setMailboxContacts(nodeIds: string[]): void {
+    if (!this._sf) throw new Error('GMPNodeManager not started');
+    this._sf.setPollContacts(nodeIds.map((n) => toHex(n)));
+    if (this._node) {
+      for (const link of this._node.connections.values()) {
+        if (link.state === 'connected' && link.remoteNodeId) this._onSfPeer(toHex(link.remoteNodeId), link as never);
+      }
+    }
+  }
+
+  storageStatus(): { host: string | null; separation: 'separated' | 'unseparated' | 'none'; selfHosted: boolean; pending: number } {
+    return this._sf ? this._sf.status() : { host: null, separation: 'none', selfHosted: false, pending: 0 };
+  }
+
+  get storeForward(): StoreForward | null {
+    return this._sf;
   }
 
   async connectToPeer(address: string, port: number, options: { tls?: boolean } = {}): Promise<{ nodeId: string | null; connected: boolean }> {
@@ -258,7 +456,13 @@ export class GMPNodeManager extends EventEmitter {
       return link;
     }
 
-    const route = this._node.routingTable.getBestRoute(destHex);
+    // Routes are no longer flooded: ask for one to this named
+    // destination before concluding there is none.
+    let route = this._node.routingTable.getBestRoute(destHex);
+    if (!route && this._node.topologyManager) {
+      await this._node.topologyManager.queryRoute(destHex);
+      route = this._node?.routingTable.getBestRoute(destHex) ?? null;
+    }
     if (!route) {
       const err = new Error('No route to destination');
       err.name = 'NoRouteError';
@@ -338,8 +542,16 @@ export class GMPNodeManager extends EventEmitter {
     return { reason: 'ok', nodeId: matches[0] };
   }
 
+  /** Resolve a Ghost Address: local knowledge first, then an on-demand mesh query. */
+  async lookupGhostAddress(address: string): Promise<{ reason: string; nodeId?: string }> {
+    const local = this.resolveGhostAddress(address);
+    if (local.reason !== 'not-found' || !this._node || !this._node.topologyManager) return local;
+    const nodeId = await this._node.topologyManager.queryGhost(address);
+    return nodeId ? { reason: 'ok', nodeId } : local;
+  }
+
   async connectByGhostAddress(address: string): Promise<{ connected: boolean; transport: string }> {
-    const result = this.resolveGhostAddress(address);
+    const result = await this.lookupGhostAddress(address);
     if (result.reason !== 'ok' || !result.nodeId) {
       return { connected: false, transport: 'failed' };
     }
@@ -367,7 +579,7 @@ export class GMPNodeManager extends EventEmitter {
     if (lanPeer) {
       let timer: NodeJS.Timeout | undefined;
       try {
-        const dialed = this._node.dial(lanPeer.address, lanPeer.port);
+        const dialed = this._node.dial(lanPeer.address, lanPeer.port, { nodeId });
         const { link, peerNodeId } = await Promise.race([
           dialed,
           new Promise<never>((_, reject) => {
@@ -398,7 +610,8 @@ export class GMPNodeManager extends EventEmitter {
   getStatus(): {
     status: string;
     externalAddress: { address: string; port: number } | null;
-    peers: Array<{ nodeId: string; address: string | null; port: number | null; isVirtual: boolean }>;
+    peers: Array<{ nodeId: string; address: string | null; port: number | null; isVirtual: boolean; transport: PeerTransport | 'virtual' }>;
+    storage?: ReturnType<GMPNodeManager['storageStatus']>;
   } {
     if (!this._node) {
       return { status: 'offline', externalAddress: null, peers: [] };
@@ -406,14 +619,15 @@ export class GMPNodeManager extends EventEmitter {
 
     const health = this._node.getHealthReport();
 
-    const peers: Array<{ nodeId: string; address: string | null; port: number | null; isVirtual: boolean }> = [];
+    const peers: Array<{ nodeId: string; address: string | null; port: number | null; isVirtual: boolean; transport: PeerTransport | 'virtual' }> = [];
     for (const link of this._node.connections.values()) {
       if (link.state === 'connected' && link.remoteNodeId) {
         peers.push({
           nodeId: toHex(link.remoteNodeId),
           address: link.socket ? link.socket.remoteAddress : null,
           port: link.socket ? link.socket.remotePort : null,
-          isVirtual: false
+          isVirtual: false,
+          transport: transportOf(link)
         });
       }
     }
@@ -423,22 +637,19 @@ export class GMPNodeManager extends EventEmitter {
           nodeId: toHex(link.remoteNodeId),
           address: 'virtual',
           port: 0,
-          isVirtual: true
+          isVirtual: true,
+          transport: 'virtual'
         });
       }
     }
 
     return {
       ...(health ?? {}),
-      // getHealthReport() returns null when the node has no health monitor, so
-      // the status has to be defaulted here. The previous version read
-      // healthMonitor.status - a property that does not exist - and placed it
-      // before the spread, so it was either undefined or immediately
-      // overwritten. Taking it from the report keeps the real value when there
-      // is one and falls back only when there is genuinely no monitor.
+      // getHealthReport() is null without a health monitor.
       status: health?.status ?? 'healthy',
       externalAddress: this.externalAddress,
-      peers
+      peers,
+      storage: this.storageStatus(),
     };
   }
 }

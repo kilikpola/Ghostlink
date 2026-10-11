@@ -1,20 +1,10 @@
 /**
- * The metrics/control server must not be drivable by a web page.
- *
- * It binds to 127.0.0.1 and rejects non-loopback peers — but a browser on the
- * same machine also connects from 127.0.0.1, so that check alone does not stop
- * a page the user merely visits. The server exposes POST /rotate-key, which
- * replaces the node's whole identity with a caller-supplied seed phrase and
- * writes it to config.json. Without a CSRF/DNS-rebinding guard, any website
- * could rotate the victim's mesh identity to a seed the attacker knows —
- * a full identity takeover from a drive-by page.
- *
- * These tests drive the real server and assert:
+ * The metrics/control server (with POST /rotate-key) must not be drivable by a
+ * web page on the same machine:
  *   - a browser-style request (Origin present) is refused
  *   - a DNS-rebinding request (foreign Host) is refused
  *   - a CORS "simple" POST (text/plain, no preflight) is refused
- *   - the legitimate CLI shape (application/json, loopback Host, no Origin)
- *     still reaches the handler
+ *   - the CLI shape (application/json, loopback Host, no Origin) still works
  *
  * Run with: node test/metrics-csrf-test.js
  */
@@ -107,10 +97,8 @@ async function main() {
   });
 
   test('a failed /ping does not leave its timeout armed (process survives it)', async () => {
-    // A registered node whose send always fails (like "No route"). The handler
-    // used to answer 500 from its catch but leave the 10s timeout running; that
-    // timeout then called writeHead on the finished response and the throw from
-    // a timer took the whole process down.
+    // A registered node whose send always fails (like "No route"): the 500
+    // reply must disarm the 10s timeout so it cannot write to a finished response.
     const {EventEmitter} = await import('events');
     const fakeManager = Object.assign(new EventEmitter(), {
       sendMessage: async () => { throw new Error('No route to destination'); },

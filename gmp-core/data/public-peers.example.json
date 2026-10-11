@@ -1,9 +1,15 @@
 [
   {
-    "address": "<YOUR_VPS_PUBLIC_IP>",
-    "port": 49503,
-    "nodeId": "68df49dfdf62d5a0f2eaba87069aa5634e1c3c711fafd4edd5e41e0b2fa0bd7f8f952aecb707cc3b571411a29746932a728d6a7894cbe1edf01d22c953b9c17f",
-    "addedAt": 1782902519430,
-    "lastVerified": 1782902519430
+    "address": "bootstrap.example.invalid",
+    "port": 49500,
+    "tls": false,
+    "nodeId": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "roles": [
+      "bootstrap"
+    ],
+    "operator": "example operator (who runs the host)",
+    "provider": "example provider (where it runs)",
+    "addedAt": 0,
+    "lastVerified": 0
   }
 ]

@@ -1,11 +1,12 @@
 import { EventEmitter } from 'events';
+import type { KeyRotationEvents } from './events.js';
 import { verifySignature, hexToBytes, stringToBytes } from './identity.js';
 import type {
   KeyRotationPayload,
   GMPNodeLike,
   GMPLinkLike,
 } from './types.js';
-import config from './config.js';
+import { DEFAULTS } from './config-defaults.js';
 import logger from './logger.js';
 
 function toHex(nodeId: string | Uint8Array | Buffer | unknown): string {
@@ -22,14 +23,16 @@ interface RotationMessage {
   ttl: number;
 }
 
-export class KeyRotationManager extends EventEmitter {
+export class KeyRotationManager extends EventEmitter<KeyRotationEvents> {
   private node: GMPNodeLike;
   private seenSequenceNumbers: Set<string>;
   private sequenceNumber: number;
+  private readonly ttl: number;
 
-  constructor(node: GMPNodeLike) {
+  constructor(node: GMPNodeLike, options: { topologyTtl?: number } = {}) {
     super();
     this.node = node;
+    this.ttl = options.topologyTtl || DEFAULTS.GMP_TOPOLOGY_TTL;
     this.seenSequenceNumbers = new Set();
     this.sequenceNumber = 0;
   }
@@ -39,12 +42,12 @@ export class KeyRotationManager extends EventEmitter {
     const rotationMsg: RotationMessage = {
       cert,
       sequenceNumber: this.sequenceNumber,
-      ttl: config.GMP_TOPOLOGY_TTL || 16
+      ttl: this.ttl
     };
     const cacheKey = `${cert.oldNodeId}:${this.sequenceNumber}`;
     this.seenSequenceNumbers.add(cacheKey);
 
-    this.flood(rotationMsg);
+    this.floodToDirectNeighboursOnly(rotationMsg);
   }
 
   flood(rotationMsg: RotationMessage, excludePeerHex: string | null = null): void {
@@ -62,6 +65,23 @@ export class KeyRotationManager extends EventEmitter {
               err: err.message
             });
           }
+        }
+      }
+    }
+  }
+
+  floodToDirectNeighboursOnly(rotationMsg: RotationMessage): void {
+    for (const link of this.node.connections.values()) {
+      if (link.state === 'connected' && link.remoteNodeId && !link.isVirtual) {
+        const peerHex = toHex(link.remoteNodeId);
+        try {
+          link.sendKeyRotation(rotationMsg.cert, rotationMsg.sequenceNumber, rotationMsg.ttl);
+        } catch (e: unknown) {
+          const err = e as Error;
+          logger.error('key-rotation', 'flood-failed', `Failed to send key rotation to direct neighbour ${peerHex}: ${err.message}`, {
+            peerNodeId: peerHex,
+            err: err.message
+          });
         }
       }
     }
@@ -115,13 +135,8 @@ export class KeyRotationManager extends EventEmitter {
       }
     }
 
-    const incomingPeerHex = incomingLink && incomingLink.remoteNodeId ? toHex(incomingLink.remoteNodeId) : null;
-    const newMsg: RotationMessage = {
-      cert,
-      sequenceNumber,
-      ttl: ttl - 1
-    };
-    this.flood(newMsg, incomingPeerHex);
+    // Do NOT re-flood: rotation certificates only go to direct neighbours.
+    // On-demand delivery happens when a peer presents a stale key.
 
     this.emit('key-rotated', { oldNodeId: oldNodeIdHex, newNodeId: newNodeIdHex });
     this.node.emit('key-rotated', { oldNodeId: oldNodeIdHex, newNodeId: newNodeIdHex });

@@ -1,20 +1,7 @@
 /**
- * TextEncoder / TextDecoder for Hermes.
- *
- * Hermes does not implement either (RN 0.73). Both this module's crypto and
- * @noble's internal `utf8ToBytes` call them, so without this the first PBKDF2
- * or AES-GCM call dies with:
- *
- *   ReferenceError: Property 'TextEncoder' doesn't exist, js engine: hermes
- *
- * Installed at the app entry point before anything else runs. Only UTF-8 is
- * supported, which is all that is asked for here — anything else throws rather
- * than silently mis-encoding key material.
- *
- * Correctness matters more than usual: these bytes are hashed and encrypted, so
- * a wrong encoding is a wrong key rather than a visible glitch. test/crypto
- * checks byte-equality against Node's own implementation across the full BMP
- * and the surrogate range.
+ * TextEncoder / TextDecoder for Hermes, installed at the app entry point.
+ * UTF-8 only; anything else throws rather than mis-encoding key material.
+ * test/crypto checks byte-equality against Node across the BMP and surrogates.
  */
 
 function encodeUtf8(input) {
@@ -74,12 +61,9 @@ function decodeUtf8(input) {
       continue;
     }
 
-    // Lead byte decides both the length and the legal range of the *second*
-    // byte. Encoding the overlong, surrogate and out-of-range cases into that
-    // range check is what makes them fail here, at the lead byte, rather than
-    // after the fact — which is what lets us emit one U+FFFD per maximal
-    // subpart and resume at the next byte, the way the WHATWG standard (and
-    // therefore Node) does.
+    // The lead byte fixes the length and the legal range of the second byte,
+    // so invalid sequences fail here and emit one U+FFFD per maximal subpart,
+    // as WHATWG (and Node) do.
     let needed, lo, hi, cp;
     if (b0 >= 0xc2 && b0 <= 0xdf) { needed = 1; lo = 0x80; hi = 0xbf; cp = b0 & 0x1f; }
     else if (b0 === 0xe0) { needed = 2; lo = 0xa0; hi = 0xbf; cp = b0 & 0x0f; }

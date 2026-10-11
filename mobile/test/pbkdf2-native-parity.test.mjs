@@ -1,21 +1,12 @@
 /**
- * The native PBKDF2 module must produce exactly what the JS one does.
+ * The native (Kotlin) PBKDF2 module must produce exactly what the JS one does:
+ * these bytes are the identity.
  *
- * Identity derivation was moved off the JS thread into Kotlin because three
- * 100k-iteration passes (two HMAC-SHA512) took four to five minutes under
- * Hermes on a Galaxy S10+ and left the setup screen looking crashed. Speed is
- * the only thing that was supposed to change: these bytes *are* the identity,
- * and they must still match what the web app and gmp-core derive from the same
- * phrase. A native implementation that differs by one byte silently hands
- * every new user a different identity than their phrase should give them.
+ * Node cannot load the Kotlin module, so this:
+ *   - pins the JS reference values
+ *   - re-implements the Kotlin RFC 8018 construction independently and compares
  *
- * Node cannot load the Kotlin module, so this checks the two things that are
- * checkable here:
- *   - the JS reference values are pinned, so neither side can drift unnoticed
- *   - the Kotlin implements the same RFC 8018 construction, re-implemented
- *     here independently from javax.crypto's primitives and compared
- *
- * The on-device equivalence check is scripts/verify-pbkdf2-on-device.md.
+ * On-device check: scripts/verify-pbkdf2-on-device.md.
  *
  * Run with: node test/pbkdf2-native-parity.test.mjs
  */
@@ -25,6 +16,7 @@ import {pbkdf2Async} from '@noble/hashes/pbkdf2';
 import {sha256} from '@noble/hashes/sha256';
 import {sha512} from '@noble/hashes/sha512';
 import crypto from 'crypto';
+import {FIXTURE_A} from '../../test/helpers/fixture-phrases.mjs';
 
 const utf8 = (s) => new TextEncoder().encode(s);
 const hex = (b) => Buffer.from(b).toString('hex');
@@ -33,7 +25,7 @@ let failures = 0;
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-const PHRASE = 'abuse morning urban captain vendor olympic forest unlock flavor ocean vibrant elite';
+const PHRASE = FIXTURE_A.join(' ');
 
 // Every derivation the app performs, with its real parameters.
 const VECTORS = [

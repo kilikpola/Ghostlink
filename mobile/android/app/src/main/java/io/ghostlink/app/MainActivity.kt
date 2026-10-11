@@ -22,20 +22,9 @@ class MainActivity : ReactActivity() {
       DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
 
   /**
-   * Deliberately passes null instead of the saved instance state.
-   *
-   * React Native keeps its own view state in JavaScript. If Android is allowed
-   * to restore the native fragment hierarchy — after a rotation, a theme
-   * change, or when the process is recreated from the background — it tries to
-   * rebuild react-native-screens' ScreenStackFragment itself and cannot:
-   *
-   *   Unable to instantiate fragment com.swmansion.rnscreens.ScreenStackFragment:
-   *   calling Fragment constructor caused an exception
-   *
-   * which kills the activity on relaunch. Dropping the saved state lets React
-   * Navigation rebuild the stack from JS, which is the only place that knows
-   * what it should look like. This is the standard requirement for
-   * react-native-screens on Android.
+   * Passes null instead of the saved state so React Navigation rebuilds the
+   * stack from JS; Android cannot restore react-native-screens'
+   * ScreenStackFragment itself.
    */
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null)

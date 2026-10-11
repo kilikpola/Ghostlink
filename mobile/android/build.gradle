@@ -1,20 +1,14 @@
 buildscript {
     ext {
-        // Several native modules (gesture-handler, reanimated) locate react-native
-        // by walking up from their own directory, and read this off rootProject.ext
-        // when that walk fails. npm nests the version-pinned ones under
-        // mobile/node_modules while react-native stays hoisted at the repo root, so
-        // the walk cannot succeed and this has to be set explicitly.
+        // Native modules that cannot find the hoisted react-native read this.
         REACT_NATIVE_NODE_MODULES_DIR = new File(gradle.ext.nodeModulesDir, "react-native").absolutePath
 
         buildToolsVersion = "35.0.0"
         minSdkVersion = 24
         compileSdkVersion = 34
         targetSdkVersion = 34
-        // NDK 26 is what React Native 0.73 targets. Reanimated 3.6 compiles its
-        // C++ with -Werror, and NDK 27's Clang 18 added -Wdeprecated-this-capture
-        // and -Wvla-cxx-extension, both of which fire in Reanimated's own sources
-        // and stop the build. Do not raise this without also bumping Reanimated.
+        // NDK 26 for RN 0.73: Reanimated 3.6 builds with -Werror and NDK 27's
+        // Clang adds warnings it trips. Do not raise without bumping Reanimated.
         ndkVersion = "26.1.10909125"
         kotlinVersion = "1.8.0"
     }

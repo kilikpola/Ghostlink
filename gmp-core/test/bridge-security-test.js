@@ -75,9 +75,8 @@ async function run() {
   });
   await filePromise;
 
-  // Scenario 4: a message that is valid JSON but not an object (`null`) used to
-  // throw on `msg.type` inside the async handler and kill the bridge process.
-  // It must be answered with an error, and the bridge must keep serving.
+  // Scenario 4: valid JSON that is not an object (`null`) must be answered
+  // with an error, and the bridge must keep serving.
   const nullPromise = new Promise((resolve) => {
     const ws = new WebSocket('ws://127.0.0.1:3009');
     ws.on('open', () => ws.send('null'));
@@ -103,4 +102,7 @@ async function run() {
   process.exit(testsFailed > 0 ? 1 : 0);
 }
 
-run().catch(console.error);
+// Exit non-zero on a throw. `.catch(console.error)` printed the
+// error and then let the process exit 0, so a throw before the summary above
+// ate every assertion and the run still looked green.
+run().catch((e) => { console.error(e); process.exit(1); });

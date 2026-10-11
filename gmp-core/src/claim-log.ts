@@ -1,41 +1,20 @@
 import fs from 'fs';
 import crypto from 'crypto';
-import config from './config.js';
+import { DEFAULTS } from './config-defaults.js';
 import logger from './logger.js';
 import { withFileLock } from './file-lock.js';
 import { writeFileAtomicSync, cleanStaleTempFiles } from './atomic-file.js';
-import { StateAuthenticationError } from './types.js';
+import { refuse } from './state-refusal.js';
 
 /**
- * An append-only log of session-key claims.
+ * Append-only log of session-key claims. Claims are permanent, so appending
+ * keeps each claim O(1) instead of rewriting the whole set.
  *
- * Claims are permanent — a fingerprint that has been used may never be used
- * again — so the set only grows. Holding them in the nonce state JSON meant
- * every claim rewrote, re-encrypted and re-fsynced the whole file under a lock,
- * which made handshake latency linear in the number of claims ever made:
- * roughly 5.3ms per thousand, synchronous, on the event loop. A node with 100k
- * claims blocked for half a second per handshake, and a busy one reached that
- * within months.
+ * Record framing:
+ *   [4 bytes big-endian length][IV(12) ‖ GCM tag(16) ‖ ciphertext]
  *
- * Appending fixes the shape of the cost. A claim is an O(1) index lookup and,
- * when it is new, one append of a couple of hundred bytes. The lock is still
- * taken — two processes sharing a data directory must not interleave partial
- * records — but it is now held for a constant time rather than for however long
- * it takes to rewrite the accumulated history.
- *
- * ── Record framing ──────────────────────────────────────────────────────
- *
- *   [4 bytes big-endian length][length bytes: IV(12) ‖ GCM tag(16) ‖ ciphertext]
- *
- * Every record carries its own IV and tag, so each authenticates on its own.
- * That is the property that matters for a file which is only ever appended to:
- * a record damaged in the middle cannot forge or invalidate the records before
- * it, and a half-written record at the end is simply not a record yet.
- *
- * Length-prefixed binary rather than one sealed line of hex: it halves the size
- * at the scale this exists to handle, and it makes truncation exact. A short
- * tail is detected by comparing the declared length against the bytes actually
- * remaining, instead of guessing from a missing newline.
+ * Each record authenticates on its own, so damage cannot invalidate earlier
+ * records, and a half-written tail is detected exactly by its length prefix.
  */
 
 /** Binds a record to this log, so one cannot be spliced in from another file. */
@@ -44,48 +23,22 @@ const RECORD_AAD = Buffer.from('gmp-nonce-claim-v1');
 const CHECKPOINT_AAD = Buffer.from('gmp-nonce-ckpt-v1');
 const CHECKPOINT_VERSION = 2;
 
-/**
- * How many bytes immediately before `coveredBytes` are digested to tie a
- * checkpoint to the log it describes. Enough to be unique in practice, small
- * enough that verifying it is a single short read.
- */
+/** Bytes before `coveredBytes` digested to tie a checkpoint to its log. */
 const CHECKPOINT_ANCHOR_BYTES = 4096;
 
-/**
- * Whether to check the consumedBytes invariant after every mutation.
- *
- * On for the test suite, and available in production behind GMP_DEBUG_ASSERTS
- * for diagnosing a node that is losing claims. Read once so that leaving it off
- * costs one boolean test per mutation.
- */
-const ASSERT_BOUNDARIES =
-  process.env.NODE_ENV === 'test' || /^(1|true)$/i.test(process.env.GMP_DEBUG_ASSERTS ?? '');
+/** Check the consumedBytes invariant after every mutation (GMP_DEBUG_ASSERTS). */
+export const DEBUG_ASSERTS = /^(1|true)$/i.test(process.env.GMP_DEBUG_ASSERTS ?? '');
+const ASSERT_BOUNDARIES = DEBUG_ASSERTS;
 
-/**
- * Above this the boundary check walks no further than its O(1) part. A full
- * framing walk is cheap — it reads length prefixes and decrypts nothing — but
- * it still reads the whole file, and doing that per claim on a 215 MiB log
- * would cost more than the bug it is looking for.
- */
+/** Above this size the boundary check skips the full framing walk. */
 const DEEP_ASSERT_MAX_BYTES = 1024 * 1024;
 
-/**
- * How many records may accumulate past the checkpoint before a new one is
- * written. Replay costs roughly 34µs per record, so this caps the replay part
- * of startup at about a second; the checkpoint write that clears it is paid
- * once, at startup, never on the handshake path.
- */
+/** Records allowed past the checkpoint before a new one is written (~1s of replay). */
 const CHECKPOINT_EVERY_RECORDS = 25_000;
 
 /**
- * A hard ceiling on how far the tail may run past the last checkpoint before
- * one is written inline rather than deferred.
- *
- * The deferred write needs an event loop turn, which a node handling handshakes
- * gets constantly — but nothing guarantees it. Without a ceiling, a burst of
- * claims that never yields leaves the tail unbounded, and the replay bound this
- * whole mechanism promises becomes conditional on scheduling. One claim in
- * fifty thousand pays for the write; every other claim stays off the path.
+ * Tail length at which a checkpoint is written inline rather than deferred, so
+ * the replay bound never depends on the event loop yielding.
  */
 const CHECKPOINT_CEILING_RECORDS = CHECKPOINT_EVERY_RECORDS * 2;
 
@@ -93,12 +46,7 @@ const LENGTH_PREFIX_BYTES = 4;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
-/**
- * A record longer than this means the framing is broken rather than the file
- * being short. Real records run to a couple of hundred bytes; the cap is the
- * line between "this file was truncated mid-append", which is ordinary, and
- * "these bytes are not a record", which is corruption.
- */
+/** A longer declared record means broken framing, not a truncated file. */
 const MAX_RECORD_BYTES = 64 * 1024;
 
 /** Compact only when the log is both large and provably redundant. */
@@ -114,11 +62,7 @@ interface ClaimPayload {
   t: number;
 }
 
-/**
- * Why _consumeTail stopped. The distinction drives what append() is allowed to
- * do next, so it is a returned value rather than a field someone might forget
- * to read.
- */
+/** Why _consumeTail stopped; decides what append() may do next. */
 type TailState =
   /** Every byte parsed as a complete, authentic record. */
   | 'clean'
@@ -127,10 +71,8 @@ type TailState =
   /** A record failed authentication, or a length header was not plausible. */
   | 'corrupt'
   /**
-   * The file could not be read at all — EMFILE, EACCES, EIO, a vanished mount.
-   * This says nothing whatever about its contents, and must never be treated
-   * as damage: rebuilding a log from an index that was never populated throws
-   * away every claim on disk because one open() failed.
+   * The file could not be read (EMFILE, EACCES, EIO...). Says nothing about its
+   * contents and must never be treated as damage.
    */
   | 'unreadable';
 
@@ -138,10 +80,8 @@ export interface AppendOutcome {
   /** True when every requested fingerprint is claimed on disk afterwards. */
   ok: boolean;
   /**
-   * Requested fingerprints another writer had already claimed by the time the
-   * lock was held. Not an error for a caller replaying known claims; for
-   * claimSessionKey it means this process lost the race and must refuse.
-   * Check this BEFORE `ok`: everything requested may be claimed, just not by us.
+   * Fingerprints another writer claimed first. For claimSessionKey this means
+   * the race was lost; check it before `ok`.
    */
   conflicts: string[];
   /** Why `ok` is false. Absent when the only outcome was conflicts. */
@@ -164,11 +104,8 @@ export class ClaimLog {
   /** Bytes of the log already folded into the index, for incremental reloads. */
   private consumedBytes: number;
   /**
-   * The same number, arrived at independently: only ever incremented by the
-   * length of records this instance has verified, or set to the length of a
-   * buffer it built itself. Never read from the filesystem. Where the two
-   * disagree, consumedBytes has been set from something that is not a record
-   * boundary — which is the bug that has now appeared in four separate paths.
+   * Independent witness for consumedBytes: advanced only by verified record
+   * lengths, never read from the filesystem.
    */
   private bytesAccountedFor: number;
   private lockTimeoutMs: number;
@@ -179,12 +116,16 @@ export class ClaimLog {
   private checkpointedRecords: number;
   private checkpointPath: string;
   private checkpointTimer: NodeJS.Timeout | null;
+  private readonly strictState: boolean;
 
-  constructor({ filePath, encryptionKey = null, lockTimeoutMs = 5000 }: {
+  constructor({ filePath, encryptionKey = null, lockTimeoutMs = 5000, strictState }: {
     filePath: string;
     encryptionKey?: Buffer | null;
     lockTimeoutMs?: number;
+    /** Refuse a log that fails authentication instead of quarantining it (GMP_STRICT_STATE). */
+    strictState?: boolean;
   }) {
+    this.strictState = strictState ?? DEFAULTS.GMP_STRICT_STATE;
     this.basePath = filePath;
     this.filePath = filePath;
     this.encryptionKey = encryptionKey;
@@ -233,33 +174,23 @@ export class ClaimLog {
   }
 
   /**
-   * Name the log after the key that seals it.
-   *
-   * Every record is sealed with a key derived from the node's seed phrase, so a
-   * log only means anything to the identity that wrote it. Giving all
-   * identities one filename made that mismatch look like corruption: a second
-   * node on the same data directory reads records it cannot open, and since a
-   * corrupt log refuses appends — correctly, because appending behind an
-   * unreadable record would put the new claim past a boundary replay stops at —
-   * neither node could record a claim. Two nodes sharing a data directory, or
-   * one node after a seed rotation, both landed there.
-   *
-   * The suffix is a domain-separated digest of the key rather than the key or
-   * the NodeID: it has to be stable for one identity and unlinkable to anything
-   * else, and a directory listing should not become a handle on either.
+   * The log file for `encryptionKey`: one log per identity, suffixed with a
+   * domain-separated key digest, so identities sharing a directory never share
+   * a claim log.
    */
+  static scopedPath(basePath: string, encryptionKey: Buffer | null): string {
+    if (!encryptionKey) return basePath;
+    const id = crypto.createHash('sha256')
+      .update('gmp-claim-log-id')
+      .update(encryptionKey)
+      .digest('hex')
+      .slice(0, 16);
+    const suffix = basePath.endsWith('.log') ? basePath.slice(0, -4) : basePath;
+    return `${suffix}.${id}.log`;
+  }
+
   private _scopePathToKey(): void {
-    if (this.encryptionKey) {
-      const id = crypto.createHash('sha256')
-        .update('gmp-claim-log-id')
-        .update(this.encryptionKey)
-        .digest('hex')
-        .slice(0, 16);
-      const suffix = this.basePath.endsWith('.log') ? this.basePath.slice(0, -4) : this.basePath;
-      this.filePath = `${suffix}.${id}.log`;
-    } else {
-      this.filePath = this.basePath;
-    }
+    this.filePath = ClaimLog.scopedPath(this.basePath, this.encryptionKey);
     this.checkpointPath = `${this.filePath}.ckpt`;
     cleanStaleTempFiles(this.filePath);
     cleanStaleTempFiles(this.checkpointPath);
@@ -297,12 +228,8 @@ export class ClaimLog {
   }
 
   /**
-   * A record that will not authenticate.
-   *
-   * Everything after it is untrusted: the framing is derived from the bytes
-   * themselves, so once one record is wrong there is no way to know where the
-   * next one begins. Records *before* it are unaffected — each carries its own
-   * tag — so they stay in the index and the read simply stops here.
+   * A record that will not authenticate. Earlier records stay indexed; reading
+   * stops here because later framing cannot be trusted.
    */
   private _onCorruptRecord(offset: number): void {
     this.sawCorruption = true;
@@ -312,24 +239,23 @@ export class ClaimLog {
       `Session key claim log ${this.filePath} fails authentication at byte ${offset}; ` +
       `${this.index.size} claims before that point are intact, everything after is being ignored. ` +
       `Session keys recorded in the ignored tail would be accepted again.`,
-      { claimsFile: this.filePath, offset, recovered: this.index.size, strict: !!config.GMP_STRICT_STATE }
+      { claimsFile: this.filePath, offset, recovered: this.index.size, strict: this.strictState }
     );
-    if (config.GMP_STRICT_STATE) {
-      throw new StateAuthenticationError(
-        `Refusing to start: session key claim log at ${this.filePath} is corrupt from byte ${offset}. ` +
-        `Continuing would accept session keys that have already been used. Move the file aside to ` +
-        `start fresh deliberately, or unset GMP_STRICT_STATE.`
-      );
+    if (this.strictState) {
+      throw refuse({
+        what: `the session-key claim log fails authentication from byte ${offset}; the ${this.index.size} claims before it are intact.`,
+        file: this.filePath,
+        action: 'move-aside',
+        cause: 'the file was damaged (an interrupted write, a disk error) or edited. Not a seed change: each seed has its own claim log file.',
+        loses: 'EVERY session-key claim in the log, the intact ones included: a session key this node already used would be accepted again (replay protection across restarts, invariant I1).',
+        alternative: `start ONCE with GMP_STRICT_STATE=false (then remove it again). The node moves the damaged log aside itself (renamed, not deleted) and carries the ${this.index.size} intact claims into a fresh log; only claims after byte ${offset} are lost.`,
+      });
     }
   }
 
   /**
-   * Fold the log into the in-memory index.
-   *
-   * Incremental: only bytes appended since the last call are read, so a reload
-   * (setEncryptionKey, or a poll after another process appended) costs the
-   * delta rather than the whole history. A file that shrank was replaced —
-   * compaction, or an operator — so it is re-read from the start.
+   * Fold the log into the in-memory index. Incremental; a file that shrank was
+   * replaced and is re-read from the start.
    */
   load(): void {
     if (!this.encryptionKey) return;
@@ -384,34 +310,11 @@ export class ClaimLog {
   }
 
   /**
-   * Check that `consumedBytes` still names the end of a record.
-   *
-   * Every claim this log has ever lost has come from the same mistake: setting
-   * this offset to something that is not a record boundary — the file's length
-   * while a half-written record sat at the end, or a length measured outside
-   * the lock while another process was appending. It has now happened in four
-   * separate paths, three of them written after the class of bug was already
-   * known. Remembering is evidently not a strategy; this is.
-   *
-   * Three checks, cheapest first:
-   *
-   *   1. The accounting witness. `bytesAccountedFor` is only ever advanced by
-   *      the length of verified records or set to the size of a buffer this
-   *      instance built. It is never read from the filesystem, so any offset
-   *      that came from a stat() diverges from it immediately. O(1), and it
-   *      catches every one of the four historical bugs.
-   *   2. The offset must lie within the file, and if the file continues past
-   *      it, a plausible length header must begin exactly there — unless
-   *      corruption has already been reported, in which case the bytes after
-   *      the offset are the damage and are expected to be unparseable. O(1).
-   *   3. On a log small enough to afford it, walk the framing from zero and
-   *      confirm the offset falls exactly on a record edge. No decryption, so
-   *      this is arithmetic over length prefixes.
-   *
-   * Under test a violation throws, because a test that continues past this has
-   * nothing left to tell us. In production it is CRITICAL and execution
-   * continues: the process is already in a state this code cannot reason about,
-   * and taking a running node down is not obviously the safer of the two.
+   * Check that `consumedBytes` still names the end of a record:
+   *   1. it matches the bytesAccountedFor witness (O(1));
+   *   2. it lies within the file and a plausible length header starts there;
+   *   3. on small logs, the framing walk from zero lands exactly on it.
+   * Throws under test; logs CRITICAL in production.
    */
   private _assertConsumedBoundary(context: string): void {
     if (!ASSERT_BOUNDARIES) return;
@@ -468,7 +371,7 @@ export class ClaimLog {
       `Claim log offset invariant violated after ${context}: ${problems.join('; ')}. ` +
       `Claims recorded past this point would be silently lost.`;
 
-    if (process.env.NODE_ENV === 'test') {
+    if (DEBUG_ASSERTS) {
       throw new Error(message);
     }
     logger.critical('nonce-store', 'claim-log-offset-invariant', message, {
@@ -522,11 +425,8 @@ export class ClaimLog {
   }
 
   /**
-   * Fold the records between `consumedBytes` and `size` into the index.
-   *
-   * Shared by load() and append(): an appending process has to catch up on
-   * anything another process wrote first, or its own idea of how much of the
-   * file it has consumed runs ahead of what it has actually read.
+   * Fold records between `consumedBytes` and `size` into the index. append()
+   * uses it to catch up on other processes' writes first.
    */
   private _consumeTail(size: number): TailState {
     if (size <= this.consumedBytes) return 'clean';
@@ -587,11 +487,8 @@ export class ClaimLog {
       offset += LENGTH_PREFIX_BYTES + bodyLength;
     }
 
-    // `offset` is the end of the last record that parsed and authenticated, so
-    // consumedBytes stays on a verified record boundary. It is never set from
-    // the file's length: a file can end in a partial record, and treating that
-    // length as consumed would skip past the incomplete tail and lose every
-    // record written after it.
+    // Advance to the end of the last authenticated record, never to the file
+    // length: the file may end in a partial record.
     this.consumedBytes += offset;
     this.bytesAccountedFor += offset;
     this._assertConsumedBoundary('consumeTail');
@@ -599,16 +496,8 @@ export class ClaimLog {
   }
 
   /**
-   * The claim log exists but this process cannot read it.
-   *
-   * Distinct from corruption in every way that matters: the bytes may be
-   * perfectly good, and nothing has been learned about them. So nothing is
-   * rebuilt, nothing is renamed, and the file is left exactly as it is.
-   *
-   * It is still an ERROR, and still fatal under strict mode. A node that cannot
-   * read its claim log is running with no persisted record of which session
-   * keys have been used — precisely the unprotected state strict mode exists to
-   * refuse, and until now only an authentication failure reached it.
+   * The claim log exists but cannot be read. Nothing is rebuilt or renamed, but
+   * it is an ERROR and fatal under strict mode.
    */
   private _onUnreadableLog(): void {
     logger.error(
@@ -617,40 +506,21 @@ export class ClaimLog {
       `Session key claim log ${this.filePath} exists but could not be read; this node has no record of ` +
       `which session keys have already been used, and would accept every one of them again. The file ` +
       `has not been modified.`,
-      { claimsFile: this.filePath, strict: !!config.GMP_STRICT_STATE },
+      { claimsFile: this.filePath, strict: this.strictState },
     );
-    if (config.GMP_STRICT_STATE) {
-      throw new StateAuthenticationError(
-        `Refusing to start: session key claim log at ${this.filePath} could not be read. Continuing ` +
-        `would accept session keys that have already been used. Fix the permissions or the underlying ` +
-        `I/O problem, or move the file aside to start fresh deliberately.`,
-      );
+    if (this.strictState) {
+      throw refuse({
+        what: 'the session-key claim log exists but could not be read; without it this node would accept session keys it has already used.',
+        file: this.filePath,
+        action: 'fix-access',
+      });
     }
   }
 
   /**
-   * Move a log that will not authenticate aside, and start a fresh one holding
-   * everything that could still be read from it.
-   *
-   * Without this a corrupt log is terminal: appends are refused, so no
-   * handshake can complete, and there is no way out that does not involve an
-   * operator finding the file by hand. That is the right answer for a node
-   * under strict mode — _onCorruptRecord has already refused to start — but not
-   * for a client, and it fires in one entirely ordinary case: the log is sealed
-   * with a key derived from the node's seed phrase, so rotating the seed makes
-   * every existing record unreadable. They are not damaged, they belong to
-   * somebody else.
-   *
-   * The damaged file is renamed, never deleted, so nothing is destroyed and the
-   * evidence survives for inspection. Claims read before the damage are carried
-   * into the new log; claims after it were already unreadable and are lost,
-   * which is the same availability-over-hard-fail trade the other state files
-   * make (see _onUnauthenticatedState) and the reason unattended nodes should
-   * run with GMP_STRICT_STATE.
-   *
-   * Only the fingerprints survive. The peer and timestamp on each record are
-   * diagnostic, and reconstructing them would mean holding every record in
-   * memory during a replay that may be a million long.
+   * Rename a log that will not authenticate (e.g. after a seed rotation) and
+   * start a fresh one with the fingerprints that could still be read. Without
+   * this a corrupt log blocks every handshake.
    */
   private _quarantineCorruptLog(): boolean {
     if (!this.encryptionKey) return false;
@@ -666,9 +536,7 @@ export class ClaimLog {
           recovered.map(fingerprint => this._seal({ fingerprint, peerNodeId: '', claimedAt: Date.now() })),
         );
         if (rebuilt.length > 0) writeFileAtomicSync(this.filePath, rebuilt);
-        // Measured under the lock. Taken afterwards, another process could have
-        // appended in between, and this offset would skip past a record that
-        // was never read — the same mistake append() used to make.
+        // Measured under the lock, so no record appended in between is skipped.
         rebuiltSize = rebuilt.length;
       }, { timeoutMs: this.lockTimeoutMs });
     } catch (err) {
@@ -703,17 +571,8 @@ export class ClaimLog {
   }
 
   /**
-   * Write claims to the log and index them, or report failure.
-   *
-   * Under the lock so that two processes cannot interleave halves of a record,
-   * and fsynced before returning so the caller may treat success as durable.
-   * The index is only updated once the bytes are down: a claim the caller is
-   * told succeeded must be one the next process will also see.
-   *
-   * With no key configured the records are held in memory and indexed anyway —
-   * link.js supplies the key only after deriving the identity, and a claim made
-   * before that still has to be honoured. flushPending() writes them when the
-   * key arrives.
+   * Append claims under the lock, fsync, then index them. Without a key the
+   * records are indexed and queued in memory until flushPending().
    */
   append(records: ClaimRecord[]): AppendOutcome {
     if (records.length === 0) return { ok: true, conflicts: [] };
@@ -734,10 +593,7 @@ export class ClaimLog {
 
     try {
       withFileLock(this.filePath, () => {
-        // Catch up on anything another process appended since this one last
-        // read. Without it `consumedBytes` would advance past records this
-        // index has never seen, and a checkpoint built on that offset would
-        // claim to cover claims it does not hold.
+        // Catch up on other processes' appends before advancing consumedBytes.
         let state: TailState = 'clean';
         try {
           state = this._consumeTail(fs.statSync(this.filePath).size);
@@ -761,10 +617,7 @@ export class ClaimLog {
         }
 
         if (state === 'corrupt') {
-          // Appending behind a record that will not authenticate would write
-          // into a file whose framing is already unreadable from that point on,
-          // and truncating back to the last good boundary would destroy both
-          // the evidence and any valid records beyond the damage. Refuse.
+          // Never append behind an unauthenticated record.
           logger.error(
             'nonce-store',
             'claim-log-append-blocked',
@@ -778,11 +631,7 @@ export class ClaimLog {
           return;
         }
 
-        // The authoritative at-most-once check. The unlocked has() in
-        // claimSessionKey is only a fast path: between it and this lock another
-        // process can append the very same fingerprint, and _consumeTail above
-        // has just folded that in. Re-checking here is what keeps the claim
-        // globally at-most-once rather than at-most-once-per-process.
+        // The authoritative at-most-once check, under the lock.
         const conflicts: string[] = [];
         const fresh: ClaimRecord[] = [];
         for (const record of records) {
@@ -796,11 +645,8 @@ export class ClaimLog {
         }
 
         if (state === 'partial') {
-          // A record that was still being written when some process stopped.
-          // It was never acknowledged to anyone — append() only returns success
-          // after its own fsync — so discarding it costs nothing, and appending
-          // behind it would put the new records past a boundary that replay
-          // stops at, losing them silently on the next start.
+          // A partial record from an interrupted write was never acknowledged;
+          // drop it so new records are not appended past it.
           fs.truncateSync(this.filePath, this.consumedBytes);
           logger.debug(
             'nonce-store',
@@ -819,11 +665,7 @@ export class ClaimLog {
           fs.closeSync(fd);
         }
 
-        // The file was at exactly `consumedBytes` before this write — either
-        // because the tail parsed clean, or because the partial tail was
-        // truncated away — so advancing by what was written keeps the offset on
-        // a verified record boundary. Checked rather than assumed, because
-        // getting this wrong loses acknowledged claims silently.
+        // Verify the offset lands on the new record boundary.
         const expected = this.consumedBytes + framed.length;
         const actual = fs.statSync(this.filePath).size;
         if (actual !== expected) {
@@ -868,17 +710,8 @@ export class ClaimLog {
   }
 
   /**
-   * Checkpoint once enough claims have accumulated since the last one.
-   *
-   * Driven by appends, not by a start discovering a long tail: checking only at
-   * load meant the checkpoint never prevented the replay it exists to prevent,
-   * because by the time the check ran the whole log had already been replayed.
-   *
-   * Deferred off the handshake path. Writing the snapshot is proportional to
-   * the number of claims held, so doing it inline would put a spike into one
-   * unlucky handshake every CHECKPOINT_EVERY_RECORDS claims. The timer is
-   * unref'd so it never holds the process open, and close() writes one
-   * unconditionally for the case where the timer had not yet fired.
+   * Schedule a checkpoint once enough claims have accumulated. Deferred off the
+   * handshake path on an unref'd timer.
    */
   private _maybeScheduleCheckpoint(): void {
     const tail = this.recordsSeen - this.checkpointedRecords;
@@ -904,14 +737,7 @@ export class ClaimLog {
     this.checkpointTimer.unref?.();
   }
 
-  /**
-   * Flush a checkpoint on the way out, whatever the count.
-   *
-   * Without this, an orderly shutdown between thresholds leaves the next start
-   * replaying everything since the last checkpoint. With it, a clean stop always
-   * leaves a current snapshot, and the unbounded-replay case narrows to an
-   * unclean stop.
-   */
+  /** Write a checkpoint on shutdown, so a clean stop never needs a replay. */
   close(): void {
     if (this.checkpointTimer) {
       clearTimeout(this.checkpointTimer);
@@ -921,23 +747,16 @@ export class ClaimLog {
   }
 
   /**
-   * Write anything claimed before a key existed. Returns false if it could not.
-   *
-   * A conflict is not a failure here: another process having already claimed
-   * the fingerprint means it is recorded, which is all this caller needs. Only
-   * an actual write failure puts the records back on the queue.
+   * Write anything claimed before a key existed. A conflict counts as recorded;
+   * only a write failure requeues.
    */
   flushPending(): boolean {
     if (this.pending.length === 0 || !this.encryptionKey) return true;
     const queued = this.pending;
     this.pending = [];
 
-    // Drop them from the index first. append() treats an indexed fingerprint as
-    // somebody else's claim and declines to write it — which is exactly right
-    // for a racing process, and exactly wrong for the records this process put
-    // there itself while it had no key to seal them with. Removing them lets
-    // the locked check do its real job: if another writer claimed one of these
-    // in the meantime, _consumeTail puts it back and the conflict is reported.
+    // Unindex our own queued records so append() does not mistake them for
+    // another writer's claims.
     for (const record of queued) this.index.delete(record.fingerprint);
 
     const outcome = this.append(queued);
@@ -961,36 +780,8 @@ export class ClaimLog {
   }
 
   /**
-   * A sealed snapshot of the index, so a cold start need not decrypt the whole
-   * log.
-   *
-   * Every record in the log carries its own IV and tag — the property that
-   * stops one damaged record from invalidating the rest — which means replaying
-   * a million claims means a million separate AES-GCM openings, about 34
-   * seconds. The checkpoint is one sealed blob holding every fingerprint known
-   * at a given byte offset, so a start reads it in one opening and then replays
-   * only the records appended since.
-   *
-   * It is a cache, never the authority. The log is what a claim was written to;
-   * a checkpoint that will not authenticate, or that disagrees with the log, is
-   * discarded and the log replayed in full. It holds fingerprints only — the
-   * peer and timestamp on each record are diagnostic, and compaction reads the
-   * log itself when it needs them.
-   *
-   * Payload layout, sealed as a single record:
-   *
-   *   [4-byte header length][header JSON][fingerprints: [1-byte length][utf8] …]
-   */
-  /**
-   * A digest of the bytes ending at `coveredBytes`, tying a checkpoint to the
-   * exact log it summarises.
-   *
-   * `coveredBytes` on its own says only how far to skip, and a checkpoint that
-   * outlives its log — the log deleted and rebuilt, or replaced by another —
-   * would have the next start skip that far into a file it has never read,
-   * silently dropping every claim in the skipped span. Comparing the bytes
-   * immediately before the offset catches that in one short read, without the
-   * replay the checkpoint exists to avoid.
+   * Digest of the bytes ending at `coveredBytes`, so a checkpoint is only
+   * trusted against the exact log it summarises.
    */
   private _anchorDigest(upTo: number): { length: number; digest: string } | null {
     if (upTo <= 0) return null;
@@ -1079,21 +870,9 @@ export class ClaimLog {
   }
 
   /**
-   * Seed the index from the checkpoint, if there is one that can be trusted.
-   *
-   * Three ways it is refused, all of them falling back to replaying the log in
-   * full — the log is the authority and is never skipped on the strength of a
-   * checkpoint that does not add up:
-   *
-   *   - it will not authenticate, or is malformed
-   *   - its version is not one this build writes
-   *   - it claims to cover more bytes than the log contains
-   *
-   * The last is worth its own ERROR. A checkpoint is only ever written for a
-   * prefix that was actually read, so a log shorter than one means the log has
-   * been shortened since — compaction (which clears the checkpoint), an
-   * operator, or something removing claims. Whatever the cause, the claims in
-   * the missing span are no longer being enforced.
+   * Seed the index from a trustworthy checkpoint. Falls back to a full replay
+   * when the checkpoint fails to authenticate, has an unknown version, or covers
+   * more bytes than the log (logged at ERROR: claims were removed).
    */
   private _applyCheckpoint(logSize: number): void {
     if (!this.encryptionKey) return;
@@ -1207,16 +986,8 @@ export class ClaimLog {
   }
 
   /**
-   * Rewrite the log with one record per fingerprint.
-   *
-   * Compaction can only ever remove duplicates — a claim never expires, so
-   * there is nothing else it would be entitled to drop. Duplicates come from
-   * migration (every counter entry's fingerprint is promoted, and several
-   * sessions with one peer share none of them, but a re-migration would repeat
-   * them) and from a retried append whose first attempt reached disk.
-   *
-   * Runs at startup, never on the handshake path, and only when the log is both
-   * large enough to matter and redundant enough to be worth the rewrite.
+   * Rewrite the log with one record per fingerprint. Runs only at startup and
+   * only when the log is large and redundant enough.
    */
   compactIfNeeded(): boolean {
     if (!this.encryptionKey || this.sawCorruption) return false;
@@ -1229,11 +1000,7 @@ export class ClaimLog {
     }
     if (size < COMPACT_MIN_BYTES) return false;
 
-    // load() already counted every record and indexed every distinct
-    // fingerprint, so redundancy is known without touching the disk. Reading
-    // the whole log again to find out would double startup cost on exactly the
-    // large logs this check exists for, and would nearly always conclude that
-    // there is nothing to do.
+    // Redundancy is known from load(); no second read of the log.
     const redundancy = this.recordsSeen ? (this.recordsSeen - this.index.size) / this.recordsSeen : 0;
     if (redundancy < COMPACT_MIN_REDUNDANCY) return false;
 

@@ -523,17 +523,11 @@ function MessageBubbleInline({
 }
 
 /**
- * What protected THIS message, per message.
+ * What protected this message:
  *
- * A padlock is a claim, and the honest thing to claim depends on how the
- * message actually travelled:
- *
- *   gmp          — through the Ghost Mesh, encrypted end to end by GMP
- *   webrtc-e2e   — direct, but sealed with AES-256-GCM before it left (see
- *                  utils/session-crypto.js), so also end to end
- *   anything else — DTLS protected the hop and nothing protected the
- *                  conversation. No padlock: a relay could read it, and
- *                  showing a lock here would be worse than showing nothing.
+ *   gmp           — Ghost Mesh, end to end
+ *   webrtc-e2e    — direct, sealed with AES-256-GCM (utils/session-crypto.js)
+ *   anything else — only DTLS on the hop; no padlock is shown.
  */
 function TransportBadge({message}) {
   if (!message) return null;
@@ -731,8 +725,7 @@ export default function ChatScreen({route, navigation}) {
   const [pinnedMessageIds, setPinnedMessageIds] = useState(new Set());
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [viewerImage, setViewerImage] = useState(null);
-  // No typing frames exist on the wire yet. The indicator this fed used to be
-  // switched on at random.
+  // No typing frames exist on the wire yet.
   const [peerTyping] = useState(false);
 
   const flatListRef = useRef(null);
@@ -787,13 +780,7 @@ export default function ChatScreen({route, navigation}) {
 
   // ── Send Message ──
 
-  /**
-   * What the transport can currently do for this peer.
-   *
-   * Drives the header badge, so the padlock reflects a session that exists
-   * rather than an aspiration. Recomputed when a session is established or the
-   * mesh status changes; there is no polling.
-   */
+  /** What the transport can currently do for this peer (drives the header badge). */
   const [peerSecurity, setPeerSecurity] = useState(() =>
     peerId ? WebRTCService.getPeerSecurity(peerId) : {transport: 'none', encrypted: false, ready: false},
   );
@@ -815,13 +802,8 @@ export default function ChatScreen({route, navigation}) {
   }, [peerId]);
 
   /**
-   * Inbound traffic for this conversation.
-   *
-   * Two kinds arrive: chat messages, which are rendered and acknowledged, and
-   * acks for messages we sent, which are the only thing that may move a status
-   * to DELIVERED. `encrypted` comes from the transport rather than from us, so
-   * a message is only ever shown as secured if the path it took actually
-   * secured it.
+   * Inbound traffic: chat messages, and acks for our messages (the only thing
+   * that marks DELIVERED). `encrypted` comes from the transport.
    */
   useEffect(() => {
     if (!peerId) return undefined;
@@ -843,9 +825,7 @@ export default function ChatScreen({route, navigation}) {
         addMessage(roomId, {
           id: chat.id || `rx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           sender: peer?.name || 'Peer',
-          // Direction is recorded, not inferred from the sender's name: a peer
-          // who called themselves by our name used to have their messages
-          // drawn as ours.
+          // Direction is recorded, never inferred from the sender's name.
           outgoing: false,
           text: chat.text,
           plainText: chat.text,
@@ -1070,10 +1050,7 @@ export default function ChatScreen({route, navigation}) {
 
   const keyExtractor = useCallback(item => item.id, []);
 
-  // These three were inline JSX on the FlatList. A new element each render
-  // means React remounts the header and footer whenever anything in this
-  // screen changes — including on every keystroke in the composer, which is
-  // when the list can least afford the work.
+  // Memoised so the list header/footer do not remount on every keystroke.
   const listHeader = useMemo(
     () =>
       loadingOlder ? (
@@ -1220,10 +1197,7 @@ export default function ChatScreen({route, navigation}) {
           initialNumToRender={15}
           maxToRenderPerBatch={15}
           windowSize={11}
-          // Android keeps every rendered row in the view hierarchy otherwise,
-          // so a long conversation stays expensive to scroll long after those
-          // rows leave the screen. Not enabled on iOS, where it has caused
-          // blank cells in inverted-style lists.
+          // Android only; it has caused blank cells on iOS.
           removeClippedSubviews={Platform.OS === 'android'}
           ListHeaderComponent={listHeader}
           ListFooterComponent={listFooter}

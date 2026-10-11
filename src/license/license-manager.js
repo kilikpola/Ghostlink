@@ -172,10 +172,8 @@
           this._cachedAt = null;
           return;
         }
-        // The stored record is only a cache of what activate() verified. Its
-        // tier and expiry used to be trusted as written, so one localStorage
-        // edit ({tier:'enterprise', expiresAt: 9e15}) unlocked everything with
-        // no key at all. Re-verify the key and take tier and expiry from it.
+        // The stored record is only a cache: re-verify the key and take tier
+        // and expiry from it, never from what localStorage says.
         const verified = await this._reverify(parsed);
         if (!verified) {
           localStorage.removeItem(STORAGE_KEY);

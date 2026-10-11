@@ -6,17 +6,6 @@ let testsRun = 0;
 let testsPassed = 0;
 let testsFailed = 0;
 
-function assert(condition, message) {
-  testsRun++;
-  if (condition) {
-    testsPassed++;
-    console.log(`  ✓ ${message}`);
-  } else {
-    testsFailed++;
-    console.error(`  ✗ ${message}`);
-  }
-}
-
 function assertEqual(actual, expected, message) {
   testsRun++;
   if (actual === expected) {

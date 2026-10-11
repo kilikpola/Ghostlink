@@ -1,22 +1,9 @@
 /**
- * LAN Discovery test.
+ * LAN Discovery test: two nodes, no public peer, no internet.
+ *   1. discovery makes a peer's address resolvable
+ *   2. discovery does not make a peer connected (privacy)
  *
- * This is the no-infrastructure case: two nodes on the same network, no public
- * peer, no internet, nothing to bootstrap against. Before Ghost Addresses the
- * invite code carried an IP so this worked by accident; now it has to work by
- * design, and this is the mechanism that makes it.
- *
- * The two things being checked are equally important:
- *   1. discovery makes a peer's address RESOLVABLE
- *   2. discovery does NOT make a peer CONNECTED
- *
- * The second is a privacy property. Sharing a network with someone must not put
- * them in your contact list.
- *
- * Note: this needs UDP multicast on loopback/local interfaces. Where that is
- * blocked (some CI sandboxes, some containers) the suite skips rather than
- * fails — a machine that cannot multicast is a legitimate configuration, and
- * lan-discovery.js is written to degrade quietly there.
+ * Skips where UDP multicast is blocked (some CI sandboxes and containers).
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data

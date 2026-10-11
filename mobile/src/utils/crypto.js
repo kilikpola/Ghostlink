@@ -11,14 +11,9 @@ import {WORDLIST, SEED_PHRASE_WORDS} from './wordlist';
 import {ghostAddressFromNodeId} from './ghost-address';
 
 /**
- * React Native ships no Web Crypto. Every primitive below comes from @noble —
- * audited, pure JS, and already a dependency for the curve maths.
- *
- * The randomness comes from the platform CSPRNG via
- * react-native-get-random-values, which polyfills crypto.getRandomValues onto
- * globalThis from Android's SecureRandom / iOS's SecRandomCopyBytes. That
- * polyfill is imported once at the app entry point (index.js) and must stay
- * there: it has to run before any of this module is used.
+ * Primitives come from @noble (React Native has no Web Crypto); randomness from
+ * the platform CSPRNG via react-native-get-random-values, imported first in
+ * index.js.
  */
 function getSecureRandomValues(array) {
   const c = globalThis.crypto;
@@ -54,11 +49,8 @@ function hexToBytes(hex) {
 const utf8 = str => new TextEncoder().encode(str);
 
 /**
- * SHA-256 over the UTF-8 bytes of `data`, hex encoded.
- *
- * Kept async because every caller awaits it, and because that matches the web
- * app's crypto.subtle.digest-based CryptoEngine.sha256 — fingerprints computed
- * here have to equal the ones computed there, or peers cannot verify each other.
+ * SHA-256 over the UTF-8 bytes of `data`, hex encoded. Must match the web
+ * app's CryptoEngine.sha256 for fingerprints to agree.
  */
 async function sha256(data) {
   return bytesToHex(nobleSha256(typeof data === 'string' ? utf8(data) : data));
@@ -71,28 +63,14 @@ function hmacSha256(key, message) {
 }
 
 /**
- * AES-256-GCM.
- *
- * What was here before was a hand-written AES-CTR with a GHASH routine that was
- * never actually applied: aesGcmEncrypt returned an all-zero "tag" and
- * aesGcmDecrypt never checked one, so ciphertext was malleable and any
- * corruption decrypted silently to garbage. @noble/ciphers computes and
- * verifies the tag properly, so decrypt now throws on tampering.
- *
- * Wire format matches the web app's CryptoEngine: a 12-byte IV, and a
- * ciphertext that carries the 16-byte auth tag appended — the same layout
- * crypto.subtle.encrypt produces — both hex encoded.
+ * AES-256-GCM. Wire format matches the web app's CryptoEngine: a 12-byte IV and
+ * a ciphertext with the 16-byte tag appended, both hex encoded.
  */
 const GCM_IV_BYTES = 12;
 
 /**
- * Key material for the AES functions below.
- *
- * A 64-character hex string is taken as the 32 raw key bytes it encodes. That
- * is what deriveKeyFromSeed returns, and it uses the full 256 bits of the
- * derived key. Anything else is treated the way the web app treats it — padded
- * or truncated to 32 characters and used as UTF-8 — so a passphrase-style key
- * behaves identically on both platforms.
+ * Key material for the AES functions. A 64-char hex string is used as 32 raw
+ * bytes; anything else is padded/truncated to 32 UTF-8 characters, as on web.
  */
 function resolveAesKey(key) {
   if (key instanceof Uint8Array) {
@@ -123,14 +101,8 @@ function aesGcmDecrypt(ciphertextHex, ivHex, key) {
 }
 
 /**
- * An ECDH P-256 keypair, matching the web app's
- * crypto.subtle.generateKey({name:'ECDH', namedCurve:'P-256'}).
- *
- * The previous implementation returned 32 random bytes as the "private key" and
- * a *separate, unrelated* 65 random bytes as the "public key". They were not a
- * pair, so no shared secret could ever be agreed — key exchange could not have
- * worked at all. The public key here is the real uncompressed point (0x04 ‖ X ‖ Y),
- * the same "raw" encoding the web app exports, so the two sides interoperate.
+ * An ECDH P-256 keypair; the public key is the uncompressed point
+ * (0x04 ‖ X ‖ Y), matching the web app's raw export.
  */
 function generateKeyPairSync() {
   const privateKeyRaw = p256.utils.randomPrivateKey();
@@ -142,11 +114,8 @@ function generateKeyPairSync() {
 }
 
 /**
- * The uncompressed P-256 public key for a private key, hex encoded.
- *
- * Recovery uses this to prove an unwrapped private key really belongs to the
- * identity being restored, instead of trusting a public key that travelled
- * alongside it in the same blob.
+ * The uncompressed P-256 public key for a private key, hex encoded. Used to
+ * prove an unwrapped key belongs to the identity being restored.
  */
 function publicKeyFromPrivate(privateKeyHex) {
   return bytesToHex(p256.getPublicKey(hexToBytes(privateKeyHex), false));
@@ -163,44 +132,12 @@ function deriveSharedKey(privateKeyHex, peerPublicKeyHex) {
   return bytesToHex(nobleSha256(shared.slice(1)));
 }
 
-/**
- * The Ghost Mesh identity for a recovery phrase, and the Ghost Address that
- * names it.
- *
- * This is the same derivation gmp-core/identity.js performs, so the same phrase
- * yields the same address on mobile, desktop and the web app — which is the
- * whole point of the address being a name for *you* rather than for a device:
- *
- *   seed      = PBKDF2-HMAC-SHA512(phrase, "ghostlink-yggdrasil-v1", 100k, 32)
- *   staticPub = X25519(seed)
- *   nodeId    = SHA-512(staticPub)
- *   address   = first 45 bits of nodeId, Crockford base32
- *
- * Note the SHA-512: mobile's old CryptoService sketched this with SHA-256,
- * which would have produced a different seed and therefore a different address
- * from every other GhostLink client.
- *
- * Deliberately slow — 100,000 PBKDF2 iterations — so derive once at setup and
- * keep the result, rather than recomputing it to render a screen.
- */
 /* ─── PBKDF2: native when available, JS otherwise ─────────────────────────── */
 
 /**
- * Identity derivation runs several 100,000-iteration PBKDF2 passes (two of
- * them HMAC-SHA512, plus a 200,000-iteration one for storage). In pure JS that
- * is ~2.5s on desktop V8 and minutes under Hermes on a real handset — JS has
- * no 64-bit integers, so every SHA-512 round is emulated in 32-bit pairs.
- * @noble's async PBKDF2 yields every 10ms, which keeps Android's watchdog
- * quiet but still pins the JS thread for the whole run: the setup screen sat
- * frozen for four to five minutes on a Galaxy S10+.
- *
- * Pbkdf2Module runs the same computation in Kotlin on a background thread.
- * The parameters are unchanged and the output is byte-identical — it has to
- * be, because these bytes are an identity, and they must match what the web
- * app and gmp-core derive from the same phrase.
- *
- * If the module is missing (older build, iOS, a JS-only test harness) this
- * falls back to @noble. Correct either way; only the speed differs.
+ * Pure-JS PBKDF2 takes minutes under Hermes, so Pbkdf2Module runs it in Kotlin
+ * on a background thread with byte-identical output. Without the module this
+ * falls back to @noble.
  */
 const NativePbkdf2 = NativeModules.Pbkdf2 || null;
 
@@ -246,29 +183,12 @@ async function pbkdf2(phrase, salt, hash, iterations, dkLen) {
 }
 
 /**
- * The messaging keypair for a recovery phrase.
+ * The messaging keypair for a recovery phrase: same phrase, same key, on any
+ * device. Its salt differs from the mesh derivation's so the keys are
+ * unrelated. 100,000 PBKDF2 iterations, so derive once and keep the result.
  *
- * WHY THIS EXISTS
- *
- * generateKeyPairSync() draws a random P-256 key and stores it in the
- * keystore. Nothing derives it from the recovery phrase — so the phrase
- * restored a Ghost Address and nothing else. On a new device the user would
- * come back with the same address but a brand new messaging key, and every
- * contact holding their old public key could no longer seal anything to them.
- * A recovery phrase that does not recover the identity is not a recovery
- * phrase.
- *
- * Same phrase in, same key out, on any device. The salt is distinct from the
- * mesh derivation's so the two keys are unrelated: knowing one must not lead
- * to the other.
- *
- * Deliberately slow — 100,000 PBKDF2 iterations, matching deriveGhostIdentity
- * — so derive once at setup or restore and keep the result.
- *
- * NOTE for identities created before this existed: their stored key was
- * random, so it cannot be re-derived from their phrase. Their current device
- * keeps working from the keystore; restoring elsewhere yields this derived key
- * instead, which is a different identity to their contacts. See MOBILE_BUILD.md.
+ * Identities created before this existed have a random stored key that cannot
+ * be re-derived; see MOBILE_BUILD.md.
  */
 async function deriveIdentityKeyPair(words) {
   const phrase = Array.isArray(words) ? words.join(' ') : String(words);
@@ -289,6 +209,16 @@ async function deriveIdentityKeyPair(words) {
   throw new Error('could not derive a valid identity key from this phrase');
 }
 
+/**
+ * The Ghost Mesh identity for a recovery phrase (same as gmp-core/identity.ts):
+ *
+ *   seed      = PBKDF2-HMAC-SHA512(phrase, "ghostlink-yggdrasil-v1", 100k, 32)
+ *   staticPub = X25519(seed)
+ *   nodeId    = SHA-512(staticPub)
+ *   address   = first 45 bits of nodeId, Crockford base32
+ *
+ * Slow by design; derive once at setup and keep the result.
+ */
 async function deriveGhostIdentity(words) {
   const phrase = Array.isArray(words) ? words.join(' ') : String(words);
   const seed = await pbkdf2(phrase, 'ghostlink-yggdrasil-v1', 'sha512', 100000, 32);
@@ -303,16 +233,8 @@ async function deriveGhostIdentity(words) {
 }
 
 /**
- * A recovery phrase drawn uniformly from the shared wordlist.
- *
- * Both screens previously built this with Math.random(). That is the single
- * most sensitive value in the app — every other key derives from it — and
- * Math.random is a fast non-cryptographic PRNG whose internal state can be
- * recovered from a handful of outputs, so the phrase, the wrapping key, and the
- * private key behind it were all predictable no matter how strong the KDF was.
- *
- * Rejection sampling keeps the draw uniform: taking a random byte pair modulo
- * the list length would bias toward the first (65536 % 575) words.
+ * A recovery phrase drawn uniformly from the shared wordlist with the CSPRNG,
+ * using rejection sampling to avoid modulo bias.
  */
 function generateSeedPhrase(wordCount = SEED_PHRASE_WORDS, wordlist = WORDLIST) {
   const n = wordlist.length;
@@ -336,14 +258,6 @@ function genInvite() {
 
 /**
  * Write the identity keypair to the platform keystore.
- *
- * Throws on failure rather than returning false. Every caller awaited this
- * without checking the result, so a failed write — a locked keystore, a
- * cancelled biometric prompt, a device with no secure hardware — looked
- * exactly like success: setup and restore both went on to announce the
- * identity and store it in app state, and it was gone on next launch with
- * nothing to explain why. That is the failure this whole flow exists to
- * prevent, so it has to be loud.
  *
  * @throws {Error} if the keypair could not be persisted
  */
@@ -393,19 +307,9 @@ async function hasBiometrics() {
 }
 
 /**
- * The 256-bit key wrapping the private key at rest, derived from the recovery
- * phrase.
- *
- * PBKDF2-HMAC-SHA256, salt "ghostlink-v2-salt", 100,000 iterations — the exact
- * parameters the web app passes to crypto.subtle.deriveKey, so the same phrase
- * yields the same bytes on both platforms.
- *
- * This replaces a single unsalted pass of a non-SHA-256 hash, which offered no
- * work factor at all: a phrase guess cost one cheap hash to test.
- *
- * Runs through the native PBKDF2 module when present, and @noble otherwise.
- * It is deliberately slow — that is the entire point of a KDF — so call it
- * once at setup or unlock and keep the result in memory.
+ * The 256-bit key wrapping the private key at rest: PBKDF2-HMAC-SHA256, salt
+ * "ghostlink-v2-salt", 100,000 iterations — the web app's parameters. Slow by
+ * design; derive once and keep it in memory.
  */
 async function deriveKeyFromSeed(words) {
   const phrase = Array.isArray(words) ? words.join(' ') : String(words);
@@ -426,15 +330,8 @@ async function deriveStorageKey(words) {
 }
 
 const ShamirSSS = (() => {
-  // GF(2^8) with AES's reduction polynomial 0x11b.
-  //
-  // The log/exp tables were previously built by repeatedly doubling from 1,
-  // i.e. treating 0x02 as a generator. It is not one in this field — it has
-  // order 51, so the tables covered only a fifth of the elements and the rest
-  // of LOG stayed zero. Multiplication was wrong for most inputs (mul(1,3)
-  // returned 1), which meant shares did not reconstruct: every recovery
-  // fragment this produced was unusable. 0x03 is a primitive element, so
-  // stepping by 3 walks all 255 non-zero values.
+  // GF(2^8) with AES's reduction polynomial 0x11b; 0x03 is a primitive
+  // element, so stepping by 3 walks all 255 non-zero values.
   const xtime = a => ((a << 1) ^ (a & 0x80 ? 0x11b : 0)) & 0xff;
 
   const LOG = new Uint8Array(256);
@@ -497,14 +394,21 @@ const ShamirSSS = (() => {
   };
 })();
 
-function generateBackupFragments(blobStr) {
+/**
+ * Manual Shamir backup, 3 of 5 by default; three shares plus the recovery
+ * phrase restore the identity.
+ */
+export const FRAGMENT_SHARES = 5;
+export const FRAGMENT_THRESHOLD = 3;
+
+function generateBackupFragments(blobStr, shareCount = FRAGMENT_SHARES, threshold = FRAGMENT_THRESHOLD) {
   const dataBytes = new TextEncoder().encode(blobStr);
-  const shares = ShamirSSS.split(dataBytes, 7, 3);
+  const shares = ShamirSSS.split(dataBytes, shareCount, threshold);
   return shares.map(share => {
     const encoded = [share.x, ...share.y].map(b => b.toString(16).padStart(2, '0')).join('');
     return {
       id: share.x,
-      label: `Fragment ${share.x} of 7`,
+      label: `Fragment ${share.x} of ${shareCount}`,
       data: encoded,
       check: encoded.slice(0, 8),
       distributed: false,
@@ -542,10 +446,6 @@ export const CryptoEngine = {
   hmacSha256,
   encrypt: aesGcmEncrypt,
   decrypt: aesGcmDecrypt,
-  // encryptLegacy/decryptLegacy are gone. They were a XOR of plaintext against
-  // the key and IV with a random, never-verified 16-byte "tag" appended —
-  // trivially breakable and not encryption in any useful sense. Nothing called
-  // them. Anything that needs symmetric encryption uses encrypt/decrypt above.
   generateSeedPhrase,
   genInvite,
   storeKeyPair,

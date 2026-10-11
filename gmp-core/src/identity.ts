@@ -45,7 +45,23 @@ export async function deriveIdentityFromSeedPhrase(seedPhrase: string): Promise<
   const phraseBytes = stringToBytes(seedPhrase);
 
   const seed = pbkdf2(sha512, phraseBytes, saltBytes, { c: GHOST_MESH_ITERATIONS, dkLen: SEED_LENGTH });
+  return identityFromSeed(seed);
+}
 
+/**
+ * A throwaway identity from fresh random bytes (e.g. a relay hop). Never
+ * stored. `nonRepeatEntropy` is folded in as in generateEphemeralKeyPair so a
+ * repeated RNG output cannot repeat the identity.
+ */
+export function generateEphemeralIdentity(nonRepeatEntropy?: Uint8Array): NodeIdentity {
+  const rng = crypto.getRandomValues(new Uint8Array(SEED_LENGTH));
+  const seed = nonRepeatEntropy && nonRepeatEntropy.length
+    ? hkdf(sha512, concatBytes(rng, nonRepeatEntropy), undefined, EPHEMERAL_IDENTITY_INFO, SEED_LENGTH)
+    : rng;
+  return { ...identityFromSeed(new Uint8Array(seed)), ephemeral: true };
+}
+
+function identityFromSeed(seed: Uint8Array): NodeIdentity {
   const staticPrivKey = seed;
   const staticPubKey = x25519.getPublicKey(staticPrivKey);
 
@@ -70,10 +86,23 @@ export async function deriveIdentityFromSeedPhrase(seedPhrase: string): Promise<
   };
 }
 
-export function generateEphemeralKeyPair(): EphemeralKeypair {
-  const ephemeralPriv = crypto.getRandomValues(new Uint8Array(32));
+// Distinct info strings, so the same (bootCounter, processSequence) can never
+// derive a scalar and a throwaway identity seed that collide.
+const EPHEMERAL_INFO = stringToBytes('gmp-ephemeral-scalar-v1');
+const EPHEMERAL_IDENTITY_INFO = stringToBytes('gmp-ephemeral-identity-seed-v1');
+
+/**
+ * A fresh X25519 keypair for one connection. `nonRepeatEntropy` (boot counter
+ * and sequence) is mixed with the RNG bytes through HKDF so a repeated RNG
+ * output cannot repeat the scalar; absent, the raw RNG bytes are used.
+ */
+export function generateEphemeralKeyPair(nonRepeatEntropy?: Uint8Array): EphemeralKeypair {
+  const rng = crypto.getRandomValues(new Uint8Array(32));
+  const ephemeralPriv = nonRepeatEntropy && nonRepeatEntropy.length
+    ? hkdf(sha512, concatBytes(rng, nonRepeatEntropy), undefined, EPHEMERAL_INFO, 32)
+    : rng;
   const ephemeralPub = x25519.getPublicKey(new Uint8Array(ephemeralPriv));
-  return { ephemeralPriv, ephemeralPub };
+  return { ephemeralPriv: new Uint8Array(ephemeralPriv), ephemeralPub };
 }
 
 export function x25519DeriveSharedSecret(localPrivKey: Uint8Array, remotePubKey: Uint8Array): Uint8Array {

@@ -1,4 +1,4 @@
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import { loadPublicPeers, queryPublicAddress, querySinglePeer } from '../dist/public-peer-list.js';
 import { detectNATType } from '../dist/nat-detector.js';
 import { holePunchConnect } from '../dist/hole-punch.js';
@@ -65,7 +65,7 @@ async function main() {
 
   // Initialize node
   console.log('\n[1/5] Initializing local GMP node...');
-  const node = new GMPNode({ port });
+  const node = createGMPNode({ port });
   await node.loadIdentity(seedPhrase);
   await node.listen();
   console.log(`      Local NodeID: ${Buffer.from(node.identity.nodeId).toString('hex')}`);

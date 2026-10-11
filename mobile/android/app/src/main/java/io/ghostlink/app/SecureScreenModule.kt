@@ -7,20 +7,9 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.Promise
 
 /**
- * Sets FLAG_SECURE on the activity window.
- *
- * With it, Android refuses to screenshot the window, excludes it from screen
- * recording, and renders a blank card instead of a live preview in the recent
- * apps switcher. The recovery phrase is shown on three screens — the reveal,
- * the restore entry, and the verification quiz — and on all three it is the
- * whole identity in plain text. A screenshot of any of them, sitting in a
- * gallery that syncs to a cloud, hands the identity to whoever can read that
- * gallery.
- *
- * The flag is per-window, not per-screen, so it is set on entering one of
- * those screens and cleared on leaving. Reference counted: React may mount the
- * next secure screen before unmounting the previous one, and a naive
- * clear-on-unmount would drop the flag while a phrase was still visible.
+ * Sets FLAG_SECURE on the activity window while a recovery phrase is shown:
+ * no screenshots, screen recording or recent-apps preview. Reference counted,
+ * because the next secure screen may mount before the previous one unmounts.
  */
 class SecureScreenModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {

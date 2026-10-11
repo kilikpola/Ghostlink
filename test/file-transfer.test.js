@@ -1,11 +1,6 @@
 /**
- * Regression tests for src/p2p/file-transfer.js.
- *
- * Chunk keys used to be SHA-256(`${peerId}:${transferId}:${chunkIndex}`):
- * every input is public (the transfer id and index ride in the chunk itself),
- * so anything on the path could decrypt. Each side also used the *other*
- * peer's id, so the two ends derived different keys and no file ever arrived.
- * A transfer now uses a random key sealed to the recipient.
+ * Tests for src/p2p/file-transfer.js: per-transfer random keys sealed to the
+ * recipient.
  *
  * Run with: node test/file-transfer.test.js
  */

@@ -89,13 +89,25 @@
       applies to the file:// page.
     -->
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'" />
-    <title>GhostLink v2</title>
-    <!-- The brand mark from assets/ghostlink-favicon.svg, inlined as a data URI:
-         avoids the /favicon.ico 404 with no extra file or request. The tile is
+    <title>GhostLink — End-to-End Encrypted P2P Messenger</title>
+    <meta name="description" content="GhostLink is an end-to-end encrypted, peer-to-peer messenger. Your private key never leaves your device — no servers, no accounts, no metadata." />
+    <meta name="theme-color" content="#0B0F17" />
+    <!-- Open Graph: only fetched by link-preview crawlers when the app URL is
+         shared, never on app load, so this leaks nothing about sessions. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://kilikpola.github.io/Ghostlink/" />
+    <meta property="og:title" content="GhostLink — End-to-End Encrypted P2P Messenger" />
+    <meta property="og:description" content="Peer-to-peer, end-to-end encrypted messaging. Your private key never leaves your device — no servers, no accounts, no metadata." />
+    <meta property="og:image" content="https://kilikpola.github.io/Ghostlink/assets/icon-512.png" />
+    <!-- The brand mark from assets/ghostlink-favicon.svg: linked directly for
+         browsers that support SVG icons, and inlined below as a data-URI
+         fallback so every other browser still gets the ghost with no extra
+         file and no /favicon.ico 404. The data-URI tile is
          tighter than the app-icon master because at 16px the master's padding
          eats the silhouette. NOTE: a data: URI cannot read a JS token, so the
          two colours here (spectral on obsidian) are the one place in this file
          that repeats a PALETTE value; keep them in sync with it. -->
+    <link rel="icon" type="image/svg+xml" href="assets/ghostlink-favicon.svg" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20200%20200'%3E%3Crect%20width='200'%20height='200'%20rx='44'%20fill='%230B0F17'/%3E%3Cg%20transform='translate%2832.5%2012%29%20scale%280.6743%29'%3E%3Cg%20fill='none'%20stroke='%234FE3B0'%20stroke-linecap='round'%3E%3Cpath%20d=%22M41.3%2046.9A70%2070%200%200%201%20158.7%2046.9%22%20stroke-width=%2220%22/%3E%3Cpath%20d=%22M64.9%2067.9A39%2039%200%200%201%20135.1%2067.9%22%20stroke-width=%2218%22/%3E%3C/g%3E%3Cpath%20fill='%234FE3B0'%20fill-rule='evenodd'%20d='M20%20159A80%2080%200%200%201%20180%20159V243Q160%20269%20140%20243Q120%20269%20100%20243Q80%20269%2060%20243Q40%20269%2020%20243ZM58%20156a16%2016%200%201%200%2032%200a16%2016%200%201%200-32%200ZM110%20156a16%2016%200%201%200%2032%200a16%2016%200%201%200-32%200Z'/%3E%3C/g%3E%3C/svg%3E" />
     <!--
       Fonts are served from this origin, not from Google. Loading them remotely
@@ -264,7 +276,26 @@
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Branded boot splash: shown for the few hundred ms between first paint
+         and React mounting into #root (React replaces this content on mount).
+         Without it the app booted to a bare empty page. Also carries the
+         page's single h1 — the app UI itself is all divs/h2s. -->
+    <div id="root">
+      <div role="status" aria-live="polite" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:16px;color:#E8EDF4;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
+        <svg width="72" height="72" viewBox="0 0 200 200" role="img" aria-label="GhostLink ghost mark">
+          <rect width="200" height="200" rx="44" fill="#151B26"/>
+          <g transform="translate(32.5 12) scale(0.6743)" fill="#4FE3B0">
+            <g fill="none" stroke="#4FE3B0" stroke-linecap="round">
+              <path d="M41.3 46.9A70 70 0 0 1 158.7 46.9" stroke-width="20"/>
+              <path d="M64.9 67.9A39 39 0 0 1 135.1 67.9" stroke-width="18"/>
+            </g>
+            <path fill-rule="evenodd" d="M20 159A80 80 0 0 1 180 159V243Q160 269 140 243Q120 269 100 243Q80 269 60 243Q40 269 20 243ZM58 156a16 16 0 1 0 32 0a16 16 0 1 0-32 0ZM110 156a16 16 0 1 0 32 0a16 16 0 1 0-32 0Z"/>
+          </g>
+        </svg>
+        <h1 style="margin:0;font-size:22px;font-weight:800;letter-spacing:3px;">GHOSTLINK</h1>
+        <p style="margin:0;font-size:12px;color:#8B95A5;letter-spacing:1px;">Starting your secure session…</p>
+      </div>
+    </div>
     <script type="module">
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -388,26 +419,9 @@ const CryptoEngine = {
     return Array.from(new Uint8Array(h)).map((b) => b.toString(16).padStart(2, "0")).join("");
   },
   // ==================== SYMMETRIC ENCRYPTION AT REST ====================
-  //
-  // Version 1 used the key string directly as AES key material:
-  //   key.padEnd(32, "0").slice(0, 32)
-  // That is not a KDF. It truncated the key to its first 32 characters, padded
-  // anything shorter with zero bytes, and called the result AES-256 — so the
-  // real strength was however much entropy happened to sit in those 32
-  // characters. Every current caller passes a high-entropy string, so nothing
-  // was breakable in practice, but the label was a lie and the first caller to
-  // pass a passphrase would have gotten a trivially guessable key with no
-  // warning.
-  //
-  // Version 2 runs HKDF-SHA256 over the key with a random per-message salt.
-  // HKDF is the right tool here because the inputs are already high-entropy
-  // (a 256-bit vault key, an exported AES key); it extracts and expands rather
-  // than stretching, so it costs nothing per message. An input that is
-  // genuinely a passphrase needs PBKDF2 instead — deriveKeyFromSeed below is
-  // that path, and it is where a passphrase belongs.
-  //
-  // v1 ciphertext is still readable: decrypt() dispatches on the version tag,
-  // and every write produces v2, so stored data migrates as it is touched.
+  // v2: HKDF-SHA256 over a high-entropy key with a random per-message salt.
+  // Passphrases belong in deriveKeyFromSeed (PBKDF2) instead. v1 ciphertext
+  // (raw padded key) is still readable and migrates to v2 when rewritten.
   CIPHER_VERSION: 2,
   _HKDF_INFO: "ghostlink-at-rest-v2",
 
@@ -612,23 +626,14 @@ const CryptoEngine = {
    *
    * ⚠ MUST NOT BE USED TO DERIVE A GHOST ADDRESS OR ANY IDENTITY. ⚠
    *
-   * This returns a *routing address* for a self-hosted Yggdrasil daemon — the
-   * thing a user pastes into /etc/yggdrasil.conf — and nothing here identifies
-   * a GhostLink user. It is kept only for the manual Ghost Mesh setup panel in
-   * Settings, which verifies a phrase against an address the user already has.
-   *
-   * It is deliberately named so it cannot be mistaken for identity derivation,
-   * because its KDF disagrees with the one that produces identities:
+   * A routing address for a self-hosted Yggdrasil daemon, used only by the
+   * manual Ghost Mesh setup panel. Its KDF differs from identity derivation:
    *
    *   this function        PBKDF2-HMAC-SHA256, salt "ghostlink-yggdrasil-v1"
    *   Ghost Address        PBKDF2-HMAC-SHA512, salt "ghostlink-yggdrasil-v1"
    *                        (gmp-core/src/identity.ts, mobile/src/utils/crypto.js)
    *
-   * Same phrase, same salt, same iteration count — different PRF, so different
-   * bytes and a different key. Wiring this into a Ghost Address would hand
-   * every user an address their own node does not answer to, and it would look
-   * like it worked. test/ghost-address-kdf.test.mjs fails if any Ghost Address
-   * path reaches for SHA-256.
+   * test/ghost-address-kdf.test.mjs fails if a Ghost Address path uses SHA-256.
    *
    * @param {string[]} words the recovery phrase
    * @returns {Promise<{publicKeyHex: string, address: string, privateKeyHex: string}>}
@@ -800,23 +805,16 @@ const CryptoEngine = {
 };
 window.CryptoEngine = CryptoEngine;
 
-// An identity fingerprint is a truncated SHA-256 of the raw ECDH public key.
-// This is the single definition: setupIdentity derives our own with it, and the
-// NodeID→fingerprint map derives a peer's from the key we have pinned for them.
-// If the two ever drifted apart, every peer would compute a different
-// fingerprint for the same identity and workspace membership would stop
-// resolving. The key is lower-cased first because that is how peers announce it.
+// Identity fingerprint: truncated SHA-256 of the lower-cased raw ECDH public
+// key. The single definition, used for our own and for pinned peer keys.
 async function fingerprintFromPublicKey(publicKeyHex) {
   if (typeof publicKeyHex !== 'string' || !publicKeyHex.trim()) return null;
   return (await CryptoEngine.sha256(publicKeyHex.trim().toLowerCase())).slice(0, 16).toUpperCase();
 }
 
 // ==================== AT-REST VAULT KEY ====================
-// Device-local secret used to encrypt message blocks kept in this browser.
-// It replaces the previous (broken) use of identity.fingerprint as an AES key —
-// a fingerprint is public data, so anything "encrypted" with it was readable by
-// anyone who had seen the user's fingerprint. This key never leaves the device
-// and is never transmitted.
+// Device-local secret for message blocks kept in this browser. Never leaves
+// the device.
 const LocalVault = {
   _key: null,
   key() {
@@ -838,18 +836,10 @@ const LocalVault = {
 };
 
 // ==================== MESSAGE HISTORY AT REST ====================
-// Message bodies, metadata and inline image data used to be written to
-// localStorage as plaintext. They are now sealed with a key derived from the
-// user's 12-word recovery phrase and held only in memory, so reading the
-// browser profile off disk — or any script that can reach localStorage — gets
-// ciphertext without the phrase.
-//
-// Two invariants keep this from eating history:
-//   * unlock() verifies the derived key against what is already stored and
-//     refuses to unlock on mismatch, so a wrong phrase can never become the key
-//     the persist effects write with.
-//   * save() is a no-op while locked, so a locked session can never overwrite
-//     ciphertext with empty or partial state.
+// Message history is sealed with a key derived from the recovery phrase and
+// held only in memory.
+//   * unlock() refuses a key that does not open what is already stored.
+//   * save() is a no-op while locked, so stored ciphertext is never clobbered.
 const SECURE_STORAGE_KEYS = [MSG_STORAGE_KEY, CHAIN_STORAGE_KEY];
 
 const MessageVault = {
@@ -931,11 +921,8 @@ const MessageVault = {
     return { value: parsed, state: 'legacy' };
   },
 
-  // One in-flight write per store key. save() awaits encryption before it
-  // touches localStorage, so two saves started from different effects race:
-  // whichever finishes sealing last wins, and that is not necessarily the
-  // newer snapshot. Losing that race silently resurrects a deleted message or
-  // rolls the chain back on the next reload, so the writes are queued instead.
+  // One in-flight write per store key, so a slower seal can never overwrite a
+  // newer snapshot.
   _writes: {},
 
   save(storeKey, data) {
@@ -964,10 +951,8 @@ const MessageVault = {
 };
 
 // ==================== END-TO-END MESSAGE SEALING ====================
-// Every payload that leaves this device is sealed to the recipient's ECDH
-// public key (ephemeral-static ECIES via CryptoEngine.encryptWithPublicKey), so
-// only the holder of the matching private key can read it. Callers must not put
-// the plaintext body alongside the sealed bundle.
+// Every outgoing payload is sealed to the recipient's ECDH public key (ECIES via
+// CryptoEngine.encryptWithPublicKey). Never send the plaintext alongside it.
 async function sealPayload(payloadObj, recipientPubKeyHex) {
   if (!recipientPubKeyHex) throw new Error('Recipient public key unknown');
   return CryptoEngine.encryptWithPublicKey(JSON.stringify(payloadObj), recipientPubKeyHex);
@@ -980,15 +965,8 @@ async function unsealPayload(sealed, identity) {
 }
 
 // ==================== INBOUND PAYLOAD SHAPING ====================
-// A sealed envelope proves only that the payload was encrypted to *us*; anyone
-// holding our public key can produce one, so everything inside is still
-// peer-authored JSON. It is rendered as React children, fed to <audio> and
-// persisted in the chain, so every field is coerced to the shape our own
-// senders produce before it goes anywhere. Without this, one field of the wrong
-// type — `content: {}` on a file message, a string `waveform`, an object
-// `replyTo.sender` — threw during render and took the whole app down to the
-// error boundary, and because the block is persisted, it did so again every
-// time that conversation was opened.
+// Sealed payloads are still peer-authored JSON, so every field is coerced to
+// the shape our own senders produce before it is rendered or persisted.
 const INBOUND_MSG_TYPES = ['text', 'file', 'image'];
 const INBOUND_NAME_MAX = 64;
 const INBOUND_WAVEFORM_MAX = 12000; // 10 minutes at the recorder's 20 samples/s
@@ -1065,20 +1043,9 @@ function applyInboundReaction(prev, messageHash, emoji, reactorId) {
 }
 
 // ==================== PUBLIC-KEY PINNING ====================
-// A peer's announced ECDH key is pinned only after the peer proves it holds the
-// private half. Pinning on announcement alone let any connected node claim
-// someone else's public key (public keys are public — they are in every invite
-// and every key-announce). The NodeID→fingerprint map is derived from that pin,
-// so the claim made the node *be* that identity to every workspace check: a
-// stranger announcing an admin's key could delete the workspace, rewrite its
-// roster, or swap in a workspace key it knew. It also let the safety-number
-// ceremony "verify" a key the peer did not own.
-//
-// The proof: a nonce sealed to the announced key, which only its private key
-// opens. The challenge names both ends of the link, and the responder answers
-// only a challenge addressed to itself and issued by the peer it is actually
-// talking to — so a node cannot relay our challenge to the real key holder and
-// pass its answer back as its own.
+// A peer's announced ECDH key is pinned only after it proves it holds the
+// private half: it must open a nonce sealed to that key. The challenge names
+// both ends of the link, so it cannot be relayed to the real key holder.
 const PINNABLE_KEY = /^04[0-9a-f]{128}$/; // raw uncompressed P-256, as exportKey('raw') produces
 
 function createKeyPinning({ seal, unseal, selfIds, send, getPinned, pin, randomHex }) {
@@ -1231,15 +1198,8 @@ class Chain {
     return block;
   }
 
-  // Every block, with no exemptions. The old version started at index 1 and
-  // skipped anything flagged isReceived, so editing the genesis block or any
-  // inbound block in persisted storage left verify() returning true — the two
-  // categories that between them cover most of a conversation.
-  //
-  // Inbound blocks are checkable because the local record is what gets hashed:
-  // the sender's own hash is kept alongside as `remoteHash` for de-duplication
-  // and is never substituted for ours (it was computed over the sender's chain
-  // and no local record can reproduce it).
+  // Verify every block, genesis and inbound included. Inbound blocks are hashed
+  // locally; the sender's hash is kept separately as `remoteHash`.
   async verify() {
     for (let i = 0; i < this.blocks.length; i++) {
       const curr = this.blocks[i];
@@ -1250,14 +1210,9 @@ class Chain {
     return true;
   }
 
-  // Migration for chains written before inbound blocks kept a local hash: those
-  // stored the sender's hash in `hash`, which nothing here can recompute. Move
-  // it to `remoteHash` and re-link from the first such block onward.
-  //
-  // This is a migration, not a trust decision. These hashes have never been
-  // signed, so anyone able to write the store could always mint a self-
-  // consistent chain; what they detect is partial edits and corruption. Tamper
-  // resistance at rest comes from the vault's AEAD, which is a separate layer.
+  // Migration: older chains stored the sender's hash in `hash` for inbound
+  // blocks. Move it to `remoteHash` and re-link from there. Tamper resistance
+  // at rest comes from the vault's AEAD, not from these hashes.
   async relinkLegacyBlocks() {
     let firstLegacy = -1;
     for (let i = 0; i < this.blocks.length; i++) {
@@ -1275,16 +1230,9 @@ class Chain {
     return true;
   }
 
-  // Erase a block's body in place and re-link every block after it.
-  //
-  // Self-destruct has to remove the content, not just stop rendering it: the
-  // block body is what export() writes out and what the vault persists, so a
-  // message that was only hidden was still sitting in both. Re-linking is what
-  // keeps verify() total — the chain goes on attesting to an unbroken sequence,
-  // now recording that a message was destroyed rather than what it said.
-  //
-  // Returns oldHash → newHash for every block whose hash moved, so the copies
-  // held in the message list can be brought along.
+  // Erase a block's body in place and re-link every block after it, so the
+  // content leaves exports and the vault while verify() still passes.
+  // Returns oldHash → newHash for every block whose hash moved.
   async destroyBlock(hash) {
     const start = this.blocks.findIndex((b) => b.hash === hash);
     if (start === -1) return null;
@@ -1481,11 +1429,7 @@ async function combineAndRestore(masterKey, fragmentHexArray) {
 }
 
 // ==================== MESH TROUBLE NOTICE ====================
-// One banner, three genuinely different problems. Before this, every one of
-// them rendered "No public peer reachable", which sent people to edit a peer
-// list that was often already correct — the bridge simply was not running, or
-// the peer in the list was answering TCP but not GMP. Each branch below names
-// what actually broke and the one thing that fixes it.
+// Distinct banners for distinct failures, each naming its fix.
 const MESH_TROUBLE = {
   'bridge-down': {
     title: 'Ghost Mesh bridge not running',
@@ -1524,6 +1468,39 @@ const MESH_TROUBLE = {
 };
 
 // bridgeReachable: null = still trying, false = no bridge process, true = bridge up.
+// 'relayed-unseparated' is shown separately: the relay's operator already
+// knows this identity and could link relayed conversations to the user.
+const MESH_TRANSPORT_LABELS = {
+  'direct': 'Ghost Mesh',
+  'relayed': 'Ghost Mesh · Relayed',
+  'relayed-unseparated': 'Ghost Mesh · Relayed, not separated',
+};
+const RELAYED_UNSEPARATED_EXPLANATION =
+  'Relayed through a host that is not separated from the one that knows your identity. ' +
+  'Its operator can link this conversation to you.';
+// Offline delivery. Each state is set by a protocol event, never by
+// a timer: 'stored' by the storage host's STORE_ACK, 'delivered' only by the
+// recipient's receipt coming back in a tombstone.
+const SF_STATE_LABELS = {
+  storing: 'storing…',
+  stored: 'sent (stored)',
+  delivered: 'delivered',
+  expired: 'no receipt',
+};
+const SF_STATE_TITLES = {
+  storing: 'Peer offline: handing the sealed message to its mailbox.',
+  stored: 'The mailbox host acknowledged it. It is waiting there, sealed, for the recipient.',
+  delivered: 'The recipient opened it and its sealed receipt came back.',
+  expired: 'No receipt came back within two weeks, and none can any more. The message may or may not have been read.',
+};
+const STORAGE_UNSEPARATED_LABEL = 'Ghost Mesh · Storage not separated';
+const STORAGE_UNSEPARATED_EXPLANATION =
+  'Your mailbox host is not known to be run by someone other than the hosts that know your identity. ' +
+  'Its operator could link your mailbox to you. Self-host a storage peer to close this (gmp storage-peer).';
+function meshModeLabel(transport) {
+  return MESH_TRANSPORT_LABELS[transport] || MESH_TRANSPORT_LABELS.direct;
+}
+
 // meshStatus: null until the first bootstrap round reports back.
 function getMeshTroubleKey(bridgeReachable, meshStatus) {
   if (bridgeReachable === false) return 'bridge-down';
@@ -1603,24 +1580,18 @@ const AudioPlayer = ({ stream }) => {
 };
 
 // ==================== BRIDGE URL HELPER ====================
-// Reads ?bridge=IP:PORT from the URL to allow LAN devices to specify
-// the bridge host. Falls back to localhost:3002 when absent.
-// Uses wss:// when the page is loaded over HTTPS to avoid mixed-content
-// blocking (browsers refuse plain ws:// from an https:// page).
-// The GMP node's listen port. Configurable via ?gmpPort= so multiple nodes can
-// run on one host (e.g. LAN testing); defaults to 49500. Must agree across the
-// bridge 'start' message (actual listen port), the GHOST invite code (advertised
-// port), and the joiner's dial — so all three call sites read it from here.
+// ?bridge=IP:PORT lets LAN devices pick the bridge host (default
+// localhost:3002), using wss:// when the page is served over HTTPS.
+// ?gmpPort= sets the GMP listen port (default 49500); the bridge 'start'
+// message, the invite code and the joiner's dial all read it from here.
 function getGmpPort() {
   const p = parseInt(new URLSearchParams(window.location.search).get('gmpPort'), 10);
   return Number.isInteger(p) && p > 0 && p < 65536 ? p : 49500;
 }
 
-// The ?bridge= parameter lets a LAN device point this app at a bridge host,
-// which also means a crafted link controls where the app connects. The 12-word
-// recovery phrase must therefore never be sent to it: only a bridge running on
-// this machine is trusted with identity material. A LAN/remote bridge gets its
-// seed locally instead, via the GMP_SEED_PHRASE environment variable.
+// A ?bridge= link controls where the app connects, so the recovery phrase is
+// only ever sent to a bridge on this machine. Remote bridges use
+// GMP_SEED_PHRASE locally.
 function isTrustedBridgeTarget() {
   try {
     const host = new URL(getBridgeWsUrl()).hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -1644,11 +1615,8 @@ function getBridgeWsUrl() {
   return `${scheme}://localhost:${bridgePort}`;
 }
 
-// When a ?bridge= target is present but the page is served over plain
-// http://, getBridgeWsUrl() can only produce ws:// — which cannot reach a
-// LAN-mode bridge (it runs wss://), and on a LAN IP the app also loses
-// WebCrypto. Both are fixed only by serving this page over HTTPS. Returns
-// the HTTPS URL to reopen at (preserving ?bridge=), or null when fine.
+// With ?bridge= over plain http://, only ws:// is possible and WebCrypto is
+// unavailable on a LAN IP. Returns the HTTPS URL to reopen at, or null.
 function getBridgeInsecureHttpsUrl() {
   try {
     const loc = window.location;
@@ -1659,20 +1627,9 @@ function getBridgeInsecureHttpsUrl() {
   } catch (e) {return null;}
 }
 
-// ICE server list for every RTCPeerConnection: always the public STUN
-// servers, plus any user-configured TURN servers (Settings → TURN) when
-// the TURN fallback toggle is enabled. TURN relays are what let a
-// connection succeed through symmetric/strict NAT (mobile carriers) or on
-// networks where mDNS host candidates don't resolve between peers — the
-// usual cause of "Could not establish a direct connection". Reads the same
-// localStorage keys the settings UI writes.
-// The live TURN list for this session, published by the settings UI on every
-// edit. It exists because saveTurnServers() deliberately persists the URL only:
-// a TURN username and credential in localStorage would sit next to the at-rest
-// key, so they are kept in memory and re-entered after a reload. Reading the
-// persisted copy alone would hand an authenticated relay an anonymous
-// allocation request — which the relay rejects — so the credentials have to
-// reach getIceServers() through here instead of through storage.
+// ICE servers: public STUN plus user-configured TURN when enabled.
+// TURN credentials are kept in memory only (saveTurnServers persists the URL),
+// so the settings UI publishes the live list here.
 let sessionTurnServers = [];
 
 function setSessionTurnServers(list) {
@@ -1747,21 +1704,12 @@ async function getLocalIPAddress() {
 }
 
 // ==================== GHOST ADDRESS ====================
-// GHOST-XXX-XXX-XXX — the human-typeable form of this node's GMP NodeID.
+// GHOST-XXX-XXX-XXX — derived from the GMP NodeID (first 45 bits, Crockford
+// base32). It carries no location; the mesh resolves it to a NodeID.
 //
-// The address is DERIVED from the NodeID (first 45 bits, Crockford base32), so
-// it is the same every time this seed phrase is used, on every device, forever.
-// It contains no IP and no port, which is precisely why it works across the
-// internet: the joiner resolves it to a full NodeID out of what the mesh has
-// flooded to it, then opens a routed GMP circuit. Nothing here is location.
-//
-// SOURCE OF TRUTH: gmp-core/ghost-address.js. This is a hand-inlined copy
-// because index.html is loaded over file:// in the Electron build, where a
-// relative ES-module import is blocked by CORS. The two implementations MUST
-// agree byte for byte — a divergence means two peers computing two different
-// addresses for the same identity. gmp-core/test/ghost-address-parity-test.js
-// extracts this copy and cross-checks it against the module; run it after any
-// edit here.
+// SOURCE OF TRUTH: gmp-core/src/ghost-address.js. Inlined because Electron loads
+// this page over file://, where module imports are blocked.
+// gmp-core/test/ghost-address-parity-test.js checks the two agree.
 const GHOST_ADDRESS_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const GHOST_ADDRESS_LENGTH = 9;
 const GHOST_ADDRESS_PATTERN = /^GHOST-[0-9A-HJKMNP-TV-Z]{3}-[0-9A-HJKMNP-TV-Z]{3}-[0-9A-HJKMNP-TV-Z]{3}$/;
@@ -1801,11 +1749,8 @@ function isNodeIdHex(input) {
   return typeof input === 'string' && NODE_ID_PATTERN.test(input.trim());
 }
 
-// Peers we have connected to at least once, by NodeID. Persisted so that a
-// reload, a bridge restart or a laptop lid closing does not lose the link —
-// see GMPBridgeConnector._restoreSessions, which silently re-establishes every
-// one of them. A connection is meant to be built once, not re-negotiated by
-// hand every time something blinks.
+// Peers connected at least once, by NodeID. Persisted so
+// GMPBridgeConnector._restoreSessions can silently re-establish them.
 const KNOWN_PEERS_KEY = 'gl_gmp_known_peers';
 // Peers that must NOT be auto-restored, even though the chat cache still knows
 // them — a deliberate removal has to survive a reload, or the session restore
@@ -1848,9 +1793,8 @@ function loadKnownPeers() {
     if (Array.isArray(raw)) for (const p of raw) if (p) add(p.nodeId, p.name, p.lastConnectedAt);
   } catch (e) {/* fall through to the chat cache */}
 
-  // Also mine the chat peer cache, so contacts from before this list existed
-  // — or added by any other path — are still restored rather than silently
-  // dropped. Its keys are peer ids, which for mesh peers are NodeIDs.
+  // Also restore contacts from the chat peer cache (keyed by peer id, which
+  // for mesh peers is the NodeID).
   try {
     const cached = PeerCache.getAllPeers();
     for (const [peerId, info] of Object.entries(cached || {})) {
@@ -1912,12 +1856,8 @@ class GMPBridgeConnector {
     // resolved, which is worth saying out loud rather than spinning forever.
     this.meshBootstrapped = null;
 
-    // Whether a bridge is listening at all. Null until the first socket attempt
-    // settles, then true once one has opened and false when one never did.
-    // Kept apart from meshBootstrapped because "no bridge process" and "bridge
-    // running but the mesh found nobody" are different problems with different
-    // fixes, and reporting the second for the first is what sent people looking
-    // at their peer list when nothing was running.
+    // Null until the first socket attempt settles. Distinct from
+    // meshBootstrapped: "no bridge" and "no peers" need different fixes.
     this.bridgeReachable = null;
 
     // Set from the bridge's external-address broadcast once a public peer has
@@ -1942,12 +1882,7 @@ class GMPBridgeConnector {
     this._redialAttempts = new Map();
   }
 
-  /**
-   * Resolves once the bridge has reported our NodeID (i.e. the GMP node is
-   * listening and we know our own Ghost Address). Callers that need to show
-   * the address — the invite screen above all — await this instead of racing
-   * the socket.
-   */
+  /** Resolves once the bridge has reported our NodeID. */
   waitUntilReady(timeoutMs = 15000) {
     if (this.nodeId) return Promise.resolve({ nodeId: this.nodeId, ghostAddress: this.ghostAddress });
     return new Promise((resolve, reject) => {
@@ -2010,14 +1945,8 @@ class GMPBridgeConnector {
   }
 
   /**
-   * Turn a Ghost Address into a NodeID.
-   *
-   * A peer that just came online may not have reached us yet — topology
-   * announcements propagate in about a second through a shared public peer,
-   * but only once both sides are actually up. So a "not-found" is retried for
-   * a while before it is believed; that turns the common "I pasted the code
-   * before my friend finished launching" case into a short wait instead of an
-   * error the user has to react to.
+   * Turn a Ghost Address into a NodeID, retrying "not-found" for a while in
+   * case the peer is still starting up.
    */
   async resolveAddress(address, { timeoutMs = 20000, onProgress = null } = {}) {
     const normalized = normalizeGhostAddress(address);
@@ -2049,10 +1978,8 @@ class GMPBridgeConnector {
   }
 
   /**
-   * Open a session with a peer by NodeID — no address, no port.
-   *
-   * Dialling someone deliberately is consent, so this is where a previous
-   * force-removal is lifted. Inbound connections never lift it.
+   * Open a session with a peer by NodeID. Dialling deliberately lifts a
+   * previous force-removal; inbound connections never do.
    */
   async connectToNode(nodeId) {
     this.unblockPeer(nodeId);
@@ -2064,11 +1991,7 @@ class GMPBridgeConnector {
     return result;
   }
 
-  /**
-   * Re-establish every peer session we had, after the bridge socket comes back.
-   * Runs quietly in the background: the user is not asked to do anything and
-   * is not told anything unless it ultimately fails.
-   */
+  /** Quietly re-establish every known peer session after the bridge returns. */
   _restoreSessions() {
     for (const peer of loadKnownPeers()) {
       if (this._blocked.has(peer.nodeId)) continue;
@@ -2077,11 +2000,7 @@ class GMPBridgeConnector {
     }
   }
 
-  /**
-   * Keep trying to bring a peer back, with a backoff that tops out at 30s and
-   * then keeps going indefinitely. A peer that is simply offline will be picked
-   * up automatically whenever it returns.
-   */
+  /** Retry a peer indefinitely with backoff capped at 30s. */
   _scheduleRedial(nodeId, attempt = null) {
     if (this._destroyed || this._blocked.has(nodeId)) return;
     if (this._redialTimers.has(nodeId)) return;
@@ -2262,18 +2181,21 @@ class GMPBridgeConnector {
             if (window.setSignalingAvailable) window.setSignalingAvailable(true);
             // Bring back whatever we were talking to before the socket dropped.
             this._restoreSessions();
+            // Store-and-forward: whose channels to poll, then poll now.
+            this.setMailboxContacts(loadKnownPeers().map((p) => p.nodeId));
+            this.pollMailbox('foreground');
+            this._installMailboxTriggers();
           } else if (msg.type === 'peer-connected') {
             if (this._blocked.has(msg.nodeId)) return;
             this._cancelRedial(msg.nodeId);
             rememberKnownPeer(msg.nodeId);
+            this.setMailboxContacts(loadKnownPeers().map((p) => p.nodeId));
             this.meshConns[msg.nodeId] = { connId: msg.nodeId }; // mock
-            this._announceConnected(msg.nodeId, { mode: 'Ghost Mesh' });
+            this._announceConnected(msg.nodeId, { mode: meshModeLabel(msg.transport) });
           } else if (msg.type === 'bootstrap-complete' || msg.type === 'bootstrap-failed') {
             this.meshBootstrapped = msg.type === 'bootstrap-complete';
-            // reason/attempts come from BootstrapManager.diagnose(). They are what
-            // let the UI tell "nothing configured" from "configured but the host
-            // never answered" from "answered but would not shake hands" — three
-            // different fixes that used to share one message.
+            // reason/attempts come from BootstrapManager.diagnose() and select
+            // the matching troubleshooting message.
             this.emit('mesh-status', {
               bootstrapped: this.meshBootstrapped,
               peersConnected: msg.peersConnected || 0,
@@ -2282,6 +2204,14 @@ class GMPBridgeConnector {
               peersFile: msg.peersFile || null,
               attempts: Array.isArray(msg.attempts) ? msg.attempts : []
             });
+          } else if (msg.type === 'sf-stored' || msg.type === 'sf-delivered' || msg.type === 'sf-expired' || msg.type === 'sf-failed') {
+            // Store-and-forward state for one message. Each comes from
+            // the protocol — the storage host's ACK, the recipient's receipt,
+            // the TTL passing, a refusal — never from a timer on this side.
+            const state = { 'sf-stored': 'stored', 'sf-delivered': 'delivered', 'sf-expired': 'expired', 'sf-failed': 'failed' }[msg.type];
+            if (msg.localId) this.emit('sf-state', { localId: msg.localId, state, reason: msg.message || null, code: msg.code || null });
+          } else if (msg.type === 'storage-status') {
+            this.emit('storage-status', { host: msg.host || null, separation: msg.separation || 'none', selfHosted: !!msg.selfHosted, pending: msg.pending || 0 });
           } else if (msg.type === 'external-address') {
             // What a public peer says this node looks like from outside, learned
             // over BINDING_REQUEST. Worth keeping even when it matches the local
@@ -2319,11 +2249,8 @@ class GMPBridgeConnector {
             if (window.setBridgeReachable) window.setBridgeReachable(false);
           }
           this._rejectAllRequests('Ghost Mesh bridge disconnected');
-          // Every peer reachable only through the bridge is gone with the
-          // socket. Retire them before announcing the signaling loss, otherwise
-          // they stay "online" in the UI and their stale _announced entries
-          // suppress peer-connected on the next bridge session. Peers holding an
-          // open direct data channel are unaffected.
+          // Retire bridge-only peers with the socket before announcing the loss,
+          // so they do not stay "online". Direct data channels are unaffected.
           Object.keys(this.meshConns).forEach((peerId) => {
             delete this.meshConns[peerId];
             if (this._isPeerLive(peerId)) return;
@@ -2363,11 +2290,8 @@ class GMPBridgeConnector {
   }
 
   /**
-   * Bring the bridge socket back after it drops, forever, with backoff capped
-   * at 15s. There is no "reconnect" button anywhere in the UI by design: the
-   * transport looking after itself is the whole point of a mesh, and the peer
-   * sessions on top of it are restored by _restoreSessions once 'started'
-   * arrives again.
+   * Reconnect the bridge socket indefinitely, backoff capped at 15s. Sessions
+   * are restored by _restoreSessions on 'started'.
    */
   _scheduleReconnect() {
     if (this._destroyed || !this._shouldReconnect) return;
@@ -2402,6 +2326,45 @@ class GMPBridgeConnector {
       payload
     }));
     return true;
+  }
+
+  /**
+   * Deposit a sealed message for an offline peer on its mailbox.
+   * The answer arrives as an 'sf-state' event for localId: 'stored' once
+   * the storage host acknowledged it, 'delivered' only when the recipient's
+   * receipt comes back, 'failed' / 'expired' otherwise.
+   */
+  sendStored(peerId, localId, dataObj) {
+    if (this._blocked.has(peerId) || !this.wsOpen) return false;
+    this.ws.send(JSON.stringify({
+      type: 'sf-send',
+      localId,
+      destinationNodeId: peerId,
+      payload: typeof dataObj === 'string' ? dataObj : JSON.stringify(dataObj)
+    }));
+    return true;
+  }
+
+  pollMailbox(reason) {
+    if (this.wsOpen) this.ws.send(JSON.stringify({ type: 'sf-poll', reason }));
+  }
+
+  setMailboxContacts(nodeIds) {
+    if (this.wsOpen) this.ws.send(JSON.stringify({ type: 'sf-contacts', nodeIds }));
+  }
+
+  // Poll on app foreground and on network change; the node polls on
+  // its own jittered interval besides. Installed once per connector.
+  _installMailboxTriggers() {
+    if (this._mailboxTriggers || typeof document === 'undefined') return;
+    const onVisible = () => { if (document.visibilityState === 'visible') this.pollMailbox('foreground'); };
+    const onOnline = () => this.pollMailbox('network');
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    this._mailboxTriggers = () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+    };
   }
 
   sendOnChannel(peerId, channelName, dataObj) {
@@ -2469,9 +2432,8 @@ class GMPBridgeConnector {
   }
 
   /**
-   * Lift the block set by removePeer(). Deliberate, local action only — never
-   * call this from an unsolicited remote event, or a removed peer could
-   * reinstate itself simply by reconnecting.
+   * Lift the block set by removePeer(). Local, deliberate action only — never
+   * from a remote event.
    */
   unblockPeer(peerId) {
     setPeerBlocked(peerId, false);
@@ -2479,11 +2441,7 @@ class GMPBridgeConnector {
     return this._blocked.delete(peerId);
   }
 
-  /**
-   * Ends the bridge session deliberately. Direct data channels survive this,
-   * and so does the automatic reconnect being switched OFF — an explicit
-   * disconnect is the one case where the socket staying down is the intent.
-   */
+  /** End the bridge session deliberately; auto-reconnect is switched off. */
   disconnect() {
     this._shouldReconnect = false;
     if (this._reconnectTimer) {
@@ -2500,11 +2458,7 @@ class GMPBridgeConnector {
     this._announced.clear();
   }
 
-  /**
-   * Full teardown for when this connector is being replaced. disconnect() only
-   * ends the bridge session; without this the RTCPeerConnections, data channels
-   * and listeners stay alive and keep emitting into stale handlers.
-   */
+  /** Full teardown: connections, data channels and listeners. */
   destroy() {
     this._destroyed = true;
     this._shouldReconnect = false;
@@ -2532,15 +2486,11 @@ class GMPBridgeConnector {
   }
 
   /**
-   * Connect to whatever a code identifies. Three forms are accepted, in order
-   * of how a user is likely to arrive at them:
+   * Connect to whatever a code identifies:
    *
-   *   GHOST-XXX-XXX-XXX  a Ghost Address — resolved through the mesh, works
-   *                      from anywhere, and is the only form the UI produces.
+   *   GHOST-XXX-XXX-XXX  a Ghost Address, resolved through the mesh.
    *   <128 hex chars>    a full NodeID, for the rare address collision.
-   *   GHOST-a-b-c-d-port a legacy LAN code from an older build. Kept only so
-   *                      that codes already sitting in someone's chat history
-   *                      still work; nothing generates these any more.
+   *   GHOST-a-b-c-d-port a legacy LAN code (accepted, never generated).
    *
    * Returns the connected peer's NodeID.
    */
@@ -2582,12 +2532,8 @@ class GMPBridgeConnector {
     const address = parts.slice(0, -1).join('.');
     if (!address || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return null;
-    // What comes back here is handed straight to the bridge as a `connect`
-    // target, so a code is not merely a string to parse — it is somewhere the
-    // bridge will dial out to. Without this, GHOST-127-0-0-1-2375 makes the
-    // bridge probe its own loopback, and a public quad makes it dial the
-    // internet on the sender's behalf. Only the private LAN ranges this code
-    // format was ever meant to carry are accepted.
+    // The address becomes a bridge dial target, so only private LAN ranges
+    // are accepted.
     const octets = address.split('.').map(Number);
     if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
     const [a, b] = octets;
@@ -2607,14 +2553,8 @@ class GMPBridgeConnector {
   }
 }
 
-// SECURITY NOTE: These are real production wallet addresses. Any 
-// change to this file must be reviewed carefully — 
-// a typo or unauthorized edit here could redirect 
-// real user payments. Consider moving these to an 
-// environment variable or config file for production 
-// rather than hardcoding, so they aren't exposed in 
-// client-side source and can be rotated without a 
-// code deployment.
+// SECURITY: real production wallet addresses. Review every change here;
+// a typo redirects real payments.
 const PAYMENT_WALLETS = {
   BTC: 'bc1qgj37vvzv2p3tyu566paffyu85thtseh6xfz5n2',
   ETH: '0x840b7Bf6d5A809611eD08855a2b2180A2EB1DB56',
@@ -2658,12 +2598,8 @@ function GhostLinkApp() {
   const [chainValid, setChainValid] = useState(true);
 
   // ---- Self-destruct ----
-  // An expiry is an erasure, on both peers. The sender arms it when composing,
-  // the receiver when a block arrives carrying meta.selfDestruct — previously
-  // only the sender did, so the copy that mattered was the one that never
-  // expired. The body is dropped from the message list *and* from the chain, so
-  // it leaves the vault and the exported JSON too; the persist effects then seal
-  // the erased version over the old one.
+  // Expiry erases the body on both peers (sender when composing, receiver from
+  // meta.selfDestruct), from the message list and the chain alike.
   const selfDestructTimersRef = useRef(new Map());
 
   const destroyMessageNow = useCallback(async (blockHash) => {
@@ -2739,6 +2675,7 @@ function GhostLinkApp() {
   // { bootstrapped, peersConnected } once the node has tried to reach the
   // wider mesh. Drives the "internet peers unreachable" notice.
   const [meshStatus, setMeshStatus] = useState(null);
+  const [storageStatus, setStorageStatus] = useState(null);
   const [copied, setCopied] = useState(false);
   const [showBlockInfo, setShowBlockInfo] = useState(null);
   const [showChainExplorer, setShowChainExplorer] = useState(false);
@@ -3080,20 +3017,9 @@ function GhostLinkApp() {
   }, []);
 
   // ---- NodeID ⇄ identity fingerprint ----
-  // Two different namespaces meet here. The transport addresses peers by GMP
-  // NodeID: that is what `peerId` is in every connector event, and the only
-  // thing GMPBridgeConnector.sendMessage can route to. Workspaces address
-  // members by identity fingerprint, because a workspace roster has to survive
-  // the member reconnecting on a new node. Using one where the other is
-  // expected fails silently in both directions — sends go nowhere, and every
-  // membership check comes back "non-member".
-  //
-  // The link between them is the peer's public key: fingerprint =
-  // fingerprintFromPublicKey(pinned key). That makes the mapping exactly as
-  // authenticated as the key itself — trust-on-first-use, pinned against
-  // change, and upgraded to real assurance by the safety-number ceremony.
-  // A peer cannot claim a fingerprint it does not hold the private key for
-  // without also breaking the sealed envelope every payload rides in.
+  // The transport addresses peers by GMP NodeID (`peerId`); workspaces address
+  // members by identity fingerprint. The link is the peer's pinned public key:
+  // fingerprint = fingerprintFromPublicKey(pinned key).
   const peerIdentityMapRef = useRef({ byNode: new Map(), byFingerprint: new Map() });
 
   useEffect(() => {
@@ -3124,12 +3050,8 @@ function GhostLinkApp() {
   const nodeIdForMember = useCallback((memberFingerprint) =>
   peerIdentityMapRef.current.byFingerprint.get(memberFingerprint) || null, []);
 
-  // Call signaling carries SDP and ICE candidates — local and reflexive IP
-  // addresses, plus who is calling whom. GMPBridgeConnector.sendMessage falls
-  // back to the bridge (and from there to mesh forwarding) whenever no direct
-  // data channel is open, so it rides the same sealed envelope as chat instead
-  // of going out in the clear. peerId is always the transport peer ID: the
-  // sender-declared `from` in a payload is never used for routing.
+  // Call signaling (SDP, ICE candidates) rides the same sealed envelope as
+  // chat. Always routed by transport peerId, never by a payload's `from`.
   const sendCallSignal = useCallback(async (peerId, payload) => {
     const conn = p2pConnectorRef.current;
     if (!conn || !conn.isConnected(peerId)) return false;
@@ -3158,16 +3080,9 @@ function GhostLinkApp() {
     window.seedPhrase = seedPhrase;
   }, [setConnectionMode, setSignalingConnected, setSignalingAvailable, setBridgeReachable, setView, seedPhrase]);
 
-  // Message history at rest. vaultEpoch bumps on unlock to re-run hydration;
-  // historyHydratedRef gates the persist effects so they can never seal empty
-  // state over history that has not been read back yet.
-  //
-  // Tracked per store, not as one flag. A store whose ciphertext failed to
-  // decrypt must stay read-only: its plaintext is gone from memory but the
-  // ciphertext is still on disk and may yet be recoverable (right phrase, a
-  // restored profile, a fixed bug). Letting the persist effects write the
-  // fallback `{}` / `[]` over it would destroy that permanently, and a single
-  // shared flag meant one store's failure opened the other's writes too.
+  // Message history at rest. vaultEpoch bumps on unlock to re-run hydration.
+  // Hydration is tracked per store: a store that failed to decrypt stays
+  // read-only so its ciphertext is never overwritten.
   const [vaultEpoch, setVaultEpoch] = useState(0);
   const historyHydratedRef = useRef({ messages: false, chain: false });
   const lockedNoticeShownRef = useRef(false);
@@ -3185,11 +3100,8 @@ function GhostLinkApp() {
     return ok;
   }, []);
 
-  // Ghost Mesh (Yggdrasil) dialling exists only on P2PConnector; the GMP bridge
-  // reaches peers through its own address/port `connect` command and has no
-  // equivalent. Calling it blindly threw a TypeError that surfaced as a
-  // signaling failure during startup, and as an unhandled throw from the peer
-  // list. Every mesh dial goes through here.
+  // Only P2PConnector supports Ghost Mesh (Yggdrasil) dialling; every mesh
+  // dial checks here first.
   const meshDialSupported = useCallback((conn) =>
   !!conn && typeof conn.connectToMeshPeer === 'function', []);
 
@@ -3331,7 +3243,7 @@ function GhostLinkApp() {
   useEffect(() => {
     if (!crypto?.subtle) return;
     ensureLicenseSystem().then(() => {
-      console.log('[GhostLink] License system ready');
+      console.debug('[GhostLink] License system ready');
     }).catch((err) => {
       console.error('[GhostLink] License system init failed:', err);
     });
@@ -3470,11 +3382,8 @@ function GhostLinkApp() {
             const plaintext = await CryptoEngine.decrypt(block.encrypted, key);
             decrypted[block.ts || block.index] = plaintext;
 
-            // Opportunistic migration off the pre-KDF format. Reading a chain
-            // is the only moment we hold both the key and the plaintext, so
-            // this is where v1 blocks get rewritten under HKDF. It does not
-            // change the block hash — only the sealed representation of
-            // content that is already part of the chain.
+            // Rewrite v1 (pre-KDF) blocks under HKDF while we hold the key and
+            // plaintext. The block hash does not change.
             if (CryptoEngine.isLegacyCiphertext(block.encrypted)) {
               block.encrypted = await CryptoEngine.encrypt(plaintext, key);
               upgraded++;
@@ -3490,7 +3399,7 @@ function GhostLinkApp() {
       if (upgraded > 0) {
         try {
           await window.GLLicenseRuntime?.workspaceManager?.persist?.();
-          console.log(`[CryptoEngine] Re-sealed ${upgraded} legacy block(s) under HKDF.`);
+          console.debug(`[CryptoEngine] Re-sealed ${upgraded} legacy block(s) under HKDF.`);
         } catch (e) {
           // The in-memory blocks are upgraded either way; the next write persists them.
           console.warn('[CryptoEngine] Could not persist re-sealed blocks:', e.message);
@@ -3572,27 +3481,10 @@ function GhostLinkApp() {
         setInviteWordsInput('');
         addToast(`Joined workspace ${res.workspace.name}`, 'success');
 
-        // No roster broadcast from here.
-        //
-        // A joining member cannot authorize its own membership. Receivers only
-        // honour workspace-sync from a current owner or admin of that
-        // workspace, and a peer that has just joined is in neither role — nor
-        // in the receiver's roster at all — so a `new-member` announcement sent
-        // from here was rejected by every recipient. It looked like the roster
-        // propagated; it never did.
-        //
-        // Forwarding the invite as proof would not help: createInvite's
-        // "signature" is an unkeyed SHA-256 of workspaceId:inviterId:timestamp
-        // and _verifyInviteSignature only checks that the field is non-empty
-        // and recent, so anyone could mint one. Making this work needs an
-        // invite that binds the recipient and is signed by a key the inviter
-        // provably holds — and the identity keypair is ECDH P-256, derive-only,
-        // so it cannot sign anything today. That is a design change, not a
-        // patch, and inventing a weaker scheme here would hand out workspace
-        // membership on an unverifiable claim.
-        //
-        // Until then the join is local, and the user is told so rather than
-        // being left to assume the rest of the workspace can see them.
+        // No roster broadcast: receivers only accept workspace-sync from an
+        // owner/admin, and invites are not cryptographically bound to the
+        // recipient (the ECDH identity key cannot sign). The join is local
+        // and the user is told so.
         addToast(
           `Existing members will not see you in ${res.workspace.name} until an owner or admin adds you`,
           'info'
@@ -4060,16 +3952,9 @@ function GhostLinkApp() {
             if (!target) return;
             setMessageReactions((prev) => applyInboundReaction(prev, target.hash, reaction.emoji, peerId));
           } else if (msg.type === 'call-offer' || msg.type === 'call-answer' || msg.type === 'call-ice' || msg.type === 'call-end') {
-            // Every call signal is sealed to us and routed by the transport peer
-            // ID. A payload's own `from` is sender-declared — under the GMP
-            // bridge it is a fingerprint while the transport speaks NodeIDs, so
-            // trusting it both misroutes replies and lets any connected peer
-            // inject an answer or ICE candidate into someone else's call.
-            //
-            // call-end carries no SDP, but it still has to be sealed: what it
-            // needs is authenticity, not secrecy. ?bridge= lets a remote bridge
-            // route this session's traffic, and an unsealed teardown attributed
-            // to the call's own peer ID is one that bridge can forge at will.
+            // Call signals must be sealed and are routed by transport peer ID;
+            // a payload's `from` is never trusted. call-end is sealed too, for
+            // authenticity.
             if (!msg.sealed) {
               console.warn('[call] rejected unsealed call signal from', peerId);
               addToast('Rejected an unencrypted call signal from a peer running an older build', 'warning');
@@ -4184,14 +4069,9 @@ function GhostLinkApp() {
             if (ns && ns.workspaceManager) {
               const ws = ns.workspaceManager.getWorkspace(wsId);
               if (ws) {
-                // AUTHORIZATION GATE — workspace-sync mutates the member roster,
-                // deletes workspaces and swaps the workspace encryption key, so it
-                // must never be honoured just because a peer is connected.
-                // The sender is identified by the transport peer id (not by any
-                // self-declared field in the payload), mapped to the identity
-                // fingerprint the roster is keyed by, and must be a current
-                // owner/admin of this workspace. Comparing the raw NodeID against
-                // member ids never matched, so every control message was dropped.
+                // AUTHORIZATION GATE — workspace-sync mutates the roster, deletes
+                // workspaces and swaps keys. The sender (by transport peer id,
+                // mapped to a fingerprint) must be a current owner/admin.
                 const senderFingerprint = identityForPeer(peerId);
                 if (!senderFingerprint) {
                   console.warn('[workspace-sync] rejected: no pinned identity for transport peer', peerId);
@@ -4254,8 +4134,7 @@ function GhostLinkApp() {
       try {
         if (connect) await conn.connect();
 
-        // Wire GhostLinkDebug. The bridge socket is `conn.ws`; this used to
-        // test `conn._ws`, which nothing sets, so the debug console never saw it.
+        // Wire GhostLinkDebug. The bridge socket is `conn.ws`.
         if (window.GhostLinkDebug) {
           window.GhostLinkDebug.setConnectionManager(conn);
           window.GhostLinkDebug.setSignalManager({
@@ -4319,7 +4198,7 @@ function GhostLinkApp() {
             if (localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron) {
               const mp = meshPeersCache[pid];
               if (mp && mp.yggdrasilAddress) {
-                console.log(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress}`);
+                console.debug(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress}`);
                 dialMeshPeer(conn, pid, mp.yggdrasilAddress);
               }
             }
@@ -4345,7 +4224,7 @@ function GhostLinkApp() {
           if (localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron) {
             const mp = meshPeersCache[pid];
             if (mp && mp.yggdrasilAddress) {
-              console.log(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress} (signaling down)`);
+              console.debug(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress} (signaling down)`);
               dialMeshPeer(conn, pid, mp.yggdrasilAddress);
             }
           }
@@ -4355,18 +4234,8 @@ function GhostLinkApp() {
       return;
     };
 
-    // Initialize P2P peer manager (supports GMP bridge and WebRTC fallback)
-    // Bring up the Ghost Mesh transport. There is one connector now.
-    //
-    // This used to be a ladder: GMP bridge, else a Python relay, else a
-    // "WebRTC serverless" connector whose only usable feature was the manual
-    // SDP paste. Each rung silently changed what an invite code looked like,
-    // which is how a two-second bridge timeout ended up handing people a wall
-    // of base64 instead of an address. The ladder is gone.
-    //
-    // The mesh is the transport, and if it is not up yet we wait for it rather
-    // than degrading into something else: GMPBridgeConnector reconnects on its
-    // own, indefinitely, and restores every peer session when it comes back.
+    // Bring up the Ghost Mesh transport. If it is not up yet we wait;
+    // GMPBridgeConnector reconnects indefinitely and restores sessions.
     let initP2PAttempts = 0;
     const initP2P = async () => {
       if (cancelled) return;
@@ -4392,6 +4261,21 @@ function GhostLinkApp() {
         if (nodeId) setMeshNodeId(nodeId);
       });
       bridgeConn.on('mesh-status', (status) => setMeshStatus(status));
+      bridgeConn.on('storage-status', (status) => setStorageStatus(status));
+      bridgeConn.on('sf-state', ({ localId, state, reason }) => {
+        setMessages((prev) => {
+          const next = {};
+          for (const [k, convo] of Object.entries(prev)) {
+            next[k] = convo.map((m) => {
+              if (m.hash !== localId) return m;
+              if (state === 'failed') return { ...m, deliveryState: undefined, sendFailed: true, sendFailedReason: `Not stored: ${reason || 'the mailbox refused it'}` };
+              return { ...m, deliveryState: state };
+            });
+          }
+          return next;
+        });
+        if (state === 'failed') addToast(`Not stored: ${reason || 'the mailbox refused it'}`, 'error');
+      });
 
       // Publish the connector before awaiting: the socket may take a while on a
       // cold start, and everything else (invite screen, send paths) needs to be
@@ -4411,7 +4295,7 @@ function GhostLinkApp() {
         await bridgeConn.connect();
         if (cancelled) {try {bridgeConn.destroy();} catch (e) {}return;}
         setSignalingAvailable(true);
-        console.log('[GMP] Ghost Mesh transport established.');
+        console.debug('[GMP] Ghost Mesh transport established.');
       } catch (e) {
         if (cancelled) {try {bridgeConn.destroy();} catch (err) {}return;}
         // Not a failure state the user has to act on — connect() has already
@@ -4522,16 +4406,8 @@ function GhostLinkApp() {
   };
 
   /**
-   * First-run handshake with the mesh: hand the node its seed and wait for it
-   * to come up.
-   *
-   * This retries instead of failing on the first refused socket. The mesh is
-   * now launched alongside the app (by the Python server, or by Electron), so
-   * a refused connection here almost always means "started half a second ago,
-   * still binding" rather than "not installed" — and identity derivation is
-   * two rounds of 100k-iteration PBKDF2 before it can listen. Giving up after
-   * one attempt sent people to a "bridge not found" screen for a node that was
-   * seconds from being ready.
+   * First-run setup: hand the node its seed and wait for it to come up,
+   * retrying refused connections while the freshly launched node binds.
    */
   const attemptGmpSetup = async (seed) => {
     setGmpSetupStatus("connecting");
@@ -4596,7 +4472,7 @@ function GhostLinkApp() {
         setView("main");
         return;
       }
-      console.log(`[GMP Setup] Mesh not up yet (attempt ${attempt}), retrying...`);
+      console.debug(`[GMP Setup] Mesh not up yet (attempt ${attempt}), retrying...`);
       await new Promise((r) => setTimeout(r, 1500));
     }
 
@@ -4758,11 +4634,8 @@ function GhostLinkApp() {
     }
   };
 
-  // `target` pins the recipient explicitly: { peerId, convoKey }. Without it the
-  // message goes to whatever conversation is open, which is right for the
-  // composer but wrong for anything that runs later than the user's click — a
-  // queued file transfer flushing after they switched chats would otherwise
-  // attach its metadata to, and transmit it to, the wrong peer.
+  // `target` pins the recipient ({ peerId, convoKey }) for sends that happen
+  // after the user may have switched conversations.
   const sendMessage = async (content, type = "text", meta = {}, target = null) => {
     if (sending) return;
     if (!content?.trim() && type === "text") return;
@@ -4842,20 +4715,8 @@ function GhostLinkApp() {
 
       addToast(`Block #${block.index} attached to chain and verified`, 'success');
 
-      // Nothing is transmitted unless it can be sealed to the recipient's public
-      // key — the body never goes on the wire in plaintext, and never alongside a
-      // blob keyed by public data such as a fingerprint.
-      // Writing the block to the chain is not sending it. Every path out of
-      // here either transmits or marks the message failed — there is no third
-      // outcome, because a message that is neither is one the user believes
-      // they sent.
-      //
-      // There used to be a fourth: an `else if (offlineQueue)` branch holding
-      // the only handling for a disconnected peer. `offlineQueue` is state
-      // that nothing ever sets, so the branch was dead and there was no else —
-      // a message to an offline peer vanished after the user had already been
-      // shown "Block #N attached to chain and verified". The queue is gone;
-      // failure is now stated.
+      // Nothing is transmitted unless sealed to the recipient's public key.
+      // Every path out of here either transmits or marks the message failed.
       const markSendFailed = (reason) => {
         addToast(reason, 'error');
         setMessages((prev) => ({
@@ -4866,8 +4727,13 @@ function GhostLinkApp() {
         }));
       };
 
-      if (!conn || !dcConnected) {
-        markSendFailed('Not sent: this peer is offline. The message is saved on your chain and must be sent again once they reconnect.');
+      // An offline peer with the Ghost Mesh bridge up goes to its mailbox
+      //: sealed exactly as a live message, deposited, and marked
+      // 'storing' until the storage host acknowledges it. Without the bridge
+      // there is no mailbox, and the failure is stated.
+      const offline = !conn || !dcConnected;
+      if (offline && !(conn && conn.wsOpen && conn.sendStored)) {
+        markSendFailed('Not sent: this peer is offline and the Ghost Mesh bridge is not running, so there is no mailbox to leave it in.');
         return;
       }
 
@@ -4885,6 +4751,17 @@ function GhostLinkApp() {
       }
       if (!sealed) {
         markSendFailed('Not sent: no usable public key for this peer — reconnect or re-scan their invite');
+        return;
+      }
+
+      if (offline) {
+        setMessages((prev) => ({
+          ...prev,
+          [convoKey]: (prev[convoKey] || []).map((m) => m.hash === block.hash ? { ...m, deliveryState: 'storing' } : m)
+        }));
+        if (!conn.sendStored(peerId, block.hash, { type: 'queued-message', sender: identity.name, sealed, blockHash: block.hash })) {
+          markSendFailed('Not sent: the Ghost Mesh bridge dropped before the message could be stored.');
+        }
         return;
       }
 
@@ -4996,7 +4873,7 @@ function GhostLinkApp() {
       addToast('Image sent', 'success');
     } catch (e) {
       console.error('sendImage error:', e);
-      addToast('Failed to send image', 'error');
+      addToast('Could not send the image — check your connection and try again', 'error');
     }
   };
 
@@ -5100,12 +4977,8 @@ function GhostLinkApp() {
     if (!confirm("CRITICAL: Delete identity and all data? You will lose access to this identity forever unless you have your seed phrase. Proceed?")) return;
     if (!confirm("FINAL WARNING: Your private key will be destroyed from this device. Are you absolutely sure?")) return;
 
-    // Clear all states — including what lives outside React. The chain and
-    // the two vault keys are plain objects: left alone, the chain kept every
-    // deleted block in memory and the still-unlocked vault sealed it straight
-    // back into localStorage on the next write, under the old key, attached to
-    // whatever identity was created next. The recovery phrase also stayed in
-    // window.seedPhrase, where the next bridge session would have sent it.
+    // Clear everything, including state outside React: the chain, the vault
+    // keys and window.seedPhrase.
     MessageVault.lock();
     LocalVault._key = null;
     historyHydratedRef.current = { messages: false, chain: false };
@@ -5150,10 +5023,8 @@ function GhostLinkApp() {
         return;
       }
 
-      // Get local media stream. A 'screen' call needs getDisplayMedia — the
-      // camera/mic path cannot produce a display surface, so asking it for one
-      // used to start a plain audio call that merely called itself screen
-      // sharing. Audio is captured alongside so the two sides can still talk.
+      // Get local media stream. A 'screen' call uses getDisplayMedia, with
+      // audio captured alongside.
       let localStream;
       let screenTrack = null;
       try {
@@ -5611,16 +5482,8 @@ function GhostLinkApp() {
   const qrInviteRef = useRef(null);
   const [qrSvgMarkup, setQrSvgMarkup] = useState(null);
 
-  // Produce this device's Ghost Address and show it. There is exactly one code
-  // format now: GHOST-XXX-XXX-XXX, derived from our GMP NodeID.
-  //
-  // It is not generated per invite and it is not single-use — it IS this
-  // identity, so it is the same code every time, on every device restored from
-  // the same recovery phrase. Nothing about it is tied to a network location,
-  // which is why the same code works on a LAN, on mobile data behind CGNAT, and
-  // between two continents. There is no SDP-paste fallback: if the mesh is not
-  // up yet we say so and keep waiting, because handing the user a wall of
-  // base64 to copy was never an answer.
+  // Show this identity's Ghost Address (GHOST-XXX-XXX-XXX). It is the same on
+  // every device restored from the phrase and is not tied to a location.
   const genInvite = async () => {
     setShowInvite(true);
     setInviteTab('create');
@@ -5690,28 +5553,10 @@ function GhostLinkApp() {
   };
   const copyInvite = () => {navigator.clipboard?.writeText(inviteCode);setCopied(true);setTimeout(() => setCopied(false), 2000);};
 
-  // NOTE: the manual (SDP offer/answer) signalling helpers used to live here —
-  // generateManualOffer / processManualOffer / processManualAnswer, plus the
-  // React state driving the copy-this-blob-to-your-peer UI. All of it is gone.
-  //
-  // It existed because there was no way to reach a peer who was neither on your
-  // LAN nor on a relay. There is now: a Ghost Address resolves through the mesh
-  // and connects over a routed circuit, from any network. Keeping a second,
-  // hand-driven path around would only mean users landing on it whenever the
-  // mesh took a moment longer than expected to come up — which is exactly how
-  // the base64 blob became the code people actually saw.
-
   /**
-   * Connect to a peer from their Ghost Address.
-   *
-   * Two steps, both handled by the connector: resolve the address to a NodeID
-   * using what the mesh has flooded to us, then open a routed circuit to it.
-   * Neither step needs an IP, so this behaves the same whether the peer is in
-   * the next room or on another continent.
-   *
-   * The resolve retries for ~20s rather than failing immediately, because the
-   * overwhelmingly common failure is that the other side simply has not
-   * finished launching yet.
+   * Connect to a peer from their Ghost Address: resolve it to a NodeID through
+   * the mesh (retrying ~20s while the peer starts up), then open a routed
+   * circuit.
    */
   const joinPeer = async (code) => {
     const raw = (code || '').trim();
@@ -5777,12 +5622,8 @@ function GhostLinkApp() {
     return url;
   };
 
-  // The relay hands us the far side's fingerprint and key as plain claims, and
-  // the fingerprint becomes the peer's id for this session. It must be the
-  // fingerprint of the key it arrived with, and must not take over a peer
-  // that is already connected — otherwise a stranger in the room could
-  // register itself under an existing contact's id and its messages would be
-  // filed in that contact's conversation.
+  // A relayed claim's fingerprint must match the key it arrived with and must
+  // not take over an already-connected peer.
   const quickPeerClaimAcceptable = async (conn, data) => {
     const key = typeof data.pubKeyHex === 'string' ? data.pubKeyHex.trim().toLowerCase() : '';
     if (!PINNABLE_KEY.test(key) || typeof data.fingerprint !== 'string') return false;
@@ -5841,12 +5682,12 @@ function GhostLinkApp() {
 
     ws.onerror = (err) => {
       console.error('Relay WebSocket error:', err);
-      addToast('Relay connection error', 'error');
+      addToast('Lost the connection to the signaling relay — check the relay URL in Settings and try again', 'error');
       setQuickSignalStep('failed');
     };
 
     ws.onclose = () => {
-      console.log("Relay connection closed");
+      console.debug("Relay connection closed");
     };
 
     ws.onmessage = async (evt) => {
@@ -6020,12 +5861,12 @@ function GhostLinkApp() {
 
     ws.onerror = (err) => {
       console.error('Relay WebSocket error:', err);
-      addToast('Relay connection error', 'error');
+      addToast('Lost the connection to the signaling relay — check the relay URL in Settings and try again', 'error');
       setQuickSignalStep('failed');
     };
 
     ws.onclose = () => {
-      console.log("Relay connection closed");
+      console.debug("Relay connection closed");
     };
 
     ws.onmessage = async (evt) => {
@@ -6170,15 +6011,8 @@ function GhostLinkApp() {
   // ═══════════════════════════════════════════════════════════════
 
   // ---- TURN Server Config ----
-  // A TURN username/credential is a reusable capability to relay traffic through
-  // someone's server. localStorage is readable by any script that gets into the
-  // page and by anything that can read the browser profile off disk, so only the
-  // non-secret part of the config is persisted. Sealing it locally would be
-  // theatre: the at-rest key (LocalVault) lives in the same localStorage, so
-  // anyone able to read one can read the other.
-  //
-  // Credentials therefore live in memory for the session and have to be re-entered
-  // after a reload — or, better, issued short-lived by the TURN server.
+  // Only the non-secret part is persisted. Credentials live in memory for the
+  // session and are re-entered after a reload.
   useEffect(() => {
     const saved = localStorage.getItem('gl_turn_servers');
     if (saved) {
@@ -6211,11 +6045,8 @@ function GhostLinkApp() {
   };
 
   // ---- Contact Verification Ceremony (Safety Numbers) ----
-  // Safety number over both public keys. This is the value users read aloud to
-  // detect a man-in-the-middle, so it must be a cryptographic digest: the
-  // previous version folded the keys into a 32-bit JS string hash (and then
-  // zero-padded it to 25 chars, so most of what was displayed was padding).
-  // SHA-256 over the sorted key pair, shown as 160 bits in 10 groups of 4 hex.
+  // SHA-256 over the sorted public-key pair, shown as 160 bits in 10 groups of
+  // 4 hex.
   const generateSafetyNumber = async (peerPubKeyHex, myPubKeyHex) => {
     const sorted = [String(peerPubKeyHex), String(myPubKeyHex)].sort();
     const material = new TextEncoder().encode('ghostlink-safety-number-v1|' + sorted.join('|'));
@@ -6285,11 +6116,8 @@ function GhostLinkApp() {
     });
     setShowReactionPicker(null);
 
-    // Send reaction via P2P, inside the same sealed envelope as chat. A
-    // reaction names the emoji *and* the hash of the message it points at, so
-    // in the clear it leaks who is talking about what — and peerManager is the
-    // GMP bridge connector, whose sendMessage falls back to the bridge
-    // WebSocket whenever no direct data channel is open.
+    // Reactions are sealed like chat: in the clear they leak who is talking
+    // about what.
     const peerId = peers.find((p) => p.id === activeConvo)?.fingerprint || String(activeConvo);
     if (peerManager) {
       (async () => {
@@ -6321,11 +6149,8 @@ function GhostLinkApp() {
     filter((r) => r.count > 0);
   };
 
-  // Incoming reactions are handled by the unified `conn.on('message')` handler
-  // in the P2P effect, which unseals them and rejects unsealed ones. peerManager
-  // *is* that connector, so a second listener here would be a parallel path that
-  // still accepted plaintext reactions — exactly what sealing them is meant to
-  // stop. Do not reintroduce one.
+  // Incoming reactions are unsealed by the conn.on('message') handler in the
+  // P2P effect; do not add a second, plaintext-accepting listener.
 
   // ---- Voice Messages with Waveform ----
   const startRecording = async () => {
@@ -6412,7 +6237,7 @@ function GhostLinkApp() {
                   type: 'chat', sealed: await sealPayload(payload, peerPubKey)
                 });
               }
-            } catch (e) {console.error('Voice send failed:', e);addToast('Voice send failed', 'error');}
+            } catch (e) {console.error('Voice send failed:', e);addToast('Voice message could not be sent — check your connection and try again', 'error');}
           } else {
             // No offline queue exists, so this is the whole of the offline
             // story: the recording is kept locally and the user is told it
@@ -6534,15 +6359,6 @@ function GhostLinkApp() {
     }
   }, []);
 
-  // The "security audit log" that used to live here kept the last 100 events
-  // in React state. Nothing rendered it, nothing persisted it, and it was
-  // discarded on reload — so it was a record no one could read. Every event it
-  // captured is already surfaced where it happens: a rejected recovery
-  // fragment warns to the console and raises a toast, and call start/answer
-  // are visible in the call UI. Removed rather than left looking like an
-  // audit trail. If one is wanted, it needs somewhere to be read and somewhere
-  // to be stored, which is a feature, not a variable.
-
   // ---- Fragment Distribution via P2P ----
   const guardianRecoveryAvailable = window.GhostLink?.Capabilities?.GUARDIAN_RECOVERY_AVAILABLE === true;
   const guardianRecoveryReason = window.GhostLink?.Capabilities?.GUARDIAN_RECOVERY_UNAVAILABLE_REASON ||
@@ -6558,19 +6374,8 @@ function GhostLinkApp() {
     if (!peerManager) return;
     const peer = peers.find((p) => p.id === peerId || p.fingerprint === peerId);
 
-    // Recovery fragments are the highest-value secret in the app: any three of
-    // them reconstruct the backup blob, which carries the wrapped private key
-    // plus plaintext messages, contacts, settings and chain. They must never
-    // touch a transport in the clear — GMPBridgeConnector.sendMessage falls back
-    // to the bridge WebSocket whenever no direct data channel is open.
-    //
-    // Sealing alone is not enough, for two reasons:
-    //
-    //   1. A trust-on-first-use key is whatever key arrived first. Handing a
-    //      share of the master key to an unverified key means handing it to
-    //      whoever won that race, so the safety number must have been compared.
-    //   2. The threshold is 3, so a peer holding three shares holds the backup —
-    //      identity, messages, contacts, chain. One share per recipient.
+    // Recovery fragments (any three rebuild the backup) go only to verified
+    // peers, sealed, one share per recipient.
     if (!peer || !isPeerVerified(peer)) {
       addToast('Verify this contact’s safety number before trusting them with a recovery fragment', 'error');
       return;
@@ -6610,7 +6415,7 @@ function GhostLinkApp() {
       addToast(`Fragment ${fragment.id} sent to ${peer?.name || peerId}`, 'success');
     } catch (e) {
       console.error('Fragment send failed:', e);
-      addToast('Failed to send fragment', 'error');
+      addToast('Recovery fragment could not be sent — check the connection to that peer and try again', 'error');
     }
   };
 
@@ -6677,11 +6482,7 @@ function GhostLinkApp() {
 
   // ── End of Planned Feature Implementations ──
 
-  // One palette, one theme. The phantom / crimson / arctic / void / stealth /
-  // carbon / ink variants are gone, along with the picker that switched between
-  // them: this palette IS the product's identity, so there is nothing to choose
-  // and nothing to persist. `th` keeps the old key names purely so the hundreds
-  // of call sites below did not all have to be rewritten by hand.
+  // The single app palette. `th` keeps legacy key names used throughout.
   const th = {
     bg: PALETTE.obsidian,          // app background
     bg2: PALETTE.graphite,         // elevated: icon rail, inputs, small buttons
@@ -6696,10 +6497,7 @@ function GhostLinkApp() {
   };
 
   // ==================== ONBOARDING DESIGN TOKENS ====================
-  // These were a cream-and-peach light theme. The keys are kept — the splash,
-  // onboarding and login screens reference them in ~150 places — but every
-  // value now resolves to the one dark palette, so `cream` is the app
-  // background and `ink` is the text sitting on it, not the other way round.
+  // Legacy key names (cream, ink, ...) mapped onto the dark palette.
   const ink = {
     cream: PALETTE.obsidian,
     creamDark: PALETTE.slate,
@@ -6948,7 +6746,7 @@ function GhostLinkApp() {
             <div style=${{ animation: "blobFloat 4s ease-in-out infinite, wobble 6s ease-in-out infinite", marginBottom: 24, marginTop: 60 }}>
               <${I} t="ghost" s=${100} c=${PALETTE.spectral} />
             </div>
-            <div style=${{ fontSize: 42, fontWeight: 900, letterSpacing: 4, color: ink.ink, marginBottom: 8, fontFamily: ink.font.primary }}>GHOSTLINK</div>
+            <h1 style=${{ fontSize: 42, fontWeight: 900, letterSpacing: 4, color: ink.ink, margin: "0 0 8px 0", fontFamily: ink.font.primary }}>GHOSTLINK</h1>
             <div style=${{ fontSize: 14, color: ink.inkLight, letterSpacing: 2, marginBottom: 40, opacity: 0.7 }}>P2P · Encrypted · Private</div>
             <div style=${{ display: "flex", gap: 8, alignItems: "center" }}>
               ${[0, 1, 2, 3].map((i) => html`<div key=${i} style=${{
@@ -7184,15 +6982,9 @@ function GhostLinkApp() {
   const buyWalletAddress = buyAddresses[buyWalletKey] || 'YOUR_WALLET_ADDRESS_HERE';
 
   // ── PAYMENT QUOTE (intentionally unset) ──────────────────────────────────
-  // This previously derived the crypto amount from hardcoded rates
-  // (BTC=$65,000, ETH=$3,500, …) and presented the result as the exact amount to
-  // send. Any market movement made that figure wrong, so users would under- or
-  // overpay real money. The amount step is gated until a server-issued quote is
-  // available.
-  //
-  // To re-enable: fetch a quote binding { coin, amount, address, expiresAt },
-  // verify its signature, and assign it to buyQuote below. buyQuoteReady already
-  // checks that the quote matches the selected coin/address and has not expired.
+  // The amount step stays gated until a server-issued quote exists. To enable:
+  // fetch a quote { coin, amount, address, expiresAt }, verify its signature,
+  // and assign it to buyQuote; buyQuoteReady checks coin, address and expiry.
   const buyQuote = null;
   const buyQuoteReady = !!(
   buyQuote &&
@@ -7694,6 +7486,7 @@ function GhostLinkApp() {
                               <span>#${msg.index}</span>
                               <span style=${{ color: th.accent, fontSize: 8, fontFamily: "monospace" }}>${msg.hash?.slice(0, 8)}</span>
                               ${msg.sendFailed && html`<span style=${{ color: PALETTE.crimson, fontWeight: 600 }} title=${msg.sendFailedReason || 'This message was written to your chain but never transmitted.'}>not sent</span>`}
+                              ${!msg.sendFailed && msg.deliveryState && html`<span style=${{ color: msg.deliveryState === 'delivered' ? th.accent : msg.deliveryState === 'expired' ? PALETTE.crimson : PALETTE.amber, fontWeight: 600 }} title=${SF_STATE_TITLES[msg.deliveryState] || ''}>${SF_STATE_LABELS[msg.deliveryState] || ''}</span>`}
                               ${msg.meta?.selfDestruct && html`<${I} t="timer" s=${9} c=PALETTE.amber />`}
                               ${pinnedMsgs.find((m) => m.index === msg.index) && html`<${I} t="pin" s=${9} c=${th.accent2} />`}
                               
@@ -8741,10 +8534,10 @@ inviteTab === "create" ? html`<>
         addToast('License activated! Pro features unlocked.', 'success');
         if (ns.featureGate) await ns.featureGate.refresh();
       } else {
-        setLicenseError(result?.error || ns.licenseManager.formatError?.(result?.errorCode) || 'Activation failed');
+        setLicenseError(result?.error || ns.licenseManager.formatError?.(result?.errorCode) || 'License activation failed — check the key and try again');
       }
     } catch (err) {
-      setLicenseError('Error: ' + err.message);
+      setLicenseError('License activation failed: ' + err.message);
     } finally {
       // Every exit from the try — including the early return when the license
       // runtime is missing — has to release the button.
@@ -8817,6 +8610,15 @@ inviteTab === "create" ? html`<>
                       ${/* "connecting" forever is what a missing bridge used to look like here. */''}
                       Connection: ${bridgeReachable === false ? 'Bridge not running' : (connectionMode || 'Offline')}
                     </div>
+                    ${connectionMode === MESH_TRANSPORT_LABELS['relayed-unseparated'] && html`<div style=${{ marginTop: 2, fontSize: 9, color: PALETTE.amber }}>
+                      ${RELAYED_UNSEPARATED_EXPLANATION}
+                    </div>`}
+                    ${storageStatus && storageStatus.separation === 'unseparated' && html`<div title=${STORAGE_UNSEPARATED_EXPLANATION} style=${{ marginTop: 2, fontSize: 9, color: PALETTE.amber }}>
+                      ${STORAGE_UNSEPARATED_LABEL} — ${STORAGE_UNSEPARATED_EXPLANATION}
+                    </div>`}
+                    ${storageStatus && storageStatus.separation === 'separated' && html`<div style=${{ marginTop: 2, fontSize: 9, color: th.textSecondary }}>
+                      Mailbox: ${storageStatus.selfHosted ? 'self-hosted' : 'separated'}${storageStatus.pending ? ` · ${storageStatus.pending} awaiting delivery` : ''}
+                    </div>`}
                     ${ghostAddress && html`<div onClick=${() => {navigator.clipboard?.writeText(ghostAddress);addToast('Ghost Address copied', 'success');}} title="Your short address on the mesh — click to copy" style=${{ marginTop: 6, fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1, color: th.accent, cursor: "pointer" }}>
                       ${ghostAddress}
                     </div>`}
@@ -9411,10 +9213,10 @@ inviteTab === "create" ? html`<>
           setLicenseError(res.error || 'Invalid key or fingerprint check failed');
         }
       } else {
-        setLicenseError('License validation system not loaded.');
+        setLicenseError('License system not loaded — refresh the page and try again.');
       }
     } catch (e) {
-      setLicenseError(e.message || 'Activation failed');
+      setLicenseError(e.message || 'License activation failed — check the key and try again');
     } finally {
       setLicenseActivating(false);
     }

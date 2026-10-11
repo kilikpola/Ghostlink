@@ -1,14 +1,5 @@
 /**
- * At-rest encryption: the KDF, and the v1 -> v2 migration.
- *
- * CryptoEngine.encrypt used to use the key string as AES material directly —
- * `key.padEnd(32, "0").slice(0, 32)` — which truncated it to 32 characters and
- * zero-padded anything shorter. It was labelled AES-256 but carried only
- * whatever entropy sat in those 32 characters; a passphrase would have become
- * a guessable key silently. v2 runs HKDF-SHA256 with a random per-message salt.
- *
- * The bar for the migration is absolute: every blob written by the old scheme
- * must still open. These tests pin both halves.
+ * At-rest encryption: the v2 HKDF-SHA256 KDF, and every v1 blob still opening.
  *
  * Run with: node test/at-rest-crypto.test.mjs
  */

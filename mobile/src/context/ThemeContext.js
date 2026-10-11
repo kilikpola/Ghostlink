@@ -14,17 +14,8 @@ import {useApp} from './AppContext';
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * The GhostLink palette — one set of tokens, shared with the web and PC
- * clients so the product looks like one product everywhere.
- *
- * These values are the web client's PALETTE (index.html), not the old mobile
- * "phantom" theme. Mobile previously shipped five palettes with a picker in
- * Settings; they are gone, and migration v3 drops whichever one a user had
- * chosen. There is nothing to choose now, so there is no picker.
- *
- * Names on the left are the mobile token names every screen already uses, so
- * this is a value change rather than a rename. The web's own names are noted
- * beside each.
+ * The GhostLink palette, shared with the web and PC clients (values from the
+ * web client's PALETTE in index.html; web names noted beside each).
  */
 const PALETTE = {
   name: 'GhostLink',
@@ -48,14 +39,7 @@ const PALETTE = {
   danger: '#FF5F6D',        // crimson   — danger, errors, end call
 };
 
-/**
- * Text scale.
- *
- * `fontSize` is the base size in points; everything else is derived from it so
- * that changing it moves the whole UI, chat bubbles included, rather than just
- * the Settings screen. It lives here because this is what components already
- * read from.
- */
+/** Text scale: `fontSize` is the base size in points; everything derives from it. */
 const FONT_SCALE = {
   small: 14,
   default: 16,
@@ -82,11 +66,8 @@ function ThemeProvider({children}) {
   }, [settings?.fontSize]);
 
   /**
-   * Scale a design size by the user's choice.
-   *
-   * Sizes throughout the app were written against a 16pt base, so this keeps
-   * their relative proportions while moving the whole scale. Rounded, because
-   * fractional text sizes render inconsistently across Android densities.
+   * Scale a design size (written against a 16pt base) by the user's choice,
+   * rounded for consistent rendering across densities.
    */
   const scale = useCallback(
     size => Math.round((size * fontSize) / DEFAULT_FONT_SIZE),
@@ -103,11 +84,7 @@ function ThemeProvider({children}) {
     [updateSettings],
   );
 
-  /**
-   * The user's size as a multiple of the 16pt base the app was written
-   * against. Components multiply their own sizes by this rather than each
-   * screen rewriting hundreds of literals.
-   */
+  /** The user's size as a multiple of the 16pt base. */
   const fontScale = fontSize / DEFAULT_FONT_SIZE;
 
   const value = useMemo(

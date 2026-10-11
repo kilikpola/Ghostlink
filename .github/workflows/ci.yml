@@ -75,6 +75,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The interop step builds a pinned older commit (git archive).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -88,6 +91,20 @@ jobs:
       - run: npm run install:gmp
       - run: npm run build:gmp
       - run: npm run build
+
+      # The test job skips the Electron download, so only this job has the
+      # binary: construct GMP nodes under Electron's bundled Node, which lags
+      # system Node (a module-loading break there shows at release otherwise).
+      - name: gmp-core under the Electron runtime
+        working-directory: gmp-core
+        run: node test/electron-runtime-test.js
+
+      # Wire interop with a PINNED older build (INTEROP_OLD_REF in the test:
+      # the deployed public peer's commit). Builds that commit's gmp-core from
+      # its own lockfile, then runs old<->new over real TCP.
+      - name: gmp-core old <-> new interop
+        working-directory: gmp-core
+        run: node test/interop-old-new.mjs
 
       # `npm run build:dir` is `electron-builder --dir` preceded by
       # scripts/prepare-packaging.cjs (stops electron-builder pruning the

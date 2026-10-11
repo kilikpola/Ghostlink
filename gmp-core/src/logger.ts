@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import config from './config.js';
 import type { LogLevel, LogMeta } from './types.js';
+import { containsSeedPhrase } from './seed-guard.js';
 
 const LEVELS: Record<LogLevel, number> = {
   TRACE: 0,
@@ -12,27 +13,45 @@ const LEVELS: Record<LogLevel, number> = {
   CRITICAL: 5,
 };
 
+export interface LoggerSettings {
+  level: LogLevel;
+  toFile: boolean;
+  toConsole: boolean;
+}
+
 class Logger {
   private logsDir: string;
+  /** The logger's own copy of its settings; change them with configure(). */
+  private settings: LoggerSettings;
 
-  constructor() {
+  constructor(settings: Partial<LoggerSettings> = {}) {
+    this.settings = {
+      level: config.GMP_LOG_LEVEL,
+      toFile: config.GMP_LOG_TO_FILE,
+      toConsole: config.GMP_LOG_TO_CONSOLE,
+      ...settings,
+    };
     this.logsDir = path.join(process.cwd(), 'gmp-core', 'data', 'logs');
+    this._ensureLogsDir();
+  }
+
+  configure(settings: Partial<LoggerSettings>): void {
+    this.settings = { ...this.settings, ...settings };
     this._ensureLogsDir();
   }
 
   private _ensureLogsDir(): void {
     try {
-      if (config.GMP_LOG_TO_FILE && !fs.existsSync(this.logsDir)) {
+      if (this.settings.toFile && !fs.existsSync(this.logsDir)) {
         fs.mkdirSync(this.logsDir, { recursive: true });
       }
     } catch {
-      config.GMP_LOG_TO_FILE = false;
+      this.settings.toFile = false;
     }
   }
 
   private _getLogLevelValue(): number {
-    const levelStr = (config.GMP_LOG_LEVEL || 'INFO').toUpperCase() as LogLevel;
-    return LEVELS[levelStr] ?? LEVELS.INFO;
+    return LEVELS[this.settings.level] ?? LEVELS.INFO;
   }
 
   private _sanitizeAddress(addr: string, level: LogLevel): string {
@@ -115,9 +134,14 @@ class Logger {
       logObj.meta = cleanMeta;
     }
 
-    const logLine = JSON.stringify(logObj);
+    let logLine = JSON.stringify(logObj);
+    // A secret that can be printed will eventually be printed:
+    // a line carrying a seed phrase is replaced, wherever in it the phrase is.
+    if (containsSeedPhrase(logLine, [process.env.GMP_SEED_PHRASE, config.GMP_SEED_PHRASE])) {
+      logLine = JSON.stringify({ ts, level, component, event: 'log-withheld', msg: `log line withheld: it contained a seed phrase (event ${event})` });
+    }
 
-    if (config.GMP_LOG_TO_CONSOLE) {
+    if (this.settings.toConsole) {
       if (level === 'ERROR' || level === 'CRITICAL') {
         console.error(logLine);
       } else if (level === 'WARN') {
@@ -127,7 +151,7 @@ class Logger {
       }
     }
 
-    if (config.GMP_LOG_TO_FILE) {
+    if (this.settings.toFile) {
       this._writeToLogFile(logLine);
     }
   }

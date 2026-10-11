@@ -1,23 +1,20 @@
 /**
  * GhostLink Mobile — identity recovery.
  *
- * Both restore paths funnel through one bundle shape and one unlock routine.
- * They used to be written separately and had drifted: the fragment path read
- * `blob.pubKeyHex` while setup wrote `publicKeyHex`, so it restored an identity
- * with an empty public key, and the phrase path ignored the stored key
- * altogether and minted a brand-new random identity — which looked like a
- * successful recovery while silently replacing the user's identity with one
- * none of their peers had ever seen.
- *
- * The private key is never stored unprotected. It lives wrapped in AES-256-GCM
- * under a key derived from the recovery phrase with PBKDF2, so the phrase is
- * what unlocks it, and the GCM tag is what proves the phrase was right.
+ * Both restore paths share one bundle shape and one unlock routine. The
+ * private key is stored wrapped in AES-256-GCM under a PBKDF2 key derived from
+ * the recovery phrase; the GCM tag proves the phrase was right.
  */
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import {storage} from './storage';
 import {CryptoEngine, combineFragments} from './crypto';
+import {legacySha256} from './legacy-hash';
 
 export const RECOVERY_BUNDLE_VERSION = 1;
 export const BUNDLE_STORAGE_KEY = 'gl_recovery_bundle';
+/**
+ * Retired key that held all fragments together. Never written; sealed if an
+ * older build left it, and deleted by the legacy migration below.
+ */
 export const FRAGMENTS_STORAGE_KEY = 'gl_shamir_fragments';
 export const RECOVERY_TAG_PREFIX = 'ghostlink:recovery:';
 
@@ -39,10 +36,7 @@ function fail(code, message) {
   return err;
 }
 
-/**
- * The object stored on device and split into Shamir fragments. One shape for
- * both, so the two restore paths cannot disagree about field names again.
- */
+/** The object stored on device and split into Shamir fragments. */
 export function createRecoveryBundle({wrappedKey, publicKeyHex, name, ghostAddress}) {
   return {
     v: RECOVERY_BUNDLE_VERSION,
@@ -66,13 +60,8 @@ export async function wrapIdentity({privateKeyRaw, publicKeyHex, name, ghostAddr
 }
 
 /**
- * Turn a bundle plus a phrase back into a usable identity.
- *
- * A wrong phrase derives a different AES key, the GCM tag fails to verify, and
- * decrypt throws — that is the phrase check, and it costs an attacker a full
- * PBKDF2 run per guess. (Setup used to also store a bare SHA-256 of the phrase
- * beside the wrapped key, which let anyone with the device test guesses at one
- * cheap hash each and made the 100,000 PBKDF2 iterations pointless. It is gone.)
+ * Turn a bundle plus a phrase back into a usable identity. A wrong phrase fails
+ * the GCM tag, costing an attacker a full PBKDF2 run per guess.
  */
 export async function unlockBundle(bundle, words) {
   if (!bundle || !bundle.wrappedKey || !bundle.wrappedKey.iv || !bundle.wrappedKey.ciphertext) {
@@ -116,21 +105,9 @@ export async function unlockBundle(bundle, words) {
 }
 
 /**
- * The lookup key peers store a backup under, and the one a recovering device
- * asks for. Both sides derive it from the recovery phrase, which is the only
- * thing a blank device has.
- *
- * It is deliberately not the phrase itself and not a cheap hash of it. The
- * phrase would travel the network as a plaintext lookup key; a fast hash would
- * let anyone who saw a tag guess phrases at one hash apiece, undoing the
- * 100,000 PBKDF2 iterations exactly the way the old stored seed hash did.
- * Deriving through the PBKDF2 key means recovering the phrase from a tag costs
- * the same as attacking the wrapped key directly, so the tag adds no new
- * weakness. The prefix keeps it domain-separated from the key itself.
- *
- * Deriving the identity's public key instead would not work here: the device
- * doing the recovering has no identity yet — that is what it is recovering —
- * so every blank device would ask for the same constant tag.
+ * The lookup key peers store a backup under, derived from the phrase through
+ * the PBKDF2 key (with a domain-separating prefix), so a tag is no cheaper to
+ * attack than the wrapped key. A blank device has only the phrase to go on.
  */
 export async function deriveRecoveryTag(words) {
   const key = await CryptoEngine.deriveKeyFromSeed(words);
@@ -139,11 +116,11 @@ export async function deriveRecoveryTag(words) {
 }
 
 export async function saveRecoveryBundle(bundle) {
-  await AsyncStorage.setItem(BUNDLE_STORAGE_KEY, JSON.stringify(bundle));
+  await storage.setItem(BUNDLE_STORAGE_KEY, JSON.stringify(bundle));
 }
 
 export async function loadRecoveryBundle() {
-  const raw = await AsyncStorage.getItem(BUNDLE_STORAGE_KEY);
+  const raw = await storage.getItem(BUNDLE_STORAGE_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -169,7 +146,7 @@ export async function restoreFromPhrase(words) {
 }
 
 /**
- * New-device restore: 3 of the 7 fragments rebuild the bundle, then the phrase
+ * New-device restore: 3 of the fragments (5 by default) rebuild the bundle, then the phrase
  * unlocks it. Both are required — fragments alone carry only the wrapped key,
  * and the phrase alone has nothing on a fresh device to unwrap.
  */
@@ -194,4 +171,115 @@ export async function restoreFromFragments(fragmentHexes, words) {
   }));
   await CryptoEngine.storeKeyPair(identity.publicKeyHex, identity.privateKeyRaw);
   return identity;
+}
+
+// ─── Legacy recovery copies: delete only what nobody needs ────────
+
+/**
+ * Legacy recovery data from older builds (stored fragments; on 0.0.0-0.0.2 a
+ * wrapped key and phrase check). Sealed at upgrade and deleted here only once
+ * a modern bundle for the current identity exists, is rebuilt from the
+ * fragments, or is written after the user confirms the phrase.
+ */
+export const LEGACY_RECOVERY_KEYS = ['gl_shamir_fragments', 'gl_wrapped_privkey', 'gl_seed_check'];
+
+async function presentLegacyKeys() {
+  const present = [];
+  for (const k of LEGACY_RECOVERY_KEYS) if ((await storage.getItem(k)) != null) present.push(k);
+  return present;
+}
+
+async function deleteLegacy() {
+  for (const k of LEGACY_RECOVERY_KEYS) await storage.removeItem(k);
+}
+
+/** A modern bundle that belongs to the identity whose key is in the keychain. */
+function bundleMatches(bundle, keyPair) {
+  return !!(bundle && bundle.v && bundle.wrappedKey && bundle.wrappedKey.iv && bundle.wrappedKey.ciphertext
+    && keyPair && bundle.publicKeyHex === keyPair.publicKeyHex);
+}
+
+/**
+ * Run at every start (AppContext). Returns
+ *   {state: 'none'}                     nothing legacy on the device
+ *   {state: 'resolved', how, deleted}   deleted, because nothing depends on it
+ *   {state: 'needs-phrase', present}    kept; ask the user to confirm the phrase
+ */
+export async function assessLegacyRecovery() {
+  const present = await presentLegacyKeys();
+  if (present.length === 0) return {state: 'none'};
+  const keyPair = await CryptoEngine.loadKeyPair();
+
+  if (bundleMatches(await loadRecoveryBundle(), keyPair)) {
+    await deleteLegacy();
+    return {state: 'resolved', how: 'modern-bundle-present', deleted: present};
+  }
+
+  // No usable bundle here: do the stored fragments rebuild one?
+  const rawFragments = await storage.getItem('gl_shamir_fragments');
+  if (rawFragments) {
+    try {
+      const hexes = JSON.parse(rawFragments).map((f) => f.data);
+      const combined = combineFragments(hexes.slice(0, 3));
+      if (combined.success && bundleMatches(combined.blob, keyPair)) {
+        await saveRecoveryBundle(createRecoveryBundle(combined.blob));
+        if (bundleMatches(await loadRecoveryBundle(), keyPair)) {
+          await deleteLegacy();
+          return {state: 'resolved', how: 'bundle-restored-from-fragments', deleted: present};
+        }
+      }
+    } catch (_e) {
+      // unreadable fragments: fall through, and keep everything
+    }
+  }
+  return {state: 'needs-phrase', present};
+}
+
+/**
+ * The user has (re)recorded their recovery phrase and entered it. Verify it
+ * really is this identity's phrase, make sure a modern bundle wrapped under it
+ * exists, and only then delete the legacy copies.
+ *
+ * Verified by any of: the phrase re-derives the identity key (0.0.3 and
+ * later); it unlocks the modern bundle; it matches the 0.0.x phrase check.
+ * A wrong phrase deletes nothing.
+ */
+export async function finishLegacyMigration(words, {name = '', ghostAddress = ''} = {}) {
+  const keyPair = await CryptoEngine.loadKeyPair();
+  if (!keyPair || !keyPair.privateKeyRaw) {
+    throw fail(RecoveryError.NO_LOCAL_BUNDLE,
+      'The identity key is not in the keychain, so there is nothing to re-wrap. The older recovery data has been kept.');
+  }
+  const phrase = Array.isArray(words) ? words.join(' ') : String(words);
+
+  let verified = false;
+  try {
+    const derived = await CryptoEngine.deriveIdentityKeyPair(words);
+    verified = derived.publicKeyHex === keyPair.publicKeyHex;
+  } catch (_e) { /* not a phrase-derived identity */ }
+  if (!verified) {
+    const bundle = await loadRecoveryBundle();
+    if (bundle) {
+      try { verified = (await unlockBundle(bundle, words)).publicKeyHex === keyPair.publicKeyHex; } catch (_e) { /* wrong phrase or old format */ }
+    }
+  }
+  if (!verified) {
+    const check = await storage.getItem('gl_seed_check');
+    if (check) verified = (await legacySha256(phrase)) === check;
+  }
+  if (!verified) {
+    throw fail(RecoveryError.WRONG_PHRASE, 'That is not this identity\'s recovery phrase. Nothing was deleted.');
+  }
+
+  const bundle = await wrapIdentity(
+    {privateKeyRaw: keyPair.privateKeyRaw, publicKeyHex: keyPair.publicKeyHex, name, ghostAddress},
+    words,
+  );
+  await saveRecoveryBundle(bundle);
+  if (!bundleMatches(await loadRecoveryBundle(), keyPair)) {
+    throw fail(RecoveryError.MALFORMED_BUNDLE, 'The new recovery bundle did not save. The older recovery data has been kept.');
+  }
+  const present = await presentLegacyKeys();
+  await deleteLegacy();
+  return {deleted: present};
 }

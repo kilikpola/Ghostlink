@@ -1,4 +1,7 @@
 import type net from 'net';
+import type { GMPTransport, GMPConnection } from './transport/transport.js';
+import type { EventEmitter } from 'events';
+import type { GMPLinkEvents, GMPNodeEvents } from './events.js';
 
 // ── Message Types ──────────────────────────────────
 
@@ -28,6 +31,11 @@ export interface NodeKeypair {
 }
 
 export interface NodeIdentity {
+  /**
+   * A relay hop identity: used for one connection, never stored or reused.
+   * Its nonce state stays in memory.
+   */
+  ephemeral?: boolean;
   seed: Uint8Array;
   staticPrivKey: Uint8Array;
   staticPubKey: Uint8Array;
@@ -121,11 +129,7 @@ export interface PeerResponsePayload {
 
 export interface KeyRotationPayload {
   oldNodeId: string;
-  /**
-   * Hex, not bytes. rotateKey() sets this from signingPubKeyHex, the verifier
-   * concatenates it into the signed message as a string, and PeerCache stores
-   * it as a string. It was declared Uint8Array, which matched none of those.
-   */
+  /** Hex-encoded signing key. */
   newPublicKey: string;
   newNodeId: string;
   rotationTimestamp: number;
@@ -155,7 +159,15 @@ export interface CachedPeer {
   failureCount: number;
   /** Recorded on first contact; KeyRotationManager verifies rotations against it. */
   signingPubKey?: string;
+  /**
+   * Known only because it connected to us: kept for its signing key, with no
+   * address. Never dialled, never shared.
+   */
+  inbound?: boolean;
 }
+
+/** What a public host is for. */
+export type PeerRole = 'bootstrap' | 'relay' | 'storage';
 
 export interface PublicPeerEntry {
   address: string;
@@ -164,6 +176,12 @@ export interface PublicPeerEntry {
   nodeId: string;
   addedAt: number;
   lastVerified: number;
+  /** Absent in the file means ["bootstrap"]; always set after loadPublicPeers. */
+  roles: PeerRole[];
+  /** Who runs the host; separation is only claimed for a known, different operator. */
+  operator?: string;
+  /** Hosting provider (informational). */
+  provider?: string;
 }
 
 // ── NAT ─────────────────────────────────────────────
@@ -190,10 +208,19 @@ export interface GMPConfig {
   GMP_TIMESTAMP_WINDOW_MS: number;
   GMP_BOOTSTRAP_STAGE1_TIMEOUT_MS: number;
   GMP_BOOTSTRAP_STAGE2_TIMEOUT_MS: number;
+  GMP_BOOTSTRAP_LAN_TIMEOUT_MS: number;
+  GMP_BOOTSTRAP_PX_TIMEOUT_MS: number;
+  GMP_BOOTSTRAP_DIAL_TIMEOUT_MS: number;
+  GMP_BOOTSTRAP_DIAL_STAGGER_MS: number;
+  GMP_LAN_BOOTSTRAP_ANY: boolean;
   GMP_REBOOTSTRAP_BACKOFF_INITIAL_MS: number;
   GMP_RATE_LIMIT_WINDOW_MS: number;
-  GMP_RATE_LIMIT_MAX_PER_IP: number;
+  /** Global concurrent inbound connection cap. Provisional; see config-defaults.ts. */
   GMP_RATE_LIMIT_MAX_GLOBAL: number;
+  /** Per-address inbound connection token bucket: refill per minute. */
+  GMP_INBOUND_RATE_PER_MINUTE: number;
+  /** ...and its capacity. */
+  GMP_INBOUND_BURST: number;
   GMP_FORWARD_RATE_LIMIT_PER_SOURCE: number;
   GMP_PEER_REQUEST_RATE_LIMIT_INTERVAL_MS: number;
   GMP_SESSION_KEY_LRU_SIZE: number;
@@ -201,112 +228,141 @@ export interface GMPConfig {
   GMP_NONCE_PRUNE_AGE_MS: number;
   GMP_ROUTE_EXPIRY_MS: number;
   GMP_TOPOLOGY_TTL: number;
+  /** Own-edge signature validity; receivers drop older announces. */
+  GMP_TOPOLOGY_ANNOUNCE_VALIDITY_MS: number;
+  /** Most own edges / peer-exchange entries shown to one requester. */
+  GMP_TOPOLOGY_SAMPLE_SIZE: number;
+  /** How long a requester's sample stays fixed. */
+  GMP_TOPOLOGY_SAMPLE_EPOCH_MS: number;
+  /** Hops an on-demand route query may travel. */
+  GMP_ROUTE_QUERY_TTL: number;
   GMP_MESSAGE_HOP_LIMIT: number;
   GMP_REANNOUNCE_INTERVAL_MS: number;
   GMP_PEER_CACHE_MAX_SIZE: number;
   GMP_PEER_CACHE_PRUNE_FAILURE_THRESHOLD: number;
   GMP_PEER_CACHE_PRUNE_AGE_DAYS: number;
   GMP_METRICS_PORT: number;
+  /** Resource self-measurement interval to stdout; 0 = off. */
+  GMP_RESOURCE_LOG_INTERVAL_MS: number;
+  /** fd-pressure WARN threshold, as a fraction of the soft descriptor limit. */
+  GMP_FD_WARN_FRACTION: number;
+  /** Descriptors reserved below the soft limit when clamping the connection cap. */
+  GMP_FD_HEADROOM: number;
+  /** Interval of the accept-time refusal summary log line. */
+  GMP_REFUSAL_LOG_INTERVAL_MS: number;
   GMP_LOG_LEVEL: LogLevel;
   GMP_LOG_TO_FILE: boolean;
   GMP_LOG_TO_CONSOLE: boolean;
   /**
-   * Refuse to run on a state file that exists but cannot be authenticated,
-   * instead of discarding it and continuing. Off by default so a corrupt file
-   * does not brick a user's client; turn it on for public peers and anything
-   * unattended, where silently losing replay protection is the worse outcome.
+   * Refuse to run on a state file that cannot be authenticated instead of
+   * discarding it. Recommended for public peers and unattended nodes.
    */
   GMP_STRICT_STATE: boolean;
   GMP_BAN_DURATION_MS: number;
   GMP_REPUTATION_RECOVERY_INTERVAL_MS: number;
 
+  /** Run the relay tier on this node. Off by default; public peers opt in. */
+  GMP_RELAY_ENABLED: boolean;
+  /** Voucher lifetime; clients renew at 80% of it. */
+  GMP_RELAY_RESERVATION_TTL_MS: number;
+  GMP_RELAY_MAX_RESERVATIONS: number;
   /**
-   * Seed phrase the identity is derived from.
-   *
-   * Optional because it has no default and is not always configured: the CLI
-   * reads process.env.GMP_SEED_PHRASE first and prompts for one if neither is
-   * set. Note that loadConfig only copies keys present in DEFAULTS, so a
-   * GMP_SEED_PHRASE in a config file is currently dropped — the env variable
-   * and the constructor option are the paths that work.
+   * Concurrent reservations per source /24 (IPv6 /48). A ceiling, not the
+   * Sybil control: CGNAT puts hundreds of subscribers behind one address.
+   */
+  GMP_RELAY_MAX_RESERVATIONS_PER_SUBNET: number;
+  /** Anti-Sybil: new reservations per minute per /24 — token bucket refill rate. */
+  GMP_RELAY_RESERVATION_RATE_PER_MINUTE: number;
+  /** Token bucket capacity per /24: how many may arrive at once before the rate applies. */
+  GMP_RELAY_RESERVATION_BURST: number;
+  /** Concurrent relayed connections per reserving node. */
+  GMP_RELAY_MAX_CIRCUITS_PER_RESERVATION: number;
+  GMP_RELAY_MAX_CIRCUIT_BYTES: number;
+  GMP_RELAY_MAX_CIRCUIT_DURATION_MS: number;
+  GMP_RELAY_ROLE_OBSERVATION_MS: number;
+  GMP_STORAGE_ENABLED: boolean;
+  GMP_SF_TTL_MS: number;
+  GMP_SF_BUCKET_MAX_BLOBS: number;
+  GMP_SF_BUCKET_MAX_BYTES: number;
+  GMP_SF_FETCH_BUCKETS: number;
+  GMP_SF_FETCH_MAX_BLOBS: number;
+  GMP_SF_DEPOSIT_RATE_PER_MINUTE: number;
+  GMP_SF_DEPOSIT_BURST: number;
+  GMP_SF_POLL_INTERVAL_MS: number;
+  GMP_SF_STORAGE_PEER: string;
+  GMP_SF_DECOY_CHANNELS: number;
+  GMP_SF_CURSOR_QUANTUM_MS: number;
+
+  /** LAN discovery beacons. Unset means on; false turns them off. */
+  GMP_LAN_DISCOVERY?: boolean;
+  GMP_LAN_DISCOVERY_PORT?: number;
+  GMP_LAN_DISCOVERY_GROUP?: string;
+
+  /**
+   * Seed phrase the identity is derived from. Read from the env variable or
+   * constructor option only; loadConfig drops it from config files.
    */
   GMP_SEED_PHRASE?: string;
 }
 
 /**
- * What GMPNodeManager's constructor accepts: any config override, plus the two
- * shorthand names the bridge's 'start' message and the CLI actually send.
- * These are aliases resolved in start(), not config keys in their own right,
- * which is why they are not on GMPConfig.
+ * GMPNodeManager constructor options: config overrides plus the shorthand
+ * aliases the bridge and CLI send (resolved in start()).
  */
 export interface GMPNodeManagerOptions extends Partial<GMPConfig> {
   seedPhrase?: string;
   port?: number;
+  /** Transport implementation for the node (defaults to TCP). */
+  transport?: GMPTransport;
+  /** This node's state directory; defaults to GMP_DATA_DIR / paths.ts. */
+  dataDir?: string;
+  /** Accepted but not forwarded to the node (ARCHITECTURE_BASELINE.md §11). */
+  isPublicPeer?: boolean;
+  /** Forwarded to GMPNode: no bootstrap dialling (a self-hosted storage peer needs none). */
+  disableBootstrap?: boolean;
+  /** Run the store-and-forward client (default true; a storage peer has no mailbox of its own). */
+  storeForward?: boolean;
 }
 
 /**
- * The option bag GMPNodeManager hands to GMPNode.
- *
- * Only seven of these are read by GMPNode's constructor: port, minPeers,
- * pingIntervalMs, pongTimeoutMs, timestampWindowMs, noncePruneAgeMs and
- * seedPhrase. The other twenty-one are destructured nowhere and silently
- * dropped. They are not dead settings — the modules that consume them (rate
- * limiter, forwarder, peer cache, bootstrap, topology) import the shared config
- * module directly, so a value set through the environment or config.json does
- * take effect. What does NOT take effect is a per-instance override handed to
- * `new GMPNodeManager({...})`: it lands in this.config, gets forwarded here,
- * and GMPNode ignores it.
- *
- * They are kept in the call because they state the intended contract and start
- * working the moment GMPNode's constructor accepts them. Declaring the shape
- * here is what lets the compiler see the call instead of tripping over an
- * excess-property check on an untyped literal.
+ * What GMPNode's constructor reads. Individual options override single values
+ * from `config`.
  */
 export interface GMPNodeConstructorOptions {
+  /** Resolved configuration (loadConfig). Absent: built-in DEFAULTS. */
+  config?: GMPConfig;
+  /** This node's state directory. Absent: the process-wide paths.ts locations. */
+  dataDir?: string;
   port?: number;
+  seedPhrase?: string;
+  /** Injected transport; GMPNode defaults to TcpTransport when absent. */
+  transport?: GMPTransport;
   minPeers?: number;
-  maxPeers?: number;
-  maxConnections?: number;
-  helloTimeoutMs?: number;
-  handshakeTimeoutMs?: number;
   pingIntervalMs?: number;
   pongTimeoutMs?: number;
   timestampWindowMs?: number;
-  stage1TimeoutMs?: number;
-  stage2TimeoutMs?: number;
-  rebootstrapBackoffInitialMs?: number;
-  rateLimitWindowMs?: number;
-  rateLimitMaxPerIp?: number;
-  rateLimitMaxGlobal?: number;
-  forwardRateLimitPerSource?: number;
-  peerRequestRateLimitIntervalMs?: number;
-  sessionKeyLruSize?: number;
-  sequenceNumLruSize?: number;
   noncePruneAgeMs?: number;
-  routeExpiryMs?: number;
-  topologyTtl?: number;
-  messageHopLimit?: number;
-  reannounceIntervalMs?: number;
-  peerCacheMaxSize?: number;
-  peerCachePruneFailureThreshold?: number;
-  peerCachePruneAgeDays?: number;
-  seedPhrase?: string;
+  nonceStorePath?: string;
+  peerCachePath?: string;
+  publicPeersPath?: string;
+  announceIntervalMs?: number;
+  forwardRateLimitMax?: number;
+  forwardRateLimitWindowMs?: number;
+  reputationBanDurationMs?: number;
+  reputationRecoveryIntervalMs?: number;
+  lanDiscovery?: boolean;
+  lanDiscoveryPort?: number;
+  lanDiscoveryGroup?: string;
+  disableBootstrap?: boolean;
+  bootstrapParallelCount?: number;
+  isPublicPeer?: boolean;
 }
 
 // ── Structural views of the link.js runtime objects ──
 
 /**
- * GMPNode and GMPLink live in link.js and are untyped, so every protocol
- * manager that takes one in its constructor needs a structural contract for
- * it. Each manager used to declare that contract privately, holding just the
- * members it happened to touch — eleven private copies, and eleven chances to
- * drift apart. They had drifted: six copies typed `remoteNodeId` as `string`
- * when link.js assigns a Uint8Array, hole-punch's link copy carried the
- * *node's* dial methods, and nat-detector and public-peer-list broke outright
- * when one side of that pair changed.
- *
- * These are the canonical shapes, kept in step with link.js. A manager that
- * wants a narrower local contract should `Pick<>` from them rather than
- * restate them.
+ * Canonical structural contracts for the untyped GMPNode / GMPLink in link.js.
+ * Managers needing less should `Pick<>` from these.
  */
 export interface GMPLinkLike {
   state: string;
@@ -315,11 +371,19 @@ export interface GMPLinkLike {
   remoteNodeId: Uint8Array | null;
   /** The Ed25519 key the peer proved in the handshake (null until then). */
   remoteSigningPubkey?: Uint8Array | null;
-  socket: { remoteAddress?: string; remotePort?: number } | null;
+  remoteStaticPubkey?: Uint8Array | null;
+  socket: {
+    remoteAddress?: string;
+    remotePort?: number;
+    /** A relay circuit. */
+    isRelayed?: boolean;
+    /** For relay circuits: separated from the hosts knowing our identity or not. */
+    separation?: 'separated' | 'unseparated';
+  } | null;
   send(data: string): Promise<void>;
   destroy(error?: Error): void;
-  on(event: string, handler: (...args: unknown[]) => void): this;
-  once(event: string, handler: (...args: unknown[]) => void): this;
+  on: EventEmitter<GMPLinkEvents>['on'];
+  once: EventEmitter<GMPLinkEvents>['once'];
   sendBindingRequest(): void;
   sendRoutedDATA(
     finalDest: string | Uint8Array,
@@ -330,6 +394,9 @@ export interface GMPLinkLike {
   sendTopologyAnnounce(announce: TopologyAnnouncePayload): void;
   sendPeerRequest(maxPeers: number): void;
   sendPeerResponse(peers: PeerInfo[]): void;
+  /** On-demand route query / answer, carried in PEER_REQUEST / PEER_RESPONSE. */
+  sendRouteQuery(query: unknown): void;
+  sendRouteAnswer(answer: unknown): void;
   sendKeyRotation(cert: KeyRotationPayload, sequenceNumber: number, ttl: number): void;
   _penalizeSuspicious(reason: string): void;
   _penalizeUntrusted(reason: string): void;
@@ -346,21 +413,54 @@ export interface GMPNodeLike {
   routingTable: RoutingTableLike;
   peerCache: PeerCacheLike;
   bootstrap?: BootstrapLike;
+  /** The topology manager's keyed sampler, shared with peer exchange. */
+  topologyManager?: {
+    sampleSize: number;
+    pickSample<T>(link: GMPLinkLike, candidates: T[], idOf: (t: T) => string, size: number): T[];
+  };
+  /** LAN beacons (bootstrap rung 2); null when LAN discovery is off. */
+  lanDiscovery?: {
+    getNodeIds(): string[];
+    getPeer(nodeId: string): { nodeId: string; address: string; port: number } | null;
+    on(event: 'peer-discovered', fn: (p: { nodeId: string; address: string; port: number }) => void): unknown;
+    off(event: 'peer-discovered', fn: (p: { nodeId: string; address: string; port: number }) => void): unknown;
+  } | null;
+  /** Peer exchange (bootstrap rung 4). */
+  peerExchange?: { candidates(): Array<{ nodeId: string; address: string; port: number }> } | null;
   reputation?: ReputationManagerLike;
   getLinkByNodeId(nodeId: string | Uint8Array): GMPLinkLike | null;
-  dial(address: string, port?: number, options?: { tls?: boolean }): Promise<DialResult>;
+  dial(address: string, port?: number, options?: DialOptions): Promise<DialResult>;
   dialWithSocket(socket: net.Socket): Promise<DialResult>;
-  on(event: string, handler: (...args: unknown[]) => void): this;
-  off(event: string, handler: (...args: unknown[]) => void): this;
-  once(event: string, handler: (...args: unknown[]) => void): this;
-  emit(event: string, ...args: unknown[]): boolean;
+  /** Handshake over a connection the node's transport already made (hole punching, S1). */
+  dialWithConnection(connection: GMPConnection): Promise<DialResult>;
+  /** The node's transport. */
+  transport: GMPTransport;
+  /** Typed against GMPNodeEvents (events.ts): emit and on are checked. */
+  on: EventEmitter<GMPNodeEvents>['on'];
+  off: EventEmitter<GMPNodeEvents>['off'];
+  once: EventEmitter<GMPNodeEvents>['once'];
+  emit: EventEmitter<GMPNodeEvents>['emit'];
+}
+
+export interface DialOptions {
+  tls?: boolean;
+  /** Set when dialling public-peer infrastructure; records its operator. */
+  infrastructure?: { operator: string | null };
+  /**
+   * Hex NodeID expected at this address, if known. Used only for role
+   * separation before connecting.
+   */
+  nodeId?: string;
+  /** Abort the dial: an unfinished handshake is torn down and the dial rejects. */
+  signal?: AbortSignal;
 }
 
 /** What GMPNode.dial / dialWithSocket resolve to. */
 export interface DialResult {
   connId: string;
   link: GMPLinkLike;
-  peerNodeId: string;
+  /** The raw 64-byte NodeID (it was typed string; GMPNode resolves a Buffer). */
+  peerNodeId: Buffer;
 }
 
 export interface RouteLookup {
@@ -501,13 +601,8 @@ export interface OriginCheck {
 }
 
 /**
- * Thrown when a state file exists but cannot be authenticated and
- * GMP_STRICT_STATE says to refuse rather than discard it.
- *
- * It has its own type because the load() paths wrap everything in a broad
- * try/catch that logs and starts fresh — exactly the behaviour strict mode
- * exists to prevent — so that catch has to be able to recognise this and
- * rethrow instead of swallowing it.
+ * Thrown when GMP_STRICT_STATE refuses an unauthenticated state file. A distinct
+ * type so broad load() catches can rethrow it.
  */
 export class StateAuthenticationError extends Error {
   constructor(message: string) {

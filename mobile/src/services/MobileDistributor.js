@@ -6,7 +6,7 @@
  * adapted for mobile with local storage and P2P transport.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import {storage} from '../utils/storage';
 import RecoveryTransport from './RecoveryTransport';
 import {CryptoEngine} from '../utils/crypto';
 import {
@@ -36,7 +36,7 @@ class FragmentStore {
 
   async _load() {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEY);
+      const data = await storage.getItem(STORAGE_KEY);
       if (data) {
         const parsed = JSON.parse(data);
         for (const [key, value] of Object.entries(parsed)) {
@@ -53,7 +53,7 @@ class FragmentStore {
   async _persist() {
     try {
       const obj = Object.fromEntries(this._fragments);
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+      await storage.setItem(STORAGE_KEY, JSON.stringify(obj));
     } catch (e) {
       console.warn('[FragmentStore] Persist failed:', e);
     }

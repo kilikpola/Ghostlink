@@ -56,12 +56,6 @@
 
     /**
      * Gets the public key hex used to identify this device.
-     *
-     * This used to try a KeyManager first, reading a `_identityKey` property
-     * that KeyManager never had — so the branch always threw, always fell
-     * through, and the fallback below was the only path that ever ran.
-     * KeyManager has since been deleted; the fallback is now simply the
-     * implementation.
      * @returns {Promise<string>} Public key as hex string
      */
     async getPubKeyHex() {

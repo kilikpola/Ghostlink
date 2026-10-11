@@ -1,28 +1,12 @@
 /**
  * GhostLink Mobile — Restore an identity from its recovery phrase.
  *
- * Until this existed the phrase could not be entered anywhere: a user who
- * reinstalled or changed phones had written down twelve words that nothing
- * would accept.
+ * The phrase restores the Ghost Address and (for newer identities) the
+ * messaging keypair. Messages, files, contacts and settings do not come back;
+ * the screen says so before the user commits.
  *
- * WHAT COMES BACK, AND WHAT DOES NOT
- *
- * The phrase derives the identity — the Ghost Address and, for identities
- * created from this version onward, the messaging keypair — so contacts
- * recognise you. It does not bring back messages, files, contacts or settings:
- * those lived on the other device and there is no server holding a copy. The
- * screen says so before the user commits, rather than leaving them to discover
- * an empty app.
- *
- * ON VERIFICATION
- *
- * The wordlist is a curated 575-word list, not BIP-39, and carries no
- * checksum — so a phrase cannot be proved correct before deriving from it. A
- * typo that happens to land on another valid word simply produces a different
- * identity, silently. What stands in for a checksum is showing the resulting
- * Ghost Address and asking the user to confirm it is the one they expect. That
- * is also why a wrong phrase reveals nothing about whether an identity
- * "exists": every phrase derives something.
+ * The phrase has no checksum, so a typo landing on another valid word yields a
+ * different identity. The user confirms the resulting Ghost Address instead.
  */
 
 import React, {useCallback, useMemo, useRef, useState} from 'react';
@@ -122,16 +106,11 @@ export default function RestoreIdentityScreen({navigation}) {
     if (!preview || busy) return;
     setBusy(true);
     try {
-      // The key first: if the keystore refuses, nothing else should have
-      // happened yet. storeKeyPair throws on failure — it used to return false
-      // and be ignored, which let a restore report success while writing
-      // nothing.
+      // The key first: storeKeyPair throws if the keystore refuses, before
+      // anything else has changed.
       await CryptoEngine.storeKeyPair(preview.keyPair.publicKeyHex, preview.keyPair.privateKeyRaw);
 
-      // Then drop whatever the previous identity left here. Messages, peers
-      // and mesh state belong to whoever was on this device before; carrying
-      // them into a restored identity would show it history it never had.
-      // This screen already promises messages do not come back.
+      // Then drop data belonging to the previous identity.
       await clearIdentityScopedData();
 
       setIdentity({
@@ -295,11 +274,8 @@ export default function RestoreIdentityScreen({navigation}) {
           </Text>
         ) : validation.legacy.length > 0 ? (
           /*
-           * The phrase contains a word this app no longer generates. It is
-           * still a valid identity and restores normally — say so, because a
-           * word that autocomplete refuses to offer otherwise reads like a
-           * mistake at exactly the moment someone is worried about losing an
-           * account.
+           * A legacy word: still valid and restores normally. Say so, since
+           * autocomplete will not offer it.
            */
           <Text style={s.hint}>
             Recognised — this phrase is from an earlier version of GhostLink. It still works.

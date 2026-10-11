@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import config from './config.js';
+import type { NetworkHealthEvents } from './events.js';
+import { DEFAULTS } from './config-defaults.js';
 import logger from './logger.js';
 import type {
   HealthReport,
@@ -7,7 +8,7 @@ import type {
   GMPNodeLike,
 } from './types.js';
 
-export class NetworkHealthMonitor extends EventEmitter {
+export class NetworkHealthMonitor extends EventEmitter<NetworkHealthEvents> {
   private node: GMPNodeLike;
   private startTime: number;
   private metrics: HealthMetrics;
@@ -16,8 +17,10 @@ export class NetworkHealthMonitor extends EventEmitter {
   private ttlExpiredListener: () => void;
   private noRouteListener: () => void;
   private checkInterval: ReturnType<typeof setInterval> | null;
+  readonly checkIntervalMs: number;
 
-  constructor(node: GMPNodeLike) {
+  /** checkIntervalMs defaults to half the re-announce interval, as before. */
+  constructor(node: GMPNodeLike, options: { checkIntervalMs?: number } = {}) {
     super();
     this.node = node;
     this.startTime = Date.now();
@@ -49,7 +52,8 @@ export class NetworkHealthMonitor extends EventEmitter {
     this.node.on('ttl-expired', this.ttlExpiredListener);
     this.node.on('no-route', this.noRouteListener);
 
-    const intervalMs = config.GMP_REANNOUNCE_INTERVAL_MS ? (config.GMP_REANNOUNCE_INTERVAL_MS / 2) : 30000;
+    const intervalMs = options.checkIntervalMs || DEFAULTS.GMP_REANNOUNCE_INTERVAL_MS / 2;
+    this.checkIntervalMs = intervalMs;
     this.checkInterval = setInterval(() => {
       this.runHealthCheck();
     }, intervalMs);
@@ -75,7 +79,7 @@ export class NetworkHealthMonitor extends EventEmitter {
   runHealthCheck(): void {
     this.updatePeerCounts();
 
-    const minPeers = this.node.bootstrap ? this.node.bootstrap.minPeers : config.GMP_MIN_PEERS;
+    const minPeers = this.node.bootstrap ? this.node.bootstrap.minPeers : DEFAULTS.GMP_MIN_PEERS;
 
     if (this.metrics.currentPeerCount < minPeers && this.node.bootstrap && !this.node.bootstrap.isBootstrapping) {
       logger.info('health-monitor', 'check-trigger-bootstrap', `Low peer count (${this.metrics.currentPeerCount} < ${minPeers}). Initiating re-bootstrap.`);
@@ -109,7 +113,7 @@ export class NetworkHealthMonitor extends EventEmitter {
     this.metrics.uptimeSeconds = Math.floor((Date.now() - this.startTime) / 1000);
 
     let status: NodeHealthStatus = 'healthy';
-    const minPeers = this.node.bootstrap ? this.node.bootstrap.minPeers : config.GMP_MIN_PEERS;
+    const minPeers = this.node.bootstrap ? this.node.bootstrap.minPeers : DEFAULTS.GMP_MIN_PEERS;
 
     const now = Date.now();
     const cutoff = now - 5 * 60 * 1000;

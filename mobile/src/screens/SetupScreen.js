@@ -23,12 +23,11 @@ import Animated, {
   SlideInRight,
   SlideOutLeft,
 } from 'react-native-reanimated';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {useTheme} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
 import {useSecureScreenWhen} from '../utils/useSecureScreen';
-import {CryptoEngine, generateBackupFragments, generateSeedPhrase} from '../utils/crypto';
-import {wrapIdentity, saveRecoveryBundle, FRAGMENTS_STORAGE_KEY} from '../utils/recovery';
+import {CryptoEngine, generateSeedPhrase} from '../utils/crypto';
+import {wrapIdentity, saveRecoveryBundle} from '../utils/recovery';
 
 // ==================== BIP39 512-WORD LIST ====================
 // Same word list used by the GhostLink web app (index.html)
@@ -41,18 +40,11 @@ const STEPS = {
 };
 
 // Verification word positions (0-indexed): words 3, 7, 11
-/**
- * The steps of identity creation, in order, as the user sees them.
- *
- * Each one is a real unit of work, not decoration: three of them are PBKDF2
- * derivations. Naming them means a slow device shows which step it is on
- * rather than one unchanging spinner.
- */
+/** The steps of identity creation, shown one at a time (three are PBKDF2 runs). */
 const SETUP_STAGES = [
   'Deriving your identity key…',
   'Deriving your Ghost Address…',
   'Sealing your recovery bundle…',
-  'Splitting into recovery fragments…',
 ];
 
 const VERIFY_INDICES = [2, 6, 10];
@@ -72,16 +64,7 @@ export default function SetupScreen({navigation}) {
   const [confirmWords, setConfirmWords] = useState({2: '', 6: '', 10: ''});
   const [loading, setLoading] = useState(false);
   const [generatingFragments, setGeneratingFragments] = useState(false);
-  /**
-   * Which step of identity creation is running.
-   *
-   * The old progress box listed all three lines at once, statically. It also
-   * never actually appeared: identity derivation ran three 100k-iteration
-   * PBKDF2 passes on the JS thread, so nothing repainted for the minutes it
-   * took and the screen looked crashed. PBKDF2 is native now, but the steps
-   * are still reported one at a time — on a device without the native module
-   * this is the difference between "working" and "frozen".
-   */
+  /** Which step of identity creation is running. */
   const [stage, setStage] = useState(0);
 
   // Refs for confirm inputs
@@ -153,26 +136,14 @@ export default function SetupScreen({navigation}) {
     try {
       // Let the stage render before the first derivation starts.
       await new Promise(r => setTimeout(r, 0));
-      // 1. The ECDH P-256 keypair, derived from the recovery phrase.
-      //
-      //    This used to be CryptoEngine.generateKeyPair(), which draws a random
-      //    key. Only the Ghost Address came from the phrase, so writing the
-      //    phrase down protected the address and nothing else: restoring on a
-      //    new device produced a different messaging key, and every contact
-      //    holding the old public key could no longer seal anything.
-      //
-      //    Deriving it means the phrase genuinely restores the identity.
-      //    Identities created before this change keep their random key — it
-      //    cannot be re-derived — see MOBILE_BUILD.md.
+      // 1. The ECDH P-256 keypair, derived from the recovery phrase so the
+      //    phrase restores the identity (older random keys: see MOBILE_BUILD.md).
       const keyPair = await CryptoEngine.deriveIdentityKeyPair(seedPhrase);
       const fingerprint = await CryptoEngine.sha256(keyPair.publicKeyHex);
 
-      // 2. Wrap the private key under the phrase (AES-256-GCM envelope). The
-      //    same bundle is stored on device and split into fragments, so both
-      //    restore paths read the identical shape.
-      // The Ghost Mesh identity for this phrase. Derived here, once, and kept
-      // on the identity: it is what other people use to reach you, and the same
-      // phrase produces the same address on desktop and the web app.
+      // 2. Wrap the private key under the phrase (AES-256-GCM) and store the
+      //    sealed bundle. Fragments are made on demand in RecoveryScreen, never
+      //    stored. The Ghost Mesh identity is derived once and kept.
       setStage(2);
       const ghost = await CryptoEngine.deriveGhostIdentity(seedPhrase);
 
@@ -190,20 +161,10 @@ export default function SetupScreen({navigation}) {
       // 3. Store keypair securely in Keychain
       await CryptoEngine.storeKeyPair(keyPair.publicKeyHex, keyPair.privateKeyRaw);
 
-      // 4. Generate Shamir fragments (7 shares, threshold 3) of that bundle
-      setStage(4);
-      const fragments = generateBackupFragments(JSON.stringify(bundle));
-
-      // 5. Store fragments and the bundle
-      await AsyncStorage.setItem(FRAGMENTS_STORAGE_KEY, JSON.stringify(fragments));
+      // 4. Store the bundle
       await saveRecoveryBundle(bundle);
-      // No separate seed hash is written. A bare SHA-256 of the phrase beside
-      // the wrapped key would let anyone holding the device test guesses at one
-      // cheap hash apiece, which is exactly what the 100,000 PBKDF2 iterations
-      // exist to prevent. The GCM tag on the wrapped key is the phrase check.
-
-      // 6. Generate invite code
-      const inviteCode = CryptoEngine.genInvite();
+      // No separate seed hash is stored; the GCM tag on the wrapped key is the
+      // phrase check.
 
       // 7. Update app context
       const identity = {
@@ -213,37 +174,21 @@ export default function SetupScreen({navigation}) {
         ghostAddress: ghost.ghostAddress,
         meshNodeId: ghost.nodeIdHex,
         /**
-         * How this identity's messaging key was produced.
-         *
-         * 'phrase-v1' means the recovery phrase reproduces it. Its absence
-         * means the key was drawn at random before derivation existed, and the
-         * phrase restores the address but not the key. Recorded so the app can
-         * tell the user which of the two they have rather than guessing.
+         * 'phrase-v1': the recovery phrase reproduces the messaging key. Absent
+         * on older identities whose key was random.
          */
         keyDerivation: 'phrase-v1',
       };
 
-      // AppContext exposes intent-named helpers, not the raw dispatcher — this
-      // used to call dispatch(), which the context never provided, so setup
-      // always failed here with "undefined is not a function" after every
-      // expensive crypto step had already succeeded. Four of the five actions
-      // it dispatched (SET_SEED_PHRASE, SET_DISPLAY_NAME, SET_INVITE_CODE,
-      // COMPLETE_SETUP) are not in the reducer either, so they would have been
-      // silent no-ops even with a working dispatcher.
-      //
-      // The recovery phrase deliberately does not go into app state: identity
-      // is persisted to AsyncStorage, and a plaintext copy of the phrase there
-      // would undo the point of wrapping the key under it. The user was told to
-      // write it down, and the wrapped bundle is what recovery actually needs.
+      // The recovery phrase is deliberately kept out of app state (it would be
+      // persisted); the wrapped bundle is what recovery needs.
       setIdentity(identity);
-      await AsyncStorage.setItem('gl_invite_code', inviteCode);
+      // No invite code is stored: the Ghost Address replaced it,
+      // and the stored copy was never read.
 
       Vibration.vibrate(40);
 
-      // No navigation.reset here. MainNavigator renders the auth stack or the
-      // main stack purely on whether an identity exists, so setting it is what
-      // moves the user on — and 'Main' does not exist in the auth stack this
-      // screen belongs to, so resetting to it would throw.
+      // No navigation.reset: MainNavigator switches stacks once an identity exists.
     } catch (e) {
       // The message alone ("undefined is not a function") says nothing about
       // where it came from, and this path runs entirely on-device — so log the

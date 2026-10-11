@@ -9,29 +9,12 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * PBKDF2 in native code, off the JS thread.
+ * PBKDF2 in native code on a background pool, off the JS thread (pure-JS
+ * PBKDF2 takes minutes under Hermes).
  *
- * Identity derivation runs three 100,000-iteration PBKDF2 passes (two of them
- * HMAC-SHA512). In pure JS that is ~2.5s on desktop V8 and minutes under
- * Hermes on a real phone — JS has no 64-bit integers, so every SHA-512 round
- * is emulated with 32-bit pairs. @noble's async PBKDF2 yields every 10ms,
- * which keeps Android's watchdog happy but still pins the JS thread for the
- * whole run, so the UI is dead the entire time. That is the "frozen for four
- * minutes" setup screen.
- *
- * PBKDF2 is implemented here directly over javax.crypto.Mac rather than
- * through SecretKeyFactory/PBEKeySpec for two reasons:
- *
- *   - PBEKeySpec takes a char[], and how a provider turns those chars into
- *     bytes is not consistent across implementations. Doing it here means the
- *     password is explicitly the UTF-8 bytes of the phrase, which is exactly
- *     what @noble hashes. The derived key must be byte-identical or every
- *     existing identity on this device stops resolving.
- *   - PBKDF2WithHmacSHA512 via SecretKeyFactory is API 26+; Mac/HmacSHA512 has
- *     been available since API 1, and this app ships minSdk 24.
- *
- * Work runs on a small background pool, so the JS thread is free while it
- * happens and the screen can animate.
+ * Implemented over javax.crypto.Mac rather than SecretKeyFactory: the password
+ * is explicitly the phrase's UTF-8 bytes (output must match @noble byte for
+ * byte), and PBKDF2WithHmacSHA512 needs API 26 while minSdk is 24.
  */
 class Pbkdf2Module(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {

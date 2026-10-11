@@ -1,12 +1,7 @@
 /**
- * GMP Nonce Store Durability Tests
- *
- * claimSessionKey() gates whether a session key may be used at all. It used to
- * return success while the claim was still only in memory, with the write
- * deferred by up to a second — so a crash inside that window lost the claim,
- * and the next process accepted the same session key and reused the AES-GCM
- * nonce. These cover the three properties that fix depends on, plus the
- * throughput property it must not break.
+ * GMP Nonce Store Durability Tests: a claim is durable before success is
+ * reported, a failed write fails closed, partial writes never damage existing
+ * state, and throughput holds.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
@@ -47,13 +42,7 @@ function assertEqual(actual, expected, message) {
 
 const SEED = 'durability test seed phrase';
 const statePath = path.join(__dirname, 'data', 'temp-durability-nonce.json');
-// Claims now live in their own append-only log; the state JSON holds counters.
-/**
- * The claim log is named after the key that seals it, so that two identities
- * sharing a data directory do not write records into one file that neither can
- * fully read. Mirrors ClaimLog._scopePathToKey; prefer `store.claimsFile` where
- * a store is in scope.
- */
+/** The key-scoped claim log path (mirrors ClaimLog.scopedPath). */
 function claimsPathFor(stateFile, seed) {
   const key = crypto.pbkdf2Sync(seed, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
   const id = crypto.createHash('sha256').update('gmp-claim-log-id').update(key).digest('hex').slice(0, 16);
@@ -72,11 +61,8 @@ const tempFiles = () => {
 };
 
 /**
- * Make every write fail, without touching the state file.
- *
- * Holds the store's lock as a live process would. Acquisition then times out,
- * _saveNow() reports failure, and the caller must fail closed — which also
- * exercises the lock-timeout path directly.
+ * Make every write fail by holding the store's lock, so _saveNow() times out
+ * and the caller must fail closed.
  */
 function blockWrites() {
   fs.mkdirSync(path.dirname(claimsPath), { recursive: true });
@@ -112,10 +98,8 @@ function clean() {
 const peer = Buffer.alloc(64, 7);
 
 /**
- * A claim must be on disk before the caller is told it succeeded. Simulated by
- * never calling close() on the writing store — close() is the only thing that
- * would flush a deferred write, so if the claim survives into a fresh store
- * instance it can only have been written by claimSessionKey itself.
+ * A claim must be on disk before success is reported: the writing store is
+ * never closed, so a fresh store can only see it if claimSessionKey wrote it.
  */
 function testClaimIsDurableWithoutClose() {
   console.log('\n=== Test 1: A successful claim is durable before it returns ===');
@@ -165,12 +149,7 @@ function testPersistenceFailureRejectsTheClaim() {
   clean();
 }
 
-/**
- * A half-finished write must never damage the state that is already on disk.
- * This is the property that makes the fix safe rather than merely durable: a
- * writer that truncates the live file first turns any mid-write failure into
- * total loss of replay state, which is worse than the bug being fixed.
- */
+/** A half-finished write must never damage the state already on disk. */
 function testPartialWriteLeavesOriginalIntact() {
   console.log('\n=== Test 3: A partial write leaves the original state intact ===');
   clean();
@@ -273,9 +252,7 @@ function testUpdateCountersStaysBatched() {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Merge-on-load: a claim made before an encryption key exists must survive
-// setEncryptionKey(). load() used to assign over the in-memory state, so every
-// such claim was dropped during ordinary startup and the same fingerprint
-// became claimable again — key and nonce reuse with no crash involved.
+// setEncryptionKey().
 // ─────────────────────────────────────────────────────────────────────────
 
 import crypto from 'crypto';

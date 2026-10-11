@@ -1,12 +1,7 @@
 /**
- * Exercises the recovery flow the way the screens drive it: set up an identity,
- * then restore it both ways and confirm the identity that comes back is the
- * *same* one — same public key, and a private key that actually matches it.
- *
- * The bug this guards against did not throw or look broken: recovery reported
- * success while handing back a freshly generated identity. So every assertion
- * here compares against the original rather than just checking for a truthy
- * result.
+ * The recovery flow as the screens drive it: set up an identity, restore it
+ * both ways, and check the same identity comes back (same public key, matching
+ * private key). Assertions compare against the original, not just truthiness.
  */
 import {webcrypto} from 'crypto';
 import fs from 'fs';
@@ -26,14 +21,6 @@ const throwsWith = async (name, code, fn) => {
 
 // ── In-memory AsyncStorage + Keychain, so the real modules run unmodified ────
 const store = new Map();
-const asyncStorageStub = `
-const __store = globalThis.__GL_STORE__;
-const AsyncStorage = {
-  setItem: async (k, v) => { __store.set(k, v); },
-  getItem: async k => (__store.has(k) ? __store.get(k) : null),
-  removeItem: async k => { __store.delete(k); },
-};
-`;
 globalThis.__GL_STORE__ = store;
 globalThis.__GL_KEYCHAIN__ = new Map();
 
@@ -57,9 +44,33 @@ const cryptoPath = prep('../src/utils/crypto.js', 'rec-crypto.mjs', [
   ["from './wordlist'", "from '../src/utils/wordlist.js'"],
   ["from './ghost-address'", "from '../src/utils/ghost-address.js'"],
 ]);
+// recovery.js reads and writes through utils/storage.js. The stub is
+// the REAL sealing module over the in-memory store, so recovery here runs
+// through the same sealing as on a device.
+prep('../src/utils/secret-storage.js', 'rec-secret-storage.mjs');
+prep('../src/utils/legacy-hash.js', 'rec-legacy-hash.mjs');
+const sealedStorageStub = `
+import {createSecretStorage} from './.rec-secret-storage.mjs';
+const __store = globalThis.__GL_STORE__;
+const __secure = new Map();
+const storage = createSecretStorage({
+  plain: {
+    setItem: async (k, v) => { __store.set(k, v); },
+    getItem: async k => (__store.has(k) ? __store.get(k) : null),
+    removeItem: async k => { __store.delete(k); },
+  },
+  secure: {
+    setItem: async (k, v) => { __secure.set(k, v); },
+    getItem: async k => (__secure.has(k) ? __secure.get(k) : null),
+    removeItem: async k => { __secure.delete(k); },
+  },
+  randomBytes: n => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+});
+`;
 const recoveryPath = prep('../src/utils/recovery.js', 'rec-recovery.mjs', [
-  ["import AsyncStorage from '@react-native-async-storage/async-storage';", asyncStorageStub],
+  ["import {storage} from './storage';", sealedStorageStub],
   ["from './crypto'", `from './.rec-crypto.mjs'`],
+  ["from './legacy-hash'", `from './.rec-legacy-hash.mjs'`],
 ]);
 
 const {CryptoEngine, generateBackupFragments, generateSeedPhrase} = await import(cryptoPath.href);
@@ -79,7 +90,7 @@ await R.saveRecoveryBundle(bundle);
 
 ok('bundle carries a wrapped key', !!bundle.wrappedKey?.iv && !!bundle.wrappedKey?.ciphertext);
 ok('bundle records the public key', bundle.publicKeyHex === keyPair.publicKeyHex);
-ok('7 fragments produced', fragments.length === 7);
+ok('5 fragments produced (3-of-5 by default, GM-M5-2)', fragments.length === 5);
 ok('the phrase is NOT in the stored bundle', !JSON.stringify(bundle).includes(phrase[0]));
 ok('the phrase is NOT in any fragment', !fragments.some(f => f.data.includes(Buffer.from(phrase.join(' ')).toString('hex'))));
 ok('the private key is NOT in the bundle in the clear', !JSON.stringify(bundle).includes(keyPair.privateKeyRaw));
@@ -117,7 +128,7 @@ console.log('\n[4] Restore on a fresh device, from fragments + phrase');
   ok('returns the SAME public key', restored.publicKeyHex === keyPair.publicKeyHex);
   ok('returns the original private key', restored.privateKeyRaw === keyPair.privateKeyRaw);
   ok('any 3 fragments work', (await R.restoreFromFragments(
-      [fragments[6], fragments[2], fragments[4]].map(f => f.data), phrase)).privateKeyRaw === keyPair.privateKeyRaw);
+      [fragments[4], fragments[2], fragments[0]].map(f => f.data), phrase)).privateKeyRaw === keyPair.privateKeyRaw);
   ok('the device is now set up for phrase-only restore', store.has('gl_recovery_bundle'));
   const again = await R.restoreFromPhrase(phrase);
   ok('and phrase-only restore now works here', again.publicKeyHex === keyPair.publicKeyHex);
@@ -163,9 +174,8 @@ console.log('\n[7] Two identities cannot be mixed');
 
 console.log('\n[8] P2P recovery tag');
 {
-  // The distributing device and the restoring device must land on the same tag
-  // from the same phrase — they previously derived it two different ways and
-  // could never match.
+  // The distributing and restoring devices must derive the same tag from the
+  // same phrase.
   const tagA = await R.deriveRecoveryTag(phrase);
   const tagB = await R.deriveRecoveryTag([...phrase]);
   ok('same phrase gives the same tag on both sides', tagA === tagB);

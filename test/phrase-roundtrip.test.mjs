@@ -1,18 +1,7 @@
 /**
- * A phrase generated on any client must restore the same identity on every
- * other client.
- *
- * This is the test that would have caught the fragmentation: three clients
- * each carried a different wordlist, so a phrase generated on web was
- * rejected outright by mobile's restore screen. Wordlists are only half of
- * it — the derivation has to agree too, so this checks the Ghost Address
- * actually produced, not just that the words were accepted.
- *
- * The three derivations under test:
- *   - mobile  — src/utils/crypto.js deriveGhostIdentity (PBKDF2-HMAC-SHA512)
- *   - gmp-core — src/identity.ts deriveIdentityFromSeedPhrase, the node that
- *     actually joins the mesh, and the address the web app displays (the web
- *     client does not derive it locally; it reads it off the bridge)
+ * A phrase generated on any client must restore the same Ghost Address on
+ * every other: mobile's deriveGhostIdentity and gmp-core's
+ * deriveIdentityFromSeedPhrase (which the web app displays via the bridge).
  *
  * Run with: node test/phrase-roundtrip.test.mjs
  */
@@ -20,6 +9,7 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
+import {FIXTURE_A} from './helpers/fixture-phrases.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -133,14 +123,14 @@ test('the derivation is stable, not just internally consistent', async () => {
   // A fixed phrase pinned to a known address. If a KDF parameter is ever
   // changed on one platform, this fails rather than silently orphaning
   // everybody's identity.
-  const words = 'abuse morning urban captain vendor olympic forest unlock flavor ocean vibrant elite'.split(' ');
+  const words = [...FIXTURE_A];
   const expected = 'GHOST-Z3H-NMX-81T';
   assert.strictEqual(await ghostAddressViaMobile(words), expected, 'mobile derivation changed');
   assert.strictEqual(await ghostAddressViaNode(words), expected, 'node derivation changed');
 });
 
 test('a one-word typo yields a different identity (why the address is confirmed)', async () => {
-  const a = 'abuse morning urban captain vendor olympic forest unlock flavor ocean vibrant elite'.split(' ');
+  const a = [...FIXTURE_A];
   const b = [...a.slice(0, 11), 'zebra'];
   assert.notStrictEqual(await ghostAddressViaMobile(a), await ghostAddressViaMobile(b));
 });

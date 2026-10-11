@@ -3,7 +3,7 @@
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -90,7 +90,7 @@ async function runTests() {
 async function testScoreDecayAndRecovery() {
   console.log('\n=== Test 1: Score Decay and Recovery ===');
 
-  const nodeA = new GMPNode({ port: 49960, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49960, peerCachePath: tempCacheAPath, disableBootstrap: true });
   await nodeA.loadIdentity('rep A');
 
   const peerIdHex = 'a'.repeat(64);
@@ -113,8 +113,8 @@ async function testLinkTeardownOnBan() {
   console.log('\n=== Test 2: Active Link Teardown on Ban ===');
   cleanTempFiles();
 
-  const nodeA = new GMPNode({ port: 49962, peerCachePath: tempCacheAPath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49963, peerCachePath: tempCacheBPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49962, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 49963, peerCachePath: tempCacheBPath, disableBootstrap: true });
 
   await nodeA.loadIdentity('rep A 2');
   await nodeB.loadIdentity('rep B 2');
@@ -143,8 +143,8 @@ async function testBanListBlocking() {
   console.log('\n=== Test 3: Ban List Blocking (Incoming & Outgoing) ===');
   cleanTempFiles();
 
-  const nodeA = new GMPNode({ port: 49964, peerCachePath: tempCacheAPath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49965, peerCachePath: tempCacheBPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49964, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 49965, peerCachePath: tempCacheBPath, disableBootstrap: true });
 
   await nodeA.loadIdentity('rep A 3');
   await nodeB.loadIdentity('rep B 3');
@@ -184,9 +184,9 @@ async function testRelayingForBannedNodeDropped() {
   cleanTempFiles();
 
   // Topology: A - B - C
-  const nodeA = new GMPNode({ port: 49966, peerCachePath: tempCacheAPath, disableBootstrap: true });
-  const nodeB = new GMPNode({ port: 49967, peerCachePath: tempCacheBPath, disableBootstrap: true });
-  const nodeC = new GMPNode({ port: 49968, peerCachePath: tempCacheCPath, disableBootstrap: true });
+  const nodeA = createGMPNode({ port: 49966, peerCachePath: tempCacheAPath, disableBootstrap: true });
+  const nodeB = createGMPNode({ port: 49967, peerCachePath: tempCacheBPath, disableBootstrap: true });
+  const nodeC = createGMPNode({ port: 49968, peerCachePath: tempCacheCPath, disableBootstrap: true });
 
   await nodeA.loadIdentity('rep A 4');
   await nodeB.loadIdentity('rep B 4');

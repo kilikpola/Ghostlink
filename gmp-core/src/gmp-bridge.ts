@@ -6,11 +6,11 @@ import https from 'https';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { GMPNodeManager } from './gmp-node-manager.js';
+import { NodeRegistry, RegistryError } from './node-registry.js';
 import config from './config.js';
 import logger from './logger.js';
 import { ghostAddressFromNodeId } from './ghost-address.js';
 import type { BridgeMessage } from './types.js';
-import type { BootstrapDiagnosis } from './bootstrap.js';
 import { PACKAGE_ROOT } from './paths.js';
 
 const DEFAULT_BRIDGE_PORT = config.GMP_BRIDGE_PORT || 3002;
@@ -33,13 +33,39 @@ function isPrivateLANIP(ip: string): boolean {
   return false;
 }
 
+export interface BridgeOptions {
+  /** Most nodes the bridge creates for seed phrases (default 8). */
+  maxNodes?: number;
+  /** Supply a registry (tests); otherwise one is built. */
+  registry?: NodeRegistry;
+}
+
+export interface BridgeHandle {
+  wss: WebSocketServer;
+  /** The host's node (the managerInstance argument), if any. */
+  manager: GMPNodeManager | null;
+  registry: NodeRegistry;
+  /** Local port actually bound (differs from bridgePort when that was 0). */
+  port: number;
+  /** Stop listening, drop sessions, and stop the nodes the bridge created. */
+  close(): Promise<void>;
+}
+
+/** One WebSocket client and the node it is bound to; only that node's events reach it. */
+interface Session {
+  ws: WebSocket;
+  manager: GMPNodeManager | null;
+}
+
 export async function startBridge(
   managerInstance: GMPNodeManager | null = null,
   bridgePort: number = DEFAULT_BRIDGE_PORT,
-  bridgeHost: string = DEFAULT_BRIDGE_HOST
-): Promise<{ wss: WebSocketServer; manager: GMPNodeManager | null }> {
-  let manager = managerInstance;
-  const clients = new Set<WebSocket>();
+  bridgeHost: string = DEFAULT_BRIDGE_HOST,
+  options: BridgeOptions = {}
+): Promise<BridgeHandle> {
+  const registry = options.registry ?? new NodeRegistry({ maxNodes: options.maxNodes, defaultPort: config.GMP_PORT });
+  if (managerInstance) registry.adopt(managerInstance);
+  const sessions = new Set<Session>();
 
   const lanMode = bridgeHost === '0.0.0.0';
   const allowNullOrigin = process.env.GMP_BRIDGE_ALLOW_NULL_ORIGIN === '1';
@@ -58,10 +84,8 @@ export async function startBridge(
   let certPathUsed: string | null = null;
   let httpsServer: https.Server | undefined;
   try {
-    // The certs live at the repo root, next to index.html — but this file is
-    // compiled into dist/, so "one level up" lands in gmp-core/ and TLS was
-    // silently unavailable even with certs sitting right there. Check the
-    // package root and the repo root above it, in that order.
+    // Certs live at the repo root; this file runs from dist/, so check the
+    // package root and then the repo root.
     const candidates = process.env.GMP_BRIDGE_CERT && process.env.GMP_BRIDGE_KEY
       ? [{ cert: resolve(process.env.GMP_BRIDGE_CERT), key: resolve(process.env.GMP_BRIDGE_KEY) }]
       : [
@@ -110,22 +134,10 @@ export async function startBridge(
         : 'Unauthorized: Only localhost connections are allowed');
       return false;
     }
-    // Origin is the only cross-site control a WebSocket has — the browser does
-    // not preflight ws:// and CORS does not apply — and the IP allowlist above
-    // does not help here, because a browser attacking 127.0.0.1 *is* connecting
-    // from 127.0.0.1.
-    //
-    // 'null' used to be on this allowlist. Any website could therefore reach
-    // the bridge from a sandboxed iframe (`<iframe sandbox="allow-scripts">`
-    // sends `Origin: null`) and then use the full command surface: `send` and
-    // `sendDirect` to post messages as the user, `getStatus` to enumerate
-    // peers, and the broadcast stream to read every message the node receives.
-    // SECURITY.md documents the policy as file://, localhost, 127.0.0.1 and
-    // ::1 — 'null' was never part of it, so it is refused.
-    //
-    // A missing Origin header is still accepted: non-browser clients (the CLI,
-    // the mobile app) send none, and they cannot be driven cross-site by a web
-    // page. It is specifically the opaque 'null' origin that is not trustworthy.
+    // Origin is the only cross-site control a WebSocket has, and a browser
+    // attacking 127.0.0.1 connects from 127.0.0.1. The opaque 'null' origin
+    // (sandboxed iframes) is refused. A missing Origin is accepted: non-browser
+    // clients send none and cannot be driven cross-site.
     const origin = req.headers.origin;
     if (origin !== undefined && origin !== 'file://') {
       if (origin === 'null' && !allowNullOrigin) {
@@ -158,7 +170,7 @@ export async function startBridge(
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   };
 
-  const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+  const handleRequest = (_req: http.IncomingMessage, res: http.ServerResponse): void => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('GhostLink GMP bridge — WebSocket endpoint.\n');
   };
@@ -187,42 +199,63 @@ export async function startBridge(
     listener.listen(bridgePort, bridgeHost, res);
   });
 
-  const broadcast = (eventObj: BridgeMessage): void => {
-    const dataStr = JSON.stringify(eventObj);
-    for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(dataStr);
-        } catch (e) {
-          const err = e as Error;
-          logger.error('bridge', 'client-broadcast-failed', `Failed to send message to client: ${err.message}`, { err });
-        }
-      }
+  const sendTo = (session: Session, eventObj: BridgeMessage): void => {
+    if (session.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      session.ws.send(JSON.stringify(eventObj));
+    } catch (e) {
+      const err = e as Error;
+      logger.error('bridge', 'client-send-failed', `Failed to send message to client: ${err.message}`, { err });
     }
   };
 
-  const setupManagerEvents = (m: GMPNodeManager): void => {
-    m.on('peer-connected', ({ nodeId, address, port }: { nodeId: string; address: string; port: number }) => {
-      broadcast({ type: 'peer-connected', nodeId, address, port });
+  /** Deliver a node's event to the sessions bound to that node only. */
+  const publish = (m: GMPNodeManager, eventObj: BridgeMessage): void => {
+    for (const session of sessions) {
+      if (session.manager === m) sendTo(session, eventObj);
+    }
+  };
+
+  const startedMessage = (m: GMPNodeManager): BridgeMessage => ({
+    type: 'started',
+    nodeId: m.getNodeId(),
+    address: '127.0.0.1',
+    port: m.node ? m.node.port : null,
+    ghostAddress: ghostAddressFromNodeId(m.getNodeId())
+  });
+
+  const wired = new WeakSet<GMPNodeManager>();
+  const wireManagerEvents = (m: GMPNodeManager): void => {
+    if (wired.has(m)) return;
+    wired.add(m);
+
+    m.on('peer-connected', ({ nodeId, address, port, transport }) => {
+      publish(m, { type: 'peer-connected', nodeId, address, port, transport });
     });
 
-    m.on('peer-disconnected', ({ nodeId }: { nodeId: string }) => {
-      broadcast({ type: 'peer-disconnected', nodeId });
+    m.on('peer-disconnected', ({ nodeId }) => {
+      publish(m, { type: 'peer-disconnected', nodeId });
     });
 
-    m.on('message', ({ fromNodeId, payload }: { fromNodeId: string; payload: Buffer | string }) => {
-      const payloadStr = Buffer.isBuffer(payload) ? payload.toString('utf8') : payload;
-      broadcast({ type: 'message', fromNodeId, payload: payloadStr });
+    m.on('message', ({ fromNodeId, payload, via }) => {
+      publish(m, { type: 'message', fromNodeId, payload, ...(via ? { via } : {}) });
     });
 
-    m.on('bootstrap-complete', ({ peersConnected }: { peersConnected: number }) => {
-      broadcast({ type: 'bootstrap-complete', peersConnected });
+    // Store-and-forward state. localId is the client's own ID for
+    // the message; each state comes from the protocol, never from a clock.
+    m.on('sf-stored', (e) => publish(m, { type: 'sf-stored', ...e }));
+    m.on('sf-delivered', (e) => publish(m, { type: 'sf-delivered', ...e }));
+    m.on('sf-expired', (e) => publish(m, { type: 'sf-expired', ...e }));
+    m.on('storage-status', (e) => publish(m, { type: 'storage-status', ...e }));
+
+    m.on('bootstrap-complete', ({ peersConnected }) => {
+      publish(m, { type: 'bootstrap-complete', peersConnected });
     });
 
-    m.on('bootstrap-failed', ({ peersConnected, diagnosis }: { peersConnected: number; diagnosis?: BootstrapDiagnosis | null }) => {
+    m.on('bootstrap-failed', ({ peersConnected, diagnosis }) => {
       // The reason travels with the event so the UI can say which of the three
       // failures this is, instead of guessing one message for all of them.
-      broadcast({
+      publish(m, {
         type: 'bootstrap-failed',
         peersConnected,
         reason: diagnosis ? diagnosis.reason : 'unknown',
@@ -232,32 +265,32 @@ export async function startBridge(
       });
     });
 
-    m.on('external-address', ({ address, port }: { address: string; port: number }) => {
-      broadcast({ type: 'external-address', address, port });
+    m.on('external-address', ({ address, port }) => {
+      publish(m, { type: 'external-address', address, port });
     });
 
-    m.on('routing-degraded', (data: unknown) => {
-      broadcast({ type: 'routing-degraded', ...(data as Record<string, unknown>) });
+    m.on('routing-degraded', (data) => {
+      publish(m, { type: 'routing-degraded', ...data });
     });
   };
 
-  if (manager) {
-    setupManagerEvents(manager);
+  if (managerInstance) {
+    wireManagerEvents(managerInstance);
   }
 
-  wss.on('connection', (ws: WebSocket) => {
-    const client = ws;
-    clients.add(client);
+  const notStarted = (session: Session): void => {
+    sendTo(session, { type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' });
+  };
 
-    if (manager && manager.node) {
-      try {
-        ws.send(JSON.stringify({
-          type: 'started',
-          nodeId: manager.node.identity.nodeIdHex,
-          address: '127.0.0.1',
-          ghostAddress: ghostAddressFromNodeId(manager.node.identity.nodeIdHex)
-        }));
-      } catch (_e) {}
+  wss.on('connection', (ws: WebSocket) => {
+    const session: Session = { ws, manager: null };
+    sessions.add(session);
+
+    // A client that sends no seed uses the host's node, as it always has.
+    const host = registry.default;
+    if (host && host.node) {
+      session.manager = host;
+      sendTo(session, startedMessage(host));
     }
 
     ws.on('message', async (data: Buffer) => {
@@ -269,187 +302,156 @@ export async function startBridge(
         // the bridge process.
         if (!msg || typeof msg !== 'object') throw new Error('not an object');
       } catch (_e) {
-        try {
-          ws.send(JSON.stringify({ type: 'error', code: 'INVALID_JSON', message: 'Failed to parse JSON' }));
-        } catch (_err) {}
+        sendTo(session, { type: 'error', code: 'INVALID_JSON', message: 'Failed to parse JSON' });
         return;
       }
 
+      const requestId = typeof msg.requestId === 'string' || typeof msg.requestId === 'number' ? msg.requestId : undefined;
+
       switch (msg.type) {
         case 'start': {
-          const { seedPhrase, port } = msg as BridgeMessage & { seedPhrase?: string; port?: number };
-          if (!manager) {
-            const nodePort = Number(port) || config.GMP_PORT;
-            manager = new GMPNodeManager({ seedPhrase, port: nodePort, GMP_PORT: nodePort });
-            setupManagerEvents(manager);
-          }
-
-          if (manager.node) {
-            try {
-              ws.send(JSON.stringify({
-                type: 'started',
-                nodeId: manager.node.identity.nodeIdHex,
-                address: '127.0.0.1',
-                ghostAddress: ghostAddressFromNodeId(manager.node.identity.nodeIdHex)
-              }));
-            } catch (_e) {}
-            return;
-          }
-
+          // The node is chosen by the seed phrase, never by the session: the
+          // same seed from any session reaches the same node, a different seed
+          // a different, isolated one. No seed means the host's node.
+          const seedPhrase = typeof msg.seedPhrase === 'string' && msg.seedPhrase ? msg.seedPhrase : undefined;
+          const port = Number(msg.port) || undefined;
+          let m: GMPNodeManager;
           try {
-            const startResult = await manager.start();
-            broadcast({
-              type: 'started',
-              nodeId: startResult.nodeId,
-              address: startResult.address,
-              ghostAddress: ghostAddressFromNodeId(startResult.nodeId)
-            });
+            m = await registry.acquire(seedPhrase, port);
           } catch (err) {
             const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'START_FAILED', message: error.message }));
-            } catch (_e) {}
+            sendTo(session, {
+              type: 'error',
+              code: 'START_FAILED',
+              reason: err instanceof RegistryError ? err.code : 'NODE_START_FAILED',
+              message: error.message
+            });
+            return;
           }
+          wireManagerEvents(m);
+          session.manager = m;
+          sendTo(session, startedMessage(m));
           break;
         }
 
         case 'connect': {
-          const { address, port } = msg as BridgeMessage & { address: string; port: number };
-          if (!manager || !manager.node) {
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' }));
-            } catch (_e) {}
-            return;
-          }
-
-          const res = await manager.connectToPeer(address, port);
-          try {
-            ws.send(JSON.stringify({ type: 'connect-result', ...res }));
-          } catch (_e) {}
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const res = await m.connectToPeer(String(msg.address), Number(msg.port));
+          sendTo(session, { type: 'connect-result', ...res });
           break;
         }
 
-        case 'send': {
-          const { destinationNodeId, payload } = msg as BridgeMessage & { destinationNodeId: string; payload: string };
-          if (!manager || !manager.node) {
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' }));
-            } catch (_e) {}
-            return;
-          }
-
-          try {
-            await manager.sendMessage(destinationNodeId, payload);
-          } catch (err) {
-            const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: error.name || 'SEND_FAILED', message: error.message }));
-            } catch (_e) {}
-          }
-          break;
-        }
-
+        case 'send':
         case 'sendDirect': {
-          const { destinationNodeId, payload } = msg as BridgeMessage & { destinationNodeId: string; payload: string };
-          if (!manager || !manager.node) {
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' }));
-            } catch (_e) {}
-            return;
-          }
-
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
           try {
-            await manager.sendDirect(destinationNodeId, payload);
+            const destinationNodeId = String(msg.destinationNodeId);
+            const payload = String(msg.payload);
+            if (msg.type === 'send') await m.sendMessage(destinationNodeId, payload);
+            else await m.sendDirect(destinationNodeId, payload);
           } catch (err) {
             const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: error.name || 'SEND_FAILED', message: error.message }));
-            } catch (_e) {}
+            sendTo(session, { type: 'error', code: error.name || 'SEND_FAILED', message: error.message });
           }
           break;
         }
 
         case 'getStatus': {
-          if (!manager) {
-            try {
-              ws.send(JSON.stringify({ type: 'status', status: 'offline', peers: [] }));
-            } catch (_e) {}
+          const m = session.manager;
+          if (!m) {
+            sendTo(session, { type: 'status', status: 'offline', peers: [] });
             return;
           }
-
           try {
-            const status = manager.getStatus();
-            ws.send(JSON.stringify({ type: 'status', ...status }));
+            sendTo(session, { type: 'status', ...m.getStatus() });
           } catch (err) {
             const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'STATUS_FAILED', message: error.message }));
-            } catch (_e) {}
+            sendTo(session, { type: 'error', code: 'STATUS_FAILED', message: error.message });
           }
           break;
         }
 
         case 'resolve': {
-          const { address } = msg as BridgeMessage & { address: string };
-          if (!manager || !manager.node) {
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' }));
-            } catch (_e) {}
-            return;
-          }
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
           try {
-            const result = manager.resolveGhostAddress(address);
-            ws.send(JSON.stringify({ type: 'resolve-result', requestId: (msg as any).requestId, ...result }));
+            const result = await m.lookupGhostAddress(String(msg.address));
+            sendTo(session, { type: 'resolve-result', requestId, ...result });
           } catch (err) {
             const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'RESOLVE_FAILED', message: error.message }));
-            } catch (_e) {}
+            sendTo(session, { type: 'error', code: 'RESOLVE_FAILED', message: error.message });
           }
           break;
         }
 
-        case 'connectNode': {
-          const { nodeId, address } = msg as BridgeMessage & { nodeId?: string; address?: string };
-          if (!manager || !manager.node) {
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'NOT_STARTED', message: 'GMPNodeManager is not started' }));
-            } catch (_e) {}
-            return;
+        // Deposit a message for an offline contact. The reply is the
+        // manager's 'sf-stored' event (SENT, stored) or an sf-failed error.
+        case 'sf-send': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const localId = typeof msg.localId === 'string' && msg.localId ? msg.localId : undefined;
+          try {
+            await m.storeForwardSend(String(msg.destinationNodeId), String(msg.payload), localId);
+          } catch (err) {
+            const error = err as Error & { code?: string };
+            sendTo(session, { type: 'sf-failed', localId, code: error.code || error.name || 'SF_FAILED', message: error.message });
           }
+          break;
+        }
+
+        // Poll the mailbox now: the app came to the foreground or the network changed.
+        case 'sf-poll': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const reason = msg.reason === 'foreground' || msg.reason === 'network' ? msg.reason : 'manual';
+          m.pollMailbox(reason).catch(() => {});
+          break;
+        }
+
+        // The app's contact list: whose channels to poll.
+        case 'sf-contacts': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const ids = Array.isArray(msg.nodeIds) ? msg.nodeIds.filter((x: unknown): x is string => typeof x === 'string' && /^[0-9a-f]{128}$/i.test(x)) : [];
+          m.setMailboxContacts(ids);
+          sendTo(session, { type: 'storage-status', ...m.storageStatus() });
+          break;
+        }
+
+        case 'connectNode': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
           try {
             let result;
-            if (address) {
-              result = await manager.connectByGhostAddress(address);
-            } else if (nodeId) {
-              result = await manager.connectByNodeId(nodeId);
+            if (typeof msg.address === 'string' && msg.address) {
+              result = await m.connectByGhostAddress(msg.address);
+            } else if (typeof msg.nodeId === 'string' && msg.nodeId) {
+              result = await m.connectByNodeId(msg.nodeId);
             } else {
               result = { connected: false, transport: 'no-target' };
             }
-            ws.send(JSON.stringify({ type: 'connect-result', requestId: (msg as any).requestId, ...result }));
+            sendTo(session, { type: 'connect-result', requestId, ...result });
           } catch (err) {
             const error = err as Error;
-            try {
-              ws.send(JSON.stringify({ type: 'error', code: 'CONNECT_FAILED', message: error.message }));
-            } catch (_e) {}
+            sendTo(session, { type: 'error', code: 'CONNECT_FAILED', message: error.message });
           }
           break;
         }
 
         default: {
-          try {
-            ws.send(JSON.stringify({ type: 'error', code: 'UNKNOWN_COMMAND', message: `Unknown command type: ${msg.type}` }));
-          } catch (_e) {}
+          sendTo(session, { type: 'error', code: 'UNKNOWN_COMMAND', message: `Unknown command type: ${msg.type}` });
         }
       }
     });
 
     ws.on('close', () => {
-      clients.delete(client);
+      sessions.delete(session);
     });
 
     ws.on('error', () => {
-      clients.delete(client);
+      sessions.delete(session);
     });
   });
 
@@ -457,7 +459,27 @@ export async function startBridge(
   logger.info('bridge', 'server-started',
     `GMP bridge listening on ${bridgeHost}:${bridgePort} (${schemes}, scheme auto-detected per connection)`,
     { tls: tlsAvailable, certPath: certPathUsed });
-  return { wss, manager };
+
+  const boundAddress = listener.address();
+  const close = async (): Promise<void> => {
+    for (const session of sessions) {
+      try { session.ws.terminate(); } catch (_e) {}
+    }
+    sessions.clear();
+    await new Promise<void>((res) => wss.close(() => res()));
+    await new Promise<void>((res) => listener.close(() => res()));
+    httpServer.close();
+    if (httpsServer) httpsServer.close();
+    await registry.stopAll();
+  };
+
+  return {
+    wss,
+    manager: managerInstance,
+    registry,
+    port: boundAddress && typeof boundAddress === 'object' ? boundAddress.port : bridgePort,
+    close,
+  };
 }
 
 const isMain = process.argv[1] && (
@@ -468,5 +490,9 @@ const isMain = process.argv[1] && (
 if (isMain) {
   const port = process.env.GMP_BRIDGE_PORT ? parseInt(process.env.GMP_BRIDGE_PORT) : DEFAULT_BRIDGE_PORT;
   const host = process.env.GMP_BRIDGE_HOST || DEFAULT_BRIDGE_HOST;
-  startBridge(null, port, host);
+  // The standalone bridge makes nodes per client session; it is not a public peer.
+  logger.info('gmp-bridge', 'standalone', `Standalone bridge on ${host}:${port}: no node of its own; nodes are created per client session. This process is not a GMP public peer (that is \`gmp public-peer\`).`);
+  void import('./claim-log-diagnostic.js')
+    .then(({ logStartupClaimLogCheck }) => (process.env.GMP_SEED_PHRASE ? logStartupClaimLogCheck('gmp-bridge', process.env.GMP_SEED_PHRASE) : null))
+    .finally(() => startBridge(null, port, host));
 }

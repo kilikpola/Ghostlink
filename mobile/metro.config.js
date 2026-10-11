@@ -3,11 +3,8 @@ const {getDefaultConfig, mergeConfig} = require('@react-native/metro-config');
 
 const defaultConfig = getDefaultConfig(__dirname);
 
-// This app is an npm workspace, so npm hoists node_modules to the repo root —
-// outside Metro's project root. Metro will not serve files from outside the
-// project unless the containing directory is watched, so both the watch folder
-// and the module search path have to point up a level. Without this, every
-// hoisted package (including @babel/runtime) fails to resolve.
+// npm workspaces hoist node_modules to the repo root, outside Metro's project
+// root, so watch it and add it to the module search path.
 const repoRoot = path.resolve(__dirname, '..');
 
 const config = {

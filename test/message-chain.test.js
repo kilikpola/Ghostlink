@@ -1,19 +1,10 @@
 /**
- * Regression tests for Chain, the per-conversation hash chain that backs the
- * "tamper detection" claim and the self-destruct feature. It lives inline in
- * index.html, so it is extracted from there the same way the connector is.
+ * Chain, the per-conversation hash chain (inline in index.html):
  *
- * Three behaviours matter and none of them is visible from the UI:
- *
- *   - verify() covers every block. It used to start at index 1 and skip
- *     anything flagged isReceived, so an edit to the genesis block or to any
- *     message the user received left verify() reporting a valid chain — between
- *     them, most of a conversation.
- *   - an inbound block is chained by a locally computed hash. The sender's hash
- *     is kept beside it as remoteHash for de-duplication and is never
- *     substituted for ours, because no local record can reproduce it.
- *   - self-destruct erases. The body has to leave the chain, not just the view,
- *     because the chain is what export() writes out and what the vault persists.
+ *   - verify() covers every block, genesis and received ones included
+ *   - inbound blocks are chained by a locally computed hash; the sender's is
+ *     kept as remoteHash
+ *   - self-destruct removes the body from the chain, not just the view
  *
  * Run with: node test/message-chain.test.js
  */
@@ -150,7 +141,7 @@ test('the sender hash is recorded separately and never becomes ours', async () =
 test('legacy inbound blocks are re-linked and become verifiable', async () => {
   const chain = await makeChain(1);
 
-  // How the old code stored a received block: the sender's hash overwrote ours.
+  // Legacy storage of a received block: the sender's hash in `hash`.
   const legacy = await chain.add('Bob', 'from before the fix', 'text', {});
   const senderHash = 'cd'.repeat(32);
   legacy.hash = senderHash;

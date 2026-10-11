@@ -1,11 +1,7 @@
 /**
- * What actually crosses the wire on the direct WebRTC path.
- *
- * Drives the real _setupDataChannel / sendMessage code out of WebRTCService
- * with a pair of fake data channels, so this tests the shipping transport
- * rather than a reimplementation of it. react-native-webrtc is stubbed because
- * it is a native module and the data-channel protocol never touches it; the
- * stub is generated from the real source at run time so this cannot drift.
+ * What crosses the wire on the direct WebRTC path, driving the real
+ * _setupDataChannel / sendMessage code with fake data channels.
+ * react-native-webrtc is stubbed from the real source at run time.
  */
 import fs from 'fs';
 import os from 'os';

@@ -4,11 +4,9 @@
   'use strict';
 
   // ── Console interception (module-level singleton) ────────────────────────
-  // Exactly one set of wrappers is installed no matter how many GhostLinkDebug
-  // instances exist. Per-instance wrappers would capture each other's patched
-  // methods as their "originals", so every message would be emitted once per
-  // instance, and restoreConsole() would reinstate a wrapper instead of the
-  // native method.
+  // Exactly one set of wrappers is installed however many GhostLinkDebug
+  // instances exist, so messages are not duplicated and restoreConsole()
+  // reinstates the native methods.
 
   const CONSOLE_LEVELS = { log: 'info', error: 'error', warn: 'warn', debug: 'debug' };
 
@@ -20,10 +18,8 @@
   let _consoleWrappers = null;
   let _logging = false;
 
-  // Serialize each argument independently so one unserializable value
-  // (circular ref, throwing getter/toJSON/proxy trap, BigInt) can't drop the
-  // whole message. Every branch that touches the value is inside the guard —
-  // even `instanceof` can throw on a Proxy with a getPrototypeOf trap.
+  // Serialize each argument independently, fully guarded, so one hostile
+  // value (circular ref, throwing getter, Proxy, BigInt) cannot drop the message.
   const _fmtOne = (a) => {
     if (typeof a === 'string') return a;
     try {
@@ -92,10 +88,8 @@
   }
 
   /**
-   * Unregister an instance. If it owned the console and others are still live,
-   * hand ownership over and keep the wrappers installed — tearing them out
-   * would silently stop forwarding for every remaining instance. Native methods
-   * come back only once the last instance is gone.
+   * Unregister an instance, handing console ownership to a remaining one.
+   * Native methods return only when the last instance is gone.
    */
   function _detachInstance(inst) {
     if (!_instances.delete(inst)) return;
@@ -179,10 +173,8 @@
     _renderFloatWindow(w) {
       if (!w || w.closed) return;
       const state = this.dumpFullState();
-      // Event topics, event payloads and peer/room names all originate off-device
-      // and were interpolated straight into this document, which is then written
-      // with document.write into a same-origin window that holds a reference to
-      // the live debug API. Escape every interpolated value.
+      // Topics, payloads and peer names come from off-device and this document
+      // is written into a same-origin window: escape every interpolated value.
       const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' }[c]
       ));

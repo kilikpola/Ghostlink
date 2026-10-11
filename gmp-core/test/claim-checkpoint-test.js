@@ -1,13 +1,6 @@
 /**
- * GMP Claim Checkpoint Tests
- *
- * Every record in the claim log is sealed on its own, so replaying a large log
- * means one AES-GCM opening per claim — about 34 seconds at a million. The
- * checkpoint is a single sealed snapshot of the index at a known byte offset,
- * so a start reads that and replays only what was appended since.
- *
- * It is a cache and never the authority: these check that a checkpoint which
- * cannot be trusted is discarded in favour of the log, not believed.
+ * GMP Claim Checkpoint Tests: a checkpoint that cannot be trusted is discarded
+ * in favour of the log, never believed.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
@@ -36,12 +29,7 @@ const freshFile = () => {
   return path.join(dir, 'nonce-state.json');
 };
 const dropDir = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ } };
-/**
- * The claim log is named after the key that seals it, so that two identities
- * sharing a data directory do not write records into one file that neither can
- * fully read. Mirrors ClaimLog._scopePathToKey; prefer `store.claimsFile` where
- * a store is in scope.
- */
+/** The key-scoped claim log path (mirrors ClaimLog.scopedPath). */
 function claimsPathFor(stateFile, seed) {
   const key = crypto.pbkdf2Sync(seed, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
   const id = crypto.createHash('sha256').update('gmp-claim-log-id').update(key).digest('hex').slice(0, 16);
@@ -179,12 +167,7 @@ function testCheckpointAheadOfLog() {
   dropDir();
 }
 
-/**
- * The bug that made the checkpoint unsafe to build: an appending process used
- * to advance its byte offset by its own write alone, so a record another
- * process appended in between was skipped forever — and a checkpoint built on
- * that offset would claim to cover a claim it had never seen.
- */
+/** An appending process must not skip records another process appended in between. */
 function testConcurrentAppendIsNotSkipped() {
   console.log('\n=== Test 5: An append catches up on another process first ===');
   const stateFile = freshFile();
@@ -209,12 +192,7 @@ function testConcurrentAppendIsNotSkipped() {
 }
 
 
-/**
- * FIX 3: the checkpoint must be driven by appends, not by a start discovering a
- * long tail. Checking only at load meant the checkpoint never prevented the
- * replay it exists to prevent — by the time the check ran, the whole log had
- * already been replayed.
- */
+/** Checkpoints are driven by appends, bounding replay after an unclean restart. */
 function testThresholdBoundsUncleanRestart() {
   console.log('\n=== Test 6: An unclean stop replays at most the threshold ===');
   const stateFile = freshFile();
@@ -242,15 +220,10 @@ async function testCheckpointDoesNotStallClaims() {
   const stateFile = freshFile();
   const store = new NonceStore({ stateFile, seedPhrase: SEED });
 
-  // Yield between batches, as a node handling handshakes does. A loop that
-  // never yields cannot run the deferred write at all, so it hits the ceiling
-  // and pays for one checkpoint inline by design (CHECKPOINT_CEILING_RECORDS);
-  // timing that loop measured the write itself — tens of ms on a fast machine,
-  // ~96 ms on a busy CI runner — not whether claims stay off it.
-  // The timing bound alone cannot tell "deferred" from "inline but fast": on
-  // a quick machine an inline checkpoint also fits under it. So also watch the
-  // checkpoint file itself — if it changes across a single synchronous
-  // claimSessionKey() call, that claim wrote it. (Stat'd outside the timing.)
+  // Yield between batches, as a busy node does; a loop that never yields hits
+  // the inline ceiling by design. Timing alone cannot tell deferred from
+  // inline-but-fast, so also check the checkpoint file is not rewritten by a
+  // single synchronous claim.
   const ckpt = ckptOf(stateFile);
   const ckptStamp = () => {
     const st = fs.statSync(ckpt, { throwIfNoEntry: false, bigint: true });

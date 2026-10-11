@@ -63,10 +63,8 @@ function generateTrayIcon(empty) {
 /**
  * Create the system tray icon and context menu.
  *
- * @param {Function} getMainWindow - returns the current main window or null.
- *   A getter, not the window itself: on macOS the window can be closed and
- *   re-created while the tray lives on, and a captured reference then points
- *   at a destroyed BrowserWindow whose show() throws.
+ * @param {Function} getMainWindow - returns the current main window or null
+ *   (a getter, since macOS can re-create the window while the tray lives on)
  * @param {Store}    store         - electron-store config instance
  * @param {Function} onQuit        - callback to quit the app
  * @returns {Tray}

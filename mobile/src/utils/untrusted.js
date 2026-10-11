@@ -1,16 +1,7 @@
 /**
- * GhostLink Mobile — shaping values that came from someone else.
- *
- * A scanned QR code and a peer's chat frame are both parsed JSON written by a
- * stranger, and both end up persisted in AsyncStorage and rendered on the next
- * launch. React Native throws when a <Text> child is an object, and the avatar
- * calls name.charAt(), so a single non-string field — `{"n": {}}` in an invite
- * QR, `{"text": {}}` in a chat frame — used to crash the chat list on render.
- * The chat list is the home screen, and the bad value was already saved, so
- * the app crashed on every launch after that until its data was cleared.
- *
- * Everything from outside goes through here first and comes out as the plain
- * strings and numbers the screens assume, or not at all.
+ * GhostLink Mobile — shaping values that came from someone else (scanned QR
+ * codes, peer chat frames). Everything from outside comes out as plain strings
+ * and numbers, or not at all, so a malformed field cannot crash rendering.
  */
 
 export const MAX_NAME_LENGTH = 64;

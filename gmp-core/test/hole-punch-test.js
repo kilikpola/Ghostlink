@@ -1,5 +1,5 @@
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import { holePunchConnect } from '../dist/hole-punch.js';
 import net from 'net';
 
@@ -40,15 +40,11 @@ function assertContains(haystack, needle, message) {
   }
 }
 
-async function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function testFastPathDirectConnection() {
   console.log('\n=== Test 1: Fast Path Direct Connection ===');
 
-  const nodeA = new GMPNode({ port: 49700 });
-  const nodeB = new GMPNode({ port: 49701 });
+  const nodeA = createGMPNode({ port: 49700 });
+  const nodeB = createGMPNode({ port: 49701 });
 
   await nodeA.loadIdentity('hole punch fast path node A');
   await nodeB.loadIdentity('hole punch fast path node B');
@@ -80,8 +76,8 @@ async function testFastPathDirectConnection() {
 async function testCoordinatedSimultaneousOpen() {
   console.log('\n=== Test 2: Coordinated Simultaneous Open (Hole Punching) ===');
 
-  const nodeA = new GMPNode({ port: 49702 });
-  const nodeB = new GMPNode({ port: 49703 });
+  const nodeA = createGMPNode({ port: 49702 });
+  const nodeB = createGMPNode({ port: 49703 });
 
   await nodeA.loadIdentity('hole punch open node A');
   await nodeB.loadIdentity('hole punch open node B');
@@ -115,7 +111,7 @@ async function testCoordinatedSimultaneousOpen() {
 async function testHolePunchFallbackOnFailure() {
   console.log('\n=== Test 3: Fallback trigger when hole punching fails ===');
 
-  const nodeB = new GMPNode({ port: 49704 });
+  const nodeB = createGMPNode({ port: 49704 });
   await nodeB.loadIdentity('hole punch fallback client');
 
   const startTime = Date.now();
@@ -152,7 +148,7 @@ async function testHolePunchFallbackOnFailure() {
 async function testHolePunchMissingAddress() {
   console.log('\n=== Test 4: Missing address validation ===');
 
-  const nodeB = new GMPNode({ port: 49706 });
+  const nodeB = createGMPNode({ port: 49706 });
   await nodeB.loadIdentity('hole punch missing address client');
 
   let errorCaught = null;

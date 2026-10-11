@@ -1,15 +1,6 @@
 /**
- * GhostLink Mobile — QR scanner.
- *
- * Two jobs: read someone's Ghost Address off their screen, and show yours so
- * they can read it off this one.
- *
- * This screen previously used react-native-qrcode-scanner, which statically
- * imports react-native-camera — a package that is not installed. Wiring the
- * screen into the navigator in that state would not have produced a broken
- * screen, it would have broken the whole JS bundle, which is why it sat
- * orphaned. It now uses react-native-vision-camera, which is already a
- * dependency and does QR decoding natively via useCodeScanner.
+ * GhostLink Mobile — QR scanner: read someone's Ghost Address, or show yours.
+ * Uses react-native-vision-camera's native useCodeScanner.
  */
 import React, {useState, useCallback, useEffect, useRef} from 'react';
 import {
@@ -52,11 +43,8 @@ const {width: SCREEN_WIDTH} = Dimensions.get('window');
 const QR_SIZE = Math.min(SCREEN_WIDTH - 96, 260);
 
 /**
- * A scanned payload, classified.
- *
- * Ghost Address first: it is what people actually exchange now. The older GL-
- * invite code and the JSON invite blob are still read so existing codes keep
- * working.
+ * Classify a scanned payload: Ghost Address first, then the older GL- invite
+ * code and JSON invite blob.
  */
 export function classifyScan(raw) {
   const text = String(raw || '').trim();
@@ -69,13 +57,8 @@ export function classifyScan(raw) {
   if (text.startsWith('{')) {
     try {
       const parsed = JSON.parse(text);
-      // `c` is where the web client puts the address: its invite QR is
-      // {c: address, n: name, p: publicKeyHex, t: timestamp} (index.html,
-      // genInvite). Mobile only looked at ghostAddress/address/a, so `c` fell
-      // through to the legacy invite-code branch, failed INVITE_CODE_REGEX —
-      // which wants GL-XXXXXXXX-… and an address is GHOST-XXX-XXX-XXX — and a
-      // web invite came back 'unknown'. Scanning a web QR on a phone simply
-      // did not work.
+      // `c` is where the web client's invite QR puts the address
+      // ({c: address, n: name, p: publicKeyHex, t: timestamp}).
       const inner = normalizeGhostAddress(
         parsed.ghostAddress || parsed.address || parsed.a || parsed.c || '',
       );
@@ -206,10 +189,7 @@ export default function QRScannerScreen({navigation}) {
       }
 
       if (result.kind === 'invite') {
-        // No signature is verified here. The old code hashed the invite's own
-        // public key and called the result a signature, which anyone holding
-        // the QR could recompute — it authenticated nothing. Rather than keep
-        // implying a check that does not happen, say plainly what this is.
+        // No signature is verified here; the alert says so plainly.
         Alert.alert(
           'Legacy invite code',
           `${result.code}\n\nThis older format carries no signature, so there is nothing to verify it against. Add it only if you trust where you scanned it.`,

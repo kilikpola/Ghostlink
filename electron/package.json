@@ -68,8 +68,8 @@
         "to": "gmp-core/package.json"
       },
       {
-        "from": "../gmp-core/data/public-peers.example.json",
-        "to": "gmp-core/data/public-peers.example.json"
+        "from": "../gmp-core/data/public-peers.json",
+        "to": "gmp-core/data/public-peers.json"
       },
       {
         "from": "../node_modules/ws",

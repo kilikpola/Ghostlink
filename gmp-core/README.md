@@ -27,6 +27,7 @@ Install globally or use `npx` to manage and monitor local nodes:
 - `gmp peers` - Lists currently active peer connections with partial metadata protections.
 - `gmp rotate-key` - Generates a new identity seed, rotates active keys, and floods certificates to the mesh.
 - `gmp ping <nodeId>` - Measures mesh RTT and hop counts to a target destination.
+- `gmp storage-peer` - Runs a self-hosted store-and-forward mailbox (no bridge, no bootstrap). Point your node at it with `GMP_SF_STORAGE_PEER=<host>:<port>#<NodeID>`. See [docs/store-and-forward.md](docs/store-and-forward.md).
 
 ## Ghost Addresses
 
@@ -77,7 +78,20 @@ with someone does not put them in your contact list. Disable with
 
 ## Configuration
 
-Custom settings can be specified in `gmp-core/data/config.json`, via environment variables, or directly passed to constructor options. See [config.example.json](data/config.example.json) for all available options and defaults.
+Settings come from four places. For each key, the first one that sets it wins:
+
+1. an explicit option: `new GMPNodeManager({ GMP_MIN_PEERS: 5 })`, or its camelCase alias (`minPeers`)
+2. an environment variable (`GMP_MIN_PEERS=5`)
+3. a config file: `gmp-core/data/config.json` under the working directory, `data/config.json`, or `GMP_CONFIG_PATH`; the first that exists is used
+4. the built-in default ([config-defaults.ts](src/config-defaults.ts))
+
+Invalid values are skipped and logged at startup instead of being applied. See [config.example.json](data/config.example.json) for the keys. `GMP_SEED_PHRASE` is never read from a config file.
+
+To run more than one node in a process, give each its own `dataDir` (`new GMPNodeManager({ seedPhrase, dataDir })`); it holds that node's nonce state, claim log and peer cache. `GMPNode` itself never reads the environment: the manager resolves configuration and passes it in as `config`.
+
+## Bridge sessions
+
+The WebSocket bridge (`startBridge`) can serve several identities at once. Each client session is bound to one node, and the seed phrase in its `start` decides which one. The same seed reaches the same node from any session; a different seed gets its own isolated node, with its own `nodes/<NodeID>/` data directory. A session only receives its own node's events. A client that sends no seed uses the host's node (the manager passed to `startBridge`). `close()` on the returned handle releases the port and stops the nodes the bridge created.
 
 ## Security & Privacy Logging Rules
 

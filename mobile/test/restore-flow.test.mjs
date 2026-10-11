@@ -1,13 +1,7 @@
 /**
- * Restoring from a recovery phrase.
- *
- * The phrase was unenterable before this: twelve words written down and
- * nowhere in the app that would accept them. These cover the parsing and
- * validation the screen depends on, plus that the entry points exist.
- *
- * The wordlist is a curated 575-word list with no BIP-39 checksum, so a phrase
- * cannot be proved correct — only that every word is in the list. Confirming
- * the derived Ghost Address is what stands in for a checksum.
+ * Restoring from a recovery phrase: parsing and validation the screen depends
+ * on, plus that the entry points exist. There is no checksum; confirming the
+ * derived Ghost Address stands in for one.
  */
 import fs from 'fs';
 import path from 'path';
@@ -85,9 +79,8 @@ ok(/Past messages, files and contacts stay on your old device/.test(restore),
    'The screen says plainly that messages do not come back');
 
 // ── Committing a restore must not half-succeed ─────────────────────────────
-// storeKeyPair used to return false on failure and every caller awaited it
-// without looking, so a keystore that refused the write still produced a
-// screen saying the identity was restored — and it was gone on next launch.
+// storeKeyPair must throw when the keystore refuses, and callers must not
+// report a restore that was not written.
 const cryptoSrc = read('src/utils/crypto.js');
 ok(/throw new Error\(\s*`Could not save the identity key/.test(cryptoSrc),
    'storeKeyPair reports a failed write instead of returning false');

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -6,20 +7,21 @@ import logger from './logger.js';
 /** How long to keep trying before giving up and letting the caller fail closed. */
 const DEFAULT_TIMEOUT_MS = 5000;
 
-/**
- * A lock older than this is treated as debris, provided its owner also looks
- * dead. Generous relative to how long a write actually takes (single-digit
- * milliseconds) so that a slow disk is never mistaken for a crash.
- */
+/** Age after which a lock with a dead owner is treated as debris. */
 const DEFAULT_STALE_MS = 30_000;
 
 /** Gap between acquisition attempts. */
 const RETRY_INTERVAL_MS = 25;
 
+/** Age after which a `.break` lock is debris (its holder died mid-break). */
+const BREAK_STALE_MS = 10_000;
+
 interface LockRecord {
   pid: number;
   hostname: string;
   acquiredAt: number;
+  /** Random per acquisition: release removes the lock only while it is still ours. */
+  token?: string;
 }
 
 export class LockTimeoutError extends Error {
@@ -33,14 +35,8 @@ export class LockTimeoutError extends Error {
 }
 
 /**
- * Block until a sleep elapses, without an event loop turn.
- *
- * The state files are written synchronously from inside handshake handling, so
- * the retry loop has to be synchronous too — an async lock would let a second
- * claim interleave between the check and the write, which is the race being
- * closed. Atomics.wait on a throwaway SharedArrayBuffer is the only true
- * synchronous sleep available; a busy loop would burn a core while a peer
- * writes.
+ * Synchronous sleep via Atomics.wait. The lock is taken from synchronous
+ * handshake code, so the retry loop cannot yield to the event loop.
  */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -52,28 +48,35 @@ function readLock(lockPath: string): LockRecord | null {
     if (typeof parsed?.pid === 'number' && typeof parsed?.acquiredAt === 'number') return parsed;
     return null;
   } catch {
-    // Absent, unreadable, or half-written — in every case there is nothing here
-    // that can be shown to belong to a living process.
+    // Absent, unreadable, or half-written.
+    return null;
+  }
+}
+
+/** Milliseconds since the lock file was last written, or null if it is gone. */
+function fileAgeMs(p: string): number | null {
+  try {
+    return Date.now() - fs.statSync(p).mtimeMs;
+  } catch {
     return null;
   }
 }
 
 /**
- * Is this lock debris from a process that will never release it?
- *
- * Requires both age and a dead owner. Age alone would break a lock held by a
- * process merely stalled on a slow disk, and liveness alone is unknowable for a
- * pid on another machine — so a lock whose hostname is not ours is only ever
- * broken on age, and only well past the point a write could still be running.
+ * Is this lock debris? Requires age and a dead owner; a lock from another host
+ * is broken on age alone. An unreadable (just-created) lock is stale only once
+ * its mtime is older than `staleMs`.
  */
-function isStale(record: LockRecord | null, staleMs: number): boolean {
-  if (!record) return true;
+function isStale(lockPath: string, record: LockRecord | null, staleMs: number): boolean {
+  if (!record) {
+    const age = fileAgeMs(lockPath);
+    return age !== null && age > staleMs;
+  }
 
   const age = Date.now() - record.acquiredAt;
-  // A lock stamped in the future means the clock moved; do not let that make
-  // every lock look fresh forever.
-  if (age < 0) return Math.abs(age) > staleMs;
-  if (age <= staleMs) return false;
+  // A future-stamped lock (clock step) is only eligible; on this host the owner
+  // must still be dead.
+  if (Math.abs(age) <= staleMs) return false;
 
   if (record.hostname !== os.hostname()) return true;
 
@@ -87,19 +90,51 @@ function isStale(record: LockRecord | null, staleMs: number): boolean {
   }
 }
 
+function sameRecord(a: LockRecord | null, b: LockRecord | null): boolean {
+  if (!a || !b) return a === b;
+  return a.pid === b.pid && a.hostname === b.hostname && a.acquiredAt === b.acquiredAt && a.token === b.token;
+}
+
 /**
- * Run `fn` holding an exclusive lock on `targetPath`.
+ * Remove a stale lock if it is still the same one. Breakers serialise through
+ * `<lock>.break` (O_EXCL) so one breaker never deletes another's fresh lock.
+ * Returns true when a lock was removed.
+ */
+function breakStaleLock(lockPath: string, observed: LockRecord | null, staleMs: number): boolean {
+  const breakPath = `${lockPath}.break`;
+  try {
+    fs.closeSync(fs.openSync(breakPath, 'wx'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    const age = fileAgeMs(breakPath);
+    if (age !== null && age > BREAK_STALE_MS) {
+      try { fs.unlinkSync(breakPath); } catch { /* someone else cleared it */ }
+    }
+    return false; // another waiter is breaking it; retry the lock
+  }
+  try {
+    const current = readLock(lockPath);
+    if (!sameRecord(current, observed) || !isStale(lockPath, current, staleMs)) return false;
+    logger.warn(
+      'file-lock',
+      'stale-lock-broken',
+      `Removing a stale lock at ${lockPath}` +
+      (current ? ` left by pid ${current.pid} on ${current.hostname}` : ' with no readable owner'),
+      { lockPath, ...(current ? { pid: current.pid, hostname: current.hostname } : {}) },
+    );
+    try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
+    return true;
+  } finally {
+    try { fs.unlinkSync(breakPath); } catch { /* already gone */ }
+  }
+}
+
+/**
+ * Run `fn` holding an exclusive lock on `targetPath` (open O_CREAT|O_EXCL).
+ * Throws LockTimeoutError if the lock is still held at the timeout, so callers
+ * can fail closed.
  *
- * The nonce store's save is a read-modify-write: it reads the file, folds its
- * own state into it, and writes the result back. Two processes doing that
- * without a lock silently discard each other's claims — each writes a file
- * derived from a snapshot taken before the other's write. An atomic write
- * cannot fix that on its own; only serialising the whole sequence can.
- *
- * Exclusivity comes from `open(O_CREAT|O_EXCL)`, which the kernel guarantees
- * will succeed for exactly one caller. Throws LockTimeoutError if the lock is
- * still held when the timeout expires, so the caller can fail closed rather
- * than proceeding unsynchronised.
+ * Residual: a lock held from another host is broken on age alone.
  */
 export function withFileLock<T>(
   targetPath: string,
@@ -113,12 +148,13 @@ export function withFileLock<T>(
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
   const deadline = Date.now() + timeoutMs;
+  const token = crypto.randomBytes(12).toString('hex');
   let acquired = false;
   let lastSeen: LockRecord | null = null;
 
   while (!acquired) {
     try {
-      const record: LockRecord = { pid: process.pid, hostname: os.hostname(), acquiredAt: Date.now() };
+      const record: LockRecord = { pid: process.pid, hostname: os.hostname(), acquiredAt: Date.now(), token };
       // 'wx' is O_CREAT|O_EXCL|O_WRONLY: it fails if anything is already there.
       const fd = fs.openSync(lockPath, 'wx');
       try {
@@ -131,21 +167,7 @@ export function withFileLock<T>(
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
 
       lastSeen = readLock(lockPath);
-      if (isStale(lastSeen, staleMs)) {
-        logger.warn(
-          'file-lock',
-          'stale-lock-broken',
-          `Removing a stale lock at ${lockPath}` +
-          (lastSeen ? ` left by pid ${lastSeen.pid} on ${lastSeen.hostname}` : ' with no readable owner'),
-          { lockPath, ...(lastSeen ? { pid: lastSeen.pid, hostname: lastSeen.hostname } : {}) },
-        );
-        try {
-          fs.unlinkSync(lockPath);
-        } catch {
-          /* someone else broke it first, which is just as good */
-        }
-        continue;
-      }
+      if (isStale(lockPath, lastSeen, staleMs) && breakStaleLock(lockPath, lastSeen, staleMs)) continue;
 
       if (Date.now() >= deadline) throw new LockTimeoutError(lockPath, timeoutMs, lastSeen);
       sleepSync(RETRY_INTERVAL_MS);
@@ -155,11 +177,16 @@ export function withFileLock<T>(
   try {
     return fn();
   } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch {
-      // Already gone — another process judged us stale and broke it. Nothing to
-      // do here; the damage, if any, is in the write that just completed.
+    // Remove the lock only while it is still ours: deleting by path alone let
+    // a holder whose lock had been taken over delete the new holder's lock,
+    // and the overlap cascaded.
+    const current = readLock(lockPath);
+    if (current && current.token === token) {
+      try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
+    } else {
+      logger.error('file-lock', 'lock-lost',
+        `Lock at ${lockPath} was no longer ours at release; another process may have run concurrently`,
+        { lockPath });
     }
   }
 }

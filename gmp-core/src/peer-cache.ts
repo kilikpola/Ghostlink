@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import config from './config.js';
+import { DEFAULTS } from './config-defaults.js';
 import { StateAuthenticationError } from './types.js';
+import { refuse } from './state-refusal.js';
 import logger from './logger.js';
 import { PEER_CACHE_FILE } from './paths.js';
 import { writeFileAtomicSync, cleanStaleTempFiles } from './atomic-file.js';
@@ -13,11 +14,29 @@ const DEFAULT_CACHE_FILE = PEER_CACHE_FILE;
 
 export class PeerCache {
   private filePath: string;
-  private cache: CachedPeer[];
+  /** Read by key rotation (via PeerCacheLike) to find a rotated peer's entry. */
+  cache: CachedPeer[];
   private encryptionKey: Buffer | null;
   private pruneInterval: NodeJS.Timeout | null;
+  private readonly strictState: boolean;
+  private readonly maxSize: number;
+  private readonly pruneAgeDays: number;
+  private readonly pruneFailureThreshold: number;
 
-  constructor({ filePath, seedPhrase }: { filePath?: string; seedPhrase?: string } = {}) {
+  constructor({ filePath, seedPhrase, strictState, maxSize, pruneAgeDays, pruneFailureThreshold }: {
+    filePath?: string;
+    seedPhrase?: string;
+    /** Refuse unauthenticated state instead of discarding it (GMP_STRICT_STATE). */
+    strictState?: boolean;
+    maxSize?: number;
+    pruneAgeDays?: number;
+    pruneFailureThreshold?: number;
+  } = {}) {
+    // Set before anything below can load the file: the load path reads strictState.
+    this.strictState = strictState ?? DEFAULTS.GMP_STRICT_STATE;
+    this.maxSize = maxSize || DEFAULTS.GMP_PEER_CACHE_MAX_SIZE;
+    this.pruneAgeDays = pruneAgeDays || DEFAULTS.GMP_PEER_CACHE_PRUNE_AGE_DAYS;
+    this.pruneFailureThreshold = pruneFailureThreshold || DEFAULTS.GMP_PEER_CACHE_PRUNE_FAILURE_THRESHOLD;
     this.filePath = filePath || DEFAULT_CACHE_FILE;
     this.cache = [];
     this.encryptionKey = null;
@@ -51,16 +70,7 @@ export class PeerCache {
     }
   }
 
-  /**
-   * Attach the key the cache file is sealed with, and reconcile what is held
-   * in memory with what is on disk.
-   *
-   * link.js supplies the key only once the identity has been derived, so a
-   * cache can already have recorded peers by the time this runs. load() used to
-   * assign over this.cache, which dropped every one of them — the same
-   * replace-on-load shape as the nonce store, with a milder consequence: a
-   * forgotten peer costs a colder bootstrap rather than replay protection.
-   */
+  /** Attach the at-rest key and merge on-disk peers with those already in memory. */
   setEncryptionKey(key: Buffer | null): void {
     this.encryptionKey = key;
     const hadEntries = this.cache.length > 0;
@@ -71,36 +81,27 @@ export class PeerCache {
   }
 
   /**
-   * A cache file that exists but cannot be authenticated.
-   *
-   * Less severe than the nonce store losing its marks — the worst case here is
-   * re-bootstrapping from the public peer list rather than a security
-   * regression — but it means the file was tampered with or belongs to another
-   * identity, and that is worth an ERROR rather than a WARN that scrolls past.
-   * GMP_STRICT_STATE makes it fatal, for the same reasons as the nonce store.
+   * A cache file that cannot be authenticated: logged at ERROR, fatal under
+   * GMP_STRICT_STATE.
    */
   private _onUnauthenticatedState(error: Error): void {
     logger.error(
       'peer-cache',
       'state-authentication-failed',
       `Peer cache exists but could not be authenticated; discarding it: ${error.message}`,
-      { err: error.message, cacheFile: this.filePath, strict: !!config.GMP_STRICT_STATE }
+      { err: error.message, cacheFile: this.filePath, strict: this.strictState }
     );
-    if (config.GMP_STRICT_STATE) {
-      throw new StateAuthenticationError(
-        `Refusing to start: peer cache at ${this.filePath} could not be authenticated ` +
-        `(${error.message}). Move or delete the file to start fresh deliberately, ` +
-        `or unset GMP_STRICT_STATE.`
-      );
+    if (this.strictState) {
+      throw refuse({
+        what: `the peer cache could not be authenticated (${error.message}).`,
+        file: this.filePath,
+        action: 'move-aside',
+        loses: 'the list of peers this node has met; it bootstraps from the public peer list instead. No replay protection is lost.',
+      });
     }
   }
 
-  /**
-   * Read the persisted cache, or null if there is nothing usable to read.
-   *
-   * Separated from load() so that "what is on disk" and "what becomes the live
-   * cache" stay distinct decisions — the second is a merge.
-   */
+  /** Read the persisted cache, or null if there is nothing usable. */
   private _readPersistedCache(): CachedPeer[] | null {
     if (!this.encryptionKey) return null;
     try {
@@ -147,13 +148,8 @@ export class PeerCache {
   }
 
   /**
-   * Combine what is known about one peer from memory and from disk.
-   *
-   * Each field takes the more conservative of the two readings: the most recent
-   * sighting, the larger success and failure tallies, and the earliest first
-   * contact. Keeping the higher failureCount matters most — discarding failures
-   * would hand a peer that has been failing steadily a clean record every time
-   * the cache reloaded, and it would never age out of the candidate list.
+   * Merge one peer's memory and disk records: latest sighting, larger
+   * success/failure tallies, earliest first contact.
    */
   private _mergePeer(mine: CachedPeer, theirs: CachedPeer): CachedPeer {
     const newer = mine.lastSeen >= theirs.lastSeen ? mine : theirs;
@@ -194,14 +190,7 @@ export class PeerCache {
     this.cache = [...byId.values()];
   }
 
-  /**
-   * Bring the persisted cache in, merging rather than replacing.
-   *
-   * Reached from the constructor, from setEncryptionKey(), and from any
-   * external caller. Assigning over this.cache at any of those points discards
-   * peers this process has already learned — including, on the no-key path,
-   * every peer recorded before the identity was derived.
-   */
+  /** Bring the persisted cache in, merging rather than replacing. */
   load(): void {
     this._mergeCache(this._readPersistedCache());
     if (!Array.isArray(this.cache)) {
@@ -214,12 +203,7 @@ export class PeerCache {
       return;
     }
     try {
-      // The same unsynchronised read-modify-write the nonce store had: this
-      // serialises the in-memory cache over whatever is on disk, so two nodes
-      // sharing a data directory each erase the peers the other learned. The
-      // consequence is milder than losing replay state — a colder bootstrap,
-      // not nonce reuse — but a known race left in place is how the next audit
-      // finds it. Re-read inside the lock and merge, exactly as load() does.
+      // Re-read and merge under the lock so concurrent writers keep each other's peers.
       withFileLock(this.filePath, () => {
         this._mergeCache(this._readPersistedCache());
         writeFileAtomicSync(this.filePath, this._serialize());
@@ -253,6 +237,7 @@ export class PeerCache {
     if (entry) {
       entry.address = address;
       entry.port = port;
+      delete entry.inbound;
       entry.lastSeen = now;
       entry.connectionCount++;
       entry.failureCount = 0;
@@ -270,17 +255,14 @@ export class PeerCache {
         lastFailedAt: null,
         failureCount: 0,
       };
-        // The signing key must be recorded on first contact too. This branch
-        // dropped the argument, and a peer's first connection always lands
-        // here — so it was never stored at all, which made KeyRotationManager
-        // reject every rotation as an "unknown or untrusted old NodeID".
+        // Record the signing key on first contact; key rotation depends on it.
         if (signingPubKey) {
           entry.signingPubKey = signingPubKey;
         }
       this.cache.push(entry);
     }
 
-    const maxSize = config.GMP_PEER_CACHE_MAX_SIZE || 500;
+    const maxSize = this.maxSize;
     if (this.cache.length > maxSize) {
       this.cache.sort((a, b) => this.getScore(b) - this.getScore(a));
       this.cache = this.cache.slice(0, maxSize);
@@ -327,18 +309,48 @@ export class PeerCache {
     return (entry.connectionCount / (entry.failureCount + 1)) * recencyBonus;
   }
 
+  /** An inbound peer: remember its signing key, not its address. */
+  recordInbound(nodeId: string, signingPubKey: string | null = null): void {
+    if (!nodeId) return;
+    const now = Date.now();
+    const entry = this.cache.find(e => e.nodeId === nodeId);
+    if (entry) {
+      entry.lastSeen = now;
+      if (signingPubKey) entry.signingPubKey = signingPubKey;
+    } else {
+      this.cache.push({
+        nodeId,
+        address: '',
+        port: 0,
+        firstSeen: now,
+        lastSeen: now,
+        connectionCount: 0,
+        lastFailedAt: null,
+        failureCount: 0,
+        inbound: true,
+        ...(signingPubKey ? { signingPubKey } : {}),
+      });
+    }
+    this.save();
+  }
+
+  /** Dialable entries only: an inbound-only entry has no address to dial. */
+  private _dialable(entry: CachedPeer): boolean {
+    return !entry.inbound && !!entry.address && entry.port > 0;
+  }
+
   getCandidates(): CachedPeer[] {
-    return [...this.cache].sort((a, b) => this.getScore(b) - this.getScore(a));
+    return this.cache.filter((e) => this._dialable(e)).sort((a, b) => this.getScore(b) - this.getScore(a));
   }
 
   getDirectPeers24h(): CachedPeer[] {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    return this.cache.filter(entry => entry.lastSeen >= oneDayAgo && entry.connectionCount > 0);
+    return this.cache.filter(entry => this._dialable(entry) && entry.lastSeen >= oneDayAgo && entry.connectionCount > 0);
   }
 
   prune(): void {
-    const pruneAgeDays = config.GMP_PEER_CACHE_PRUNE_AGE_DAYS || 30;
-    const failureThreshold = config.GMP_PEER_CACHE_PRUNE_FAILURE_THRESHOLD || 10;
+    const pruneAgeDays = this.pruneAgeDays;
+    const failureThreshold = this.pruneFailureThreshold;
     const cutoffTime = Date.now() - pruneAgeDays * 24 * 60 * 60 * 1000;
 
     this.cache = this.cache.filter(entry => {

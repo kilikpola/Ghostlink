@@ -1,4 +1,4 @@
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import readline from 'readline';
 
 const rl = readline.createInterface({
@@ -26,7 +26,7 @@ async function main() {
 
   // Start Node
   console.log('\nInitializing Public Peer Node...');
-  const node = new GMPNode({
+  const node = createGMPNode({
     port,
     isPublicPeer: true
   });

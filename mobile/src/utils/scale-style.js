@@ -1,20 +1,6 @@
-/**
- * Multiply the text sizes in a style by the user's chosen scale.
- *
- * Kept apart from the components that use it, and free of any react-native
- * import, so it can be tested directly: the text-size setting is judged on
- * whether it moves conversations, and that is arithmetic rather than
- * rendering.
- */
+/** Multiply the text sizes in a style by the user's chosen scale (react-native free, for testing). */
 
-/**
- * Collapse a style value to a single object.
- *
- * StyleSheet.create has returned plain objects since RN 0.56 rather than
- * opaque registered ids, so nested arrays and objects are the only shapes
- * that arrive here. Anything else is passed back untouched rather than
- * guessed at.
- */
+/** Collapse a style value (nested arrays/objects) to a single object; other shapes pass through. */
 function flatten(style) {
   if (!style) return null;
   if (Array.isArray(style)) {

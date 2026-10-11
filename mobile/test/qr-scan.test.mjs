@@ -1,11 +1,5 @@
 /**
- * What the scanner does with whatever a camera hands it.
- *
- * classifyScan decides whether a scanned string is a Ghost Address, an older
- * GL- invite, or something that is not ours at all. Getting this wrong either
- * refuses a valid peer or silently adds a garbage one, and neither shows up
- * until someone is standing in front of a phone — so it is tested here rather
- * than on a device.
+ * classifyScan: Ghost Address, older GL- invite, or not ours at all.
  */
 import fs from 'fs';
 

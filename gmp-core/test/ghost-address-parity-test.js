@@ -1,13 +1,7 @@
 /**
- * index.html carries a hand-inlined copy of gmp-core/src/ghost-address.js, because
- * the Electron build loads the page over file:// where a relative ES-module
- * import is blocked. That duplication is the dangerous kind: if the two copies
- * ever disagree, two peers derive two different addresses for the same identity
- * and connections quietly stop resolving — with no error anywhere to explain it.
- *
- * So the copy is not trusted, it is verified. This extracts the functions
- * straight out of index.html, runs them against the module over a large sample
- * of random NodeIDs and mangled user input, and fails on the first divergence.
+ * index.html inlines a copy of gmp-core/src/ghost-address.js. This extracts
+ * those functions and checks them against the module over random NodeIDs and
+ * mangled user input.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data

@@ -1,7 +1,6 @@
 /**
- * GMP Two-Node Test Harness — Phase 1 + Phase 2a
+ * GMP Two-Node Test Harness
  *
- * Tests the Ghost Mesh Protocol implementation:
  * 1. Basic connection: two nodes, A listens on 49500, B dials A
  * 2. Handshake completes, both sides report correct peer NodeID
  * 3. DATA messages both directions (encryption works)
@@ -10,15 +9,16 @@
  * 4. Forged signature rejection
  * 5. Multiple simultaneous connections
  * 6. Keepalive (PING/PONG)
- * 7. Session key uniqueness check (Phase 2a)
- * 8. Rate limiting (Phase 2a)
+ * 7. Session key uniqueness check
+ * 8. Rate limiting
  *
  * Run: node test/two-node-test.js
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
-import { GMPNode, SessionKeyLRUSet } from '../dist/link.js';
-import { deriveIdentityFromSeedPhrase, signMessage } from '../dist/identity.js';
+import { SessionKeyLRUSet } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
+import { signMessage } from '../dist/identity.js';
 import { RateLimiter } from '../dist/rate-limiter.js';
 import net from 'net';
 import crypto from 'crypto';
@@ -70,8 +70,8 @@ async function delay(ms) {
 async function testBasicConnection() {
   console.log('\n=== Test 1: Basic Connection and Handshake ===');
 
-  const nodeA = new GMPNode({ port: 49500 });
-  const nodeB = new GMPNode({ port: 49501 });
+  const nodeA = createGMPNode({ port: 49500 });
+  const nodeB = createGMPNode({ port: 49501 });
 
   const identityA = await nodeA.loadIdentity(TEST_SEED_A);
   const identityB = await nodeB.loadIdentity(TEST_SEED_B);
@@ -160,7 +160,7 @@ async function testDataMessaging(linkA, linkB) {
 async function testNodeIdMismatch() {
   console.log('\n=== Test 3a: NodeID Mismatch Rejection ===');
 
-  const nodeServer = new GMPNode({ port: 49502 });
+  const nodeServer = createGMPNode({ port: 49502 });
   await nodeServer.loadIdentity('nodeid mismatch test server');
 
   let errorMessage = null;
@@ -203,11 +203,13 @@ async function testNodeIdMismatch() {
 async function testTimestampReplay() {
   console.log('\n=== Test 3b: Timestamp-Based Replay Protection ===');
 
-  const nodeServer = new GMPNode({ port: 49511 });
-  const nodeClient = new GMPNode({ port: 49512 });
+  const nodeServer = createGMPNode({ port: 49511 });
+  const nodeClient = createGMPNode({ port: 49512 });
 
-  const serverIdentity = await nodeServer.loadIdentity('timestamp replay server');
-  await nodeClient.loadIdentity('timestamp replay client');
+  await nodeServer.loadIdentity('timestamp replay server');
+  // The stale HELLO must come from someone else: a HELLO carrying the
+  // server's own NodeID is refused earlier, as a reflection.
+  const clientIdentity = await nodeClient.loadIdentity('timestamp replay client');
 
   let errorMessage = null;
 
@@ -228,16 +230,16 @@ async function testTimestampReplay() {
       const fakeHelloPayload = Buffer.alloc(265);
 
       fakeHelloPayload[0] = 0x01; // valid version
-      fakeHelloPayload.set(Buffer.from(serverIdentity.nodeId), 1);
-      fakeHelloPayload.set(Buffer.from(serverIdentity.staticPubKey), 65);
-      fakeHelloPayload.set(Buffer.from(serverIdentity.signingPubKey), 97);
+      fakeHelloPayload.set(Buffer.from(clientIdentity.nodeId), 1);
+      fakeHelloPayload.set(Buffer.from(clientIdentity.staticPubKey), 65);
+      fakeHelloPayload.set(Buffer.from(clientIdentity.signingPubKey), 97);
       fakeHelloPayload.set(Buffer.from(crypto.randomBytes(32)), 129);
       fakeHelloPayload.writeBigUInt64BE(BigInt(oldTimestamp), 161);
       fakeHelloPayload.set(crypto.randomBytes(32), 169);
 
       const signedPortion = fakeHelloPayload.slice(0, 201);
       const signature = signMessage(
-        new Uint8Array(serverIdentity.signingPrivKey),
+        new Uint8Array(clientIdentity.signingPrivKey),
         new Uint8Array(signedPortion)
       );
       fakeHelloPayload.set(Buffer.from(signature), 201);
@@ -264,8 +266,8 @@ async function testTimestampReplay() {
 async function testForgedSignature() {
   console.log('\n=== Test 4: Forged Signature Rejection ===');
 
-  const nodeServer = new GMPNode({ port: 49503 });
-  const tempNode = new GMPNode();
+  const nodeServer = createGMPNode({ port: 49503 });
+  const tempNode = createGMPNode();
 
   await nodeServer.loadIdentity('forged sig test server');
   const tempIdentity = await tempNode.loadIdentity('forged sig test temp client');
@@ -322,9 +324,9 @@ async function testForgedSignature() {
 async function testMultipleConnections() {
   console.log('\n=== Test 5: Multiple Simultaneous Connections ===');
 
-  const nodeServer = new GMPNode({ port: 49505 });
-  const nodeClient1 = new GMPNode({ port: 49506 });
-  const nodeClient2 = new GMPNode({ port: 49507 });
+  const nodeServer = createGMPNode({ port: 49505 });
+  const nodeClient1 = createGMPNode({ port: 49506 });
+  const nodeClient2 = createGMPNode({ port: 49507 });
 
   await nodeServer.loadIdentity('multi server seed');
   await nodeClient1.loadIdentity('multi client1 seed');
@@ -372,8 +374,8 @@ async function testMultipleConnections() {
 async function testKeepalive() {
   console.log('\n=== Test 6: Keepalive (PING/PONG) ===');
 
-  const nodeA = new GMPNode({ port: 49508, pingIntervalMs: 100, pongTimeoutMs: 50 });
-  const nodeB = new GMPNode({ port: 49509, pingIntervalMs: 100, pongTimeoutMs: 50 });
+  const nodeA = createGMPNode({ port: 49508, pingIntervalMs: 100, pongTimeoutMs: 50 });
+  const nodeB = createGMPNode({ port: 49509, pingIntervalMs: 100, pongTimeoutMs: 50 });
 
   await nodeA.loadIdentity('keepalive seed a');
   await nodeB.loadIdentity('keepalive seed b');
@@ -439,12 +441,12 @@ async function testRateLimiting() {
   console.log('\n=== Test 8: Rate Limiting Integration ===');
 
   const rateLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 2,
+    ratePerMinute: 2,
+    burst: 2,
     maxGlobal: 100,
   });
 
-  const nodeServer = new GMPNode({
+  const nodeServer = createGMPNode({
     port: 49513,
     rateLimiter,
   });

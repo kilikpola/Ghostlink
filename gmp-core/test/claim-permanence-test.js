@@ -1,13 +1,10 @@
 /**
- * GMP Claim Permanence & Scope Tests
- *
- * Covers the invariants that a session-key claim is permanent (V1/V2) and
- * global (V5), plus the version policy that used to drop state in silence (V4).
+ * GMP Claim Permanence & Scope Tests: claims are permanent and global, and
+ * unknown state versions are refused rather than dropped.
  */
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { NonceStore } from '../dist/nonce-store.js';
-import config from '../dist/config.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -199,10 +196,8 @@ function testUnsupportedVersion() {
   const realErr = console.error;
   console.error = (...a) => { seen.push(a.join(' ')); };
   let threw = null;
-  const previousStrict = config.GMP_STRICT_STATE;
   try {
-    config.GMP_STRICT_STATE = false;
-    new NonceStore({ stateFile, seedPhrase: SEED }).load();
+    new NonceStore({ stateFile, seedPhrase: SEED, strictState: false }).load();
   } finally {
     console.error = realErr;
   }
@@ -212,12 +207,9 @@ function testUnsupportedVersion() {
   );
 
   try {
-    config.GMP_STRICT_STATE = true;
-    new NonceStore({ stateFile, seedPhrase: SEED }).load();
+    new NonceStore({ stateFile, seedPhrase: SEED, strictState: true }).load();
   } catch (e) {
     threw = e;
-  } finally {
-    config.GMP_STRICT_STATE = previousStrict;
   }
   assertEqual(threw && threw.name, 'StateAuthenticationError', 'Strict mode refuses to start');
   dropDir();

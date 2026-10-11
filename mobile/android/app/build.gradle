@@ -2,16 +2,9 @@ apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
-/**
- * This is the configuration block to customize your React Native Android app.
- * By default you don't need to apply any configuration, just uncomment the lines you need.
- */
 def nodeModulesDir = gradle.ext.nodeModulesDir
 
-// Reanimated resolves react-native by walking up from its own location. It is
-// nested in mobile/node_modules (npm did not hoist the pinned version) while
-// react-native is hoisted to the repo root, so that walk fails. Tell it where
-// to look instead of relying on the layout.
+// Reanimated cannot find the hoisted react-native by walking up; point it there.
 project.ext.REACT_NATIVE_NODE_MODULES_DIR = new File(nodeModulesDir, "react-native").absolutePath
 
 react {
@@ -24,49 +17,6 @@ react {
     // node_modules/react-native/sdks/hermesc/%OS-BIN%/hermesc, which misses the
     // hoisted layout. Point at the real binary for this host.
     hermesCommand = new File(nodeModulesDir, "react-native/sdks/hermesc/%OS-BIN%/hermesc").absolutePath
-
-    /* Folders */
-    //   The root of your project, i.e. where "package.json" lives. Default is '..'
-    // root = file("../")
-    //   The folder where the react-native NPM package is. Default is ../node_modules/react-native
-    // reactNativeDir = file("../node_modules/react-native")
-    //   The folder where the react-native Codegen package is. Default is ../node_modules/@react-native/codegen
-    // codegenDir = file("../node_modules/@react-native/codegen")
-    //   The cli.js file which is the React Native CLI entrypoint. Default is ../node_modules/react-native/cli.js
-    // cliFile = file("../node_modules/react-native/cli.js")
-
-    /* Variants */
-    //   The list of variants to that are debuggable. For those we're going to
-    //   skip the bundling of the JS bundle and the assets. By default is just 'debug'.
-    //   If you add flavors like lite, prod, etc. you'll have to list your debuggableVariants.
-    // debuggableVariants = ["liteDebug", "prodDebug"]
-
-    /* Bundling */
-    //   A list containing the node command and its flags. Default is just 'node'.
-    // nodeExecutableAndArgs = ["node"]
-    //
-    //   The command to run when bundling. By default is 'bundle'
-    // bundleCommand = "ram-bundle"
-    //
-    //   The path to the CLI configuration file. Default is empty.
-    // bundleConfig = file(../rn-cli.config.js)
-    //
-    //   The name of the generated asset file containing your JS bundle
-    // bundleAssetName = "MyApplication.android.bundle"
-    //
-    //   The entry file for bundle generation. Default is 'index.android.js' or 'index.js'
-    // entryFile = file("../js/MyApplication.android.js")
-    //
-    //   A list of extra flags to pass to the 'bundle' commands.
-    //   See https://github.com/react-native-community/cli/blob/main/docs/commands.md#bundle
-    // extraPackagerArgs = []
-
-    /* Hermes Commands */
-    //   The hermes compiler command to run. By default it is 'hermesc'
-    // hermesCommand = "$rootDir/my-custom-hermesc/bin/hermesc"
-    //
-    //   The list of flags to pass to the Hermes compiler. By default is "-O", "-output-source-map"
-    // hermesFlags = ["-O", "-output-source-map"]
 }
 
 /**
@@ -74,17 +24,7 @@ react {
  */
 def enableProguardInReleaseBuilds = false
 
-/**
- * The preferred build flavor of JavaScriptCore (JSC)
- *
- * For example, to use the international variant, you can use:
- * `def jscFlavor = 'org.webkit:android-jsc-intl:+'`
- *
- * The international variant includes ICU i18n library and necessary data
- * allowing to use e.g. `Date.toLocaleString` and `String.localeCompare` that
- * give correct results when using with locales other than en-US. Note that
- * this variant is about 6MiB larger per architecture than default.
- */
+/** The JavaScriptCore flavor ('org.webkit:android-jsc-intl:+' adds ICU, ~6MiB/ABI). */
 def jscFlavor = 'org.webkit:android-jsc:+'
 
 android {
@@ -97,45 +37,17 @@ android {
         applicationId "io.ghostlink.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // versionCode is what Play Store and sideload upgrades compare; versionName
-        // is only a label. Increment versionCode on EVERY release build you hand
-        // to anyone, and never reuse a number — a build that reuses one cannot
-        // install over its predecessor, and Play rejects it outright. It moves
-        // independently of versionName: several builds of "0.0.3" are fine, each
-        // with its own versionCode.
-        //
-        //   8  — 0.0.3 versionName now follows the GitHub release tags (0.0.x);
-        //        builds 2-7 were labelled "2.0.0". Unencrypted key storage and
-        //        the QR-scan crash loop fixed, guardian recovery gated off.
-        //   7  — 2.0.0 PBKDF2 moved into a native module: identity setup and
-        //        restore took 4-5 minutes on a Galaxy S10+ with the JS thread
-        //        pinned, and looked like a crash. Same parameters, same bytes.
-        //   6  — 2.0.0 one recovery wordlist across web, mobile and CLI, so a
-        //        phrase written on any client restores on every other; restore
-        //        from phrase; text size reaches conversations; FLAG_SECURE on
-        //        the phrase screens; restore replaces the prior identity's
-        //        data instead of inheriting it.
-        //   5  — 2.0.0 signaling removed (no server anywhere), session KDF
-        //        switched to HKDF-SHA256 (envelope v2), web invite QR readable.
-        //   4  — 2.0.0 real transport: chat actually sends, app-layer AES-GCM
-        //        on the direct WebRTC path, honest per-message padlock.
-        //   3  — 2.0.0 device test build: push notifications made non-fatal,
-        //        arm64-only. See MOBILE_BUILD.md.
-        //   2  — 2.0.0 (first shippable build; versionCode 1 was the unshipped
-        //        pair of APKs built on 2026-09-13)
+        // versionCode is what upgrades compare; increment it on every release
+        // build and never reuse a number. It moves independently of versionName.
         versionCode 8
         versionName "0.0.3"
 
-        // Opt-in ABI filtering, for producing a phone-sized APK:
+        // Opt-in ABI filtering for a phone-sized APK:
         //
         //   ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a
         //
-        // Passing that property alone is not enough on its own — it controls
-        // what React Native compiles, but dependencies like react-native-webrtc
-        // ship prebuilt .so files for every ABI and those are packaged
-        // regardless. abiFilters is what actually drops them. Without the
-        // property the build stays universal, which is the right default for a
-        // file someone sideloads onto an unknown device.
+        // abiFilters also drops prebuilt .so files from dependencies. Without
+        // the property the build stays universal.
         if (project.hasProperty("reactNativeArchitectures")) {
             ndk {
                 abiFilters.clear()
@@ -143,11 +55,9 @@ android {
             }
         }
     }
-    // Release credentials come from android/keystore.properties, which is not in
-    // version control. A release build without them fails (see the taskGraph
-    // check below) rather than falling back to the debug key: the debug key is
-    // public, so a debug-signed release would let anyone ship an "update" that
-    // installs over GhostLink. Debug builds do not need the file.
+    // Release credentials come from android/keystore.properties (not in version
+    // control). A release build without them fails rather than using the
+    // public debug key.
     def keystorePropsFile = rootProject.file(project.findProperty("ghostlinkKeystoreProps") ?: "keystore.properties")
     def keystoreProps = new Properties()
     if (keystorePropsFile.exists()) {

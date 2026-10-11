@@ -1,17 +1,7 @@
 /**
- * The recovery wordlist must be one list.
- *
- * A phrase written down on one device has to restore on every other. That
- * broke once already: web generated from the 2048-word BIP-39 list, mobile
- * validated against a curated 575, and the CLI drew from a 99-word excerpt,
- * so a perfectly correct phrase was rejected as invalid on a different
- * client — data loss in the feature whose only job is preventing it.
- *
- * shared/wordlist.js is now the single source. This file asserts that every
- * client really does use it, that the one permitted copy (gmp-core, which
- * publishes standalone and cannot import across the repo root) has not
- * drifted, and that generation and validation follow the two rules:
- * generate BIP-39 only, accept the union.
+ * The recovery wordlist must be one list (shared/wordlist.js): every client
+ * uses it, gmp-core's generated copy has not drifted, generation is BIP-39
+ * only and validation accepts the union.
  *
  * Run with: node test/wordlist-parity.test.mjs
  */
@@ -70,11 +60,17 @@ test("gmp-core's generated copy has not drifted from the shared source", () => {
 });
 
 test('the CLI draws from the shared list and keeps no excerpt', () => {
+  // The generator moved to seed-phrase.ts so operator tooling
+  // can use it without running the CLI; cli.ts must use that one generator.
   const cli = fs.readFileSync(path.join(root, 'gmp-core/src/cli.ts'), 'utf8');
-  assert.ok(/from '\.\/bip39-english\.js'/.test(cli), 'cli.ts must import the generated list');
-  assert.ok(!/const BIP39_WORDS[^=]*=\s*\[/.test(cli), 'cli.ts must not declare its own wordlist');
-  assert.ok(!/Math\.random/.test(cli.split('function secureRandomIndex')[0] + (cli.split('}')[0] || '')),
-    'seed generation must not use Math.random');
+  const gen = fs.readFileSync(path.join(root, 'gmp-core/src/seed-phrase.ts'), 'utf8');
+  assert.ok(/from '\.\/seed-phrase\.js'/.test(cli), 'cli.ts must import the one generator (seed-phrase.ts)');
+  assert.ok(/from '\.\/bip39-english\.js'/.test(gen), 'seed-phrase.ts must import the generated list');
+  for (const [name, src] of [['cli.ts', cli], ['seed-phrase.ts', gen]]) {
+    assert.ok(!/const BIP39_WORDS[^=]*=\s*\[/.test(src), `${name} must not declare its own wordlist`);
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, ''); // comments may name the old bug
+    assert.ok(!/Math\.random/.test(code), `${name} must not use Math.random`);
+  }
 });
 
 test('legacy-only words are exactly the 15 non-BIP-39 words from the old mobile list', () => {

@@ -1,4 +1,4 @@
-import config from './config.js';
+import { DEFAULTS } from './config-defaults.js';
 import logger from './logger.js';
 import metrics from './metrics.js';
 import type {
@@ -133,11 +133,9 @@ export class Forwarder {
     const now = Date.now();
 
     const windowMs = (this.node as unknown as { forwardRateLimitWindowMs?: number }).forwardRateLimitWindowMs
-      ?? config.GMP_RATE_LIMIT_WINDOW_MS
-      ?? 60000;
+      ?? DEFAULTS.GMP_RATE_LIMIT_WINDOW_MS;
     const maxForwards = (this.node as unknown as { forwardRateLimitMax?: number }).forwardRateLimitMax
-      ?? config.GMP_FORWARD_RATE_LIMIT_PER_SOURCE
-      ?? 500;
+      ?? DEFAULTS.GMP_FORWARD_RATE_LIMIT_PER_SOURCE;
 
     let timestamps = this.forwardTimestamps.get(sourceHex) || [];
     const cutoff = now - windowMs;

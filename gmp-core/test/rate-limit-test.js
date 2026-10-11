@@ -12,7 +12,7 @@
 
 import './helpers/isolate-data.mjs'; // must stay first: keeps state out of gmp-core/data
 import { RateLimiter } from '../dist/rate-limiter.js';
-import { GMPNode } from '../dist/link.js';
+import { createGMPNode } from '../dist/node-factory.js';
 import net from 'net';
 
 let testsRun = 0;
@@ -49,8 +49,8 @@ async function testPerIpRateLimiting() {
   console.log('\n=== Test 1: Per-IP Rate Limiting ===');
 
   const rateLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 10,
+    ratePerMinute: 10,
+    burst: 10,
     maxGlobal: 1000,
   });
 
@@ -81,8 +81,8 @@ async function testGlobalConnectionCap() {
   console.log('\n=== Test 2: Global Connection Cap ===');
 
   const rateLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 1000,
+    ratePerMinute: 1000,
+    burst: 1000,
     maxGlobal: 3,
   });
 
@@ -113,7 +113,7 @@ async function testGlobalConnectionCap() {
 async function testHandshakeTimeout() {
   console.log('\n=== Test 3: Handshake Timeout ===');
 
-  const nodeA = new GMPNode({
+  const nodeA = createGMPNode({
     port: 49520,
     rateLimiter: new RateLimiter({
       helloTimeoutMs: 2000,
@@ -158,11 +158,11 @@ async function testHandshakeTimeout() {
 async function testRateLimitBeforeHandshake() {
   console.log('\n=== Test 4: Rate Limit Before Handshake Crypto ===');
 
-  const nodeA = new GMPNode({
+  const nodeA = createGMPNode({
     port: 49521,
     rateLimiter: new RateLimiter({
-      windowMs: 60000,
-      maxPerIp: 2,
+      ratePerMinute: 2,
+      burst: 2,
       maxGlobal: 100,
     }),
   });
@@ -182,7 +182,7 @@ async function testRateLimitBeforeHandshake() {
     connectionsCompleted++;
   });
 
-  const dialer = new GMPNode({ port: 49522 });
+  const dialer = createGMPNode({ port: 49522 });
   await dialer.loadIdentity('rate limit handshake test dialer');
   const dialResult = await dialer.dial('127.0.0.1', 49521);
   console.log('  Real connection established via dial()');
@@ -211,7 +211,7 @@ async function testRateLimitBeforeHandshake() {
 
   await delay(500);
 
-  assert(rateLimitEvents.includes('per-ip-limit'), 'Per-IP rate limit was triggered');
+  assert(rateLimitEvents.includes('address-rate'), 'Per-address rate limit was triggered');
   console.log(`  Rate limit events: ${rateLimitEvents.length}`);
 
   dialResult.link.destroy();
@@ -223,8 +223,8 @@ async function testRateLimiterStats() {
   console.log('\n=== Test 5: Rate Limiter Stats ===');
 
   const rateLimiter = new RateLimiter({
-    windowMs: 60000,
-    maxPerIp: 10,
+    ratePerMinute: 10,
+    burst: 10,
     maxGlobal: 100,
   });
 
@@ -244,31 +244,24 @@ async function testRateLimiterStats() {
 }
 
 async function testIPWindowCleaning() {
-  console.log('\n=== Test 6: IP Window Cleaning ===');
+  console.log('\n=== Test 6: per-address tokens refill ===');
 
+  // Bucket of 3 refilling 3 per second (the old 3-per-1 s window).
   const rateLimiter = new RateLimiter({
-    windowMs: 1000,
-    maxPerIp: 3,
+    ratePerMinute: 180,
+    burst: 3,
     maxGlobal: 100,
   });
 
   const mockSocket = { remoteAddress: '10.0.0.2' };
+  const take = () => { const ok = rateLimiter.checkConnection(mockSocket); if (ok) rateLimiter._globalCount--; return ok; };
 
-  rateLimiter.checkConnection(mockSocket);
-  rateLimiter._globalCount--;
-  rateLimiter.checkConnection(mockSocket);
-  rateLimiter._globalCount--;
-  rateLimiter.checkConnection(mockSocket);
-  rateLimiter._globalCount--;
-
-  assertEqual(rateLimiter._ipWindows.get('10.0.0.2').length, 3, '3 timestamps in window');
+  assert(take() && take() && take(), 'the burst of 3 is admitted');
+  assert(!take(), 'the 4th in the same instant is refused');
 
   await delay(1100);
 
-  rateLimiter.checkConnection(mockSocket);
-  rateLimiter._globalCount--;
-
-  assertEqual(rateLimiter._ipWindows.get('10.0.0.2').length, 1, 'Old timestamps cleaned, 1 remains');
+  assert(take(), 'after a second the bucket has refilled');
 
   rateLimiter.close();
 }

@@ -1,11 +1,10 @@
 /**
- * GMP Nonce Persistence Test — Phase 2a / Phase 5
+ * GMP Nonce Persistence Test
  *
- * Tests the nonce store's persistence, encryption, and pruning:
  * 1. Create a nonce store, add some entries
  * 2. Simulate process restart by creating a new instance pointing at same file
  * 3. Confirm entries are loaded correctly
- * 4. Test pruning of old entries with new 90-day default and 30-day override
+ * 4. Test pruning of old entries with the 90-day default and a 30-day override
  * 5. Test session key uniqueness check behavior
  *
  * Run: node test/nonce-persistence-test.js
@@ -193,12 +192,8 @@ async function testPruningDefault90Days() {
 
   store2.close();
 
-  // Now simulate 91 days. This needs a fresh file: _saveNow() re-reads and
-  // merges before writing, and the merge takes the LATER lastActivity, so an
-  // entry cannot be aged backwards once a newer timestamp is on disk. That is
-  // the intended behaviour — a high-water mark, and the activity stamp that
-  // guards it, only ever move forward — so the old record has to carry its age
-  // from the moment it is first written.
+  // Simulate 91 days on a fresh file: merges keep the later lastActivity, so
+  // an entry's age must be set when it is first written.
   await cleanup();
 
   const aged = new NonceStore({ stateFile: TEST_STATE_FILE, seedPhrase: TEST_SEED });
@@ -308,12 +303,7 @@ async function testMarkInvariants() {
   const sessionKey = new Uint8Array(32);
   sessionKey.fill(0xB2);
 
-  // A state file written before the directional marks existed carries
-  // highWaterMark alone. checkNonce no longer produces such an entry — it now
-  // carries the directional marks up with the aggregate, so that a later
-  // checkAndUpdate cannot read a stale `sendHighWater ?? highWaterMark` and
-  // re-accept a nonce checkNonce had already taken — so the legacy shape is
-  // constructed directly here, which is what a real pre-upgrade file holds.
+  // A legacy state file carries highWaterMark alone; build that shape directly.
   const legacy = new NonceStore({ stateFile: TEST_STATE_FILE, seedPhrase: TEST_SEED });
   legacy.state.entries[legacy._getKey(peerId, 'legacy-fingerprint')] = {
     highWaterMark: 100,
@@ -360,18 +350,13 @@ async function testMarkInvariants() {
   await cleanup();
 }
 
-/**
- * The store being constructed at all. It was declared, imported, threaded
- * through to every link and closed on shutdown — but never actually built, so
- * every guard that used it short-circuited and none of the above ran in
- * production. A default of null is easy to reintroduce; this catches it.
- */
+/** GMPNode must actually construct its NonceStore. */
 async function testNodeWiring() {
   console.log('\n=== Test 7: GMPNode Wiring ===');
-  const { GMPNode } = await import('../dist/link.js');
+  const { createGMPNode } = await import('../dist/node-factory.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-wiring-'));
 
-  const node = new GMPNode({
+  const node = createGMPNode({
     port: 49943,
     peerCachePath: path.join(dir, 'peers.json'),
     nonceStorePath: path.join(dir, 'nonce.json'),

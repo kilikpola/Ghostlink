@@ -13,12 +13,13 @@ import {
 // Text and TextInput come from the scaled wrappers so the user's chosen
 // size reaches every literal in this file's StyleSheet. See ScaledText.js.
 import {Text, TextInput} from '../components/ScaledText';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {useTheme} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
 import {
   CryptoEngine,
   generateBackupFragments,
+  FRAGMENT_SHARES,
+  FRAGMENT_THRESHOLD,
   generateSeedPhrase,
 } from '../utils/crypto';
 import {
@@ -29,7 +30,6 @@ import {
   unlockBundle,
   saveRecoveryBundle,
   RecoveryError,
-  FRAGMENTS_STORAGE_KEY,
 } from '../utils/recovery';
 import {distributor} from '../services/MobileDistributor';
 import {useSecureScreen} from '../utils/useSecureScreen';
@@ -52,27 +52,17 @@ const LAYER_BADGES = [
 // ─── Component ──────────────────────────────────────────────────
 export default function RecoveryScreen({navigation}) {
   const {theme} = useTheme();
-  const {identity, setIdentity} = useApp();
+  const {identity, setIdentity, legacyRecovery, confirmRecoveryPhrase} = useApp();
   const webrtcRef = useRef(null);
 
-  // This screen shows a recovery phrase on its backup tab and takes one on its
-  // restore tab. Setup and RestoreIdentity already set FLAG_SECURE for the
-  // same words; without it here they landed in screenshots and in the
-  // recent-apps thumbnail.
+  // Shows and accepts recovery phrases: keep them out of screenshots.
   useSecureScreen();
 
   useEffect(() => {
     const initWebRTC = async () => {
       try {
-        // Its own short-lived transport, deliberately not the app-wide one:
-        // recovery talks to guardians over a separate connection.
-        //
-        // This used to attach a SignalingService, which dialled
-        // ws://localhost:3001 — a signaling server that no longer exists
-        // anywhere in the project, so guardian rendezvous has in fact been
-        // broken since those servers were removed. The dial is gone rather
-        // than left in place looking functional; reaching a guardian needs a
-        // serverless rendezvous, which is tracked in MOBILE_BUILD.md.
+        // A short-lived transport of its own, not the app-wide one. Guardian
+        // rendezvous needs a serverless transport (see MOBILE_BUILD.md).
         const {WebRTCService} = await import('../services/WebRTCService');
 
         const webrtc = new WebRTCService();
@@ -118,16 +108,37 @@ export default function RecoveryScreen({navigation}) {
   const [showPeerPicker, setShowPeerPicker] = useState(false);
   const [pendingFragment, setPendingFragment] = useState(null);
 
+  // ── Older recovery data: confirm the phrase before it is deleted ──
+  const [legacyPhraseInput, setLegacyPhraseInput] = useState('');
+  const [legacyBusy, setLegacyBusy] = useState(false);
+  const handleConfirmLegacyPhrase = useCallback(async () => {
+    const words = legacyPhraseInput.trim().toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+    if (words.length !== 12) {
+      Alert.alert('Invalid', 'Please enter exactly 12 words.');
+      return;
+    }
+    setLegacyBusy(true);
+    try {
+      const {deleted} = await confirmRecoveryPhrase(words);
+      setLegacyPhraseInput('');
+      Alert.alert('Done', `Your phrase is confirmed and a current recovery backup is saved. Removed from this phone: ${deleted.length} older recovery item(s).`);
+    } catch (e) {
+      Alert.alert(
+        e && e.code === 'WRONG_PHRASE' ? 'Not this identity\'s phrase' : 'Could not finish',
+        (e && e.message) || 'Nothing was deleted.',
+      );
+    } finally {
+      setLegacyBusy(false);
+    }
+  }, [legacyPhraseInput, confirmRecoveryPhrase]);
+
   // ── Backup Handlers ──
 
   const handleGenerateFragments = useCallback(async () => {
     Vibration.vibrate(20);
     try {
-      // Fragments carry the private key *wrapped* under the phrase, never the
-      // phrase itself. The previous version put the 12 words in as plaintext,
-      // which meant any three fragment-holders could collude to read the phrase
-      // outright — collapsing "something you know" and "shares you distributed"
-      // into a single factor, and handing them everything the phrase unlocks.
+      // Fragments carry the private key wrapped under the phrase, never the
+      // phrase itself.
       const stored = await CryptoEngine.loadKeyPair();
       if (!stored || !stored.privateKeyRaw) {
         Alert.alert(
@@ -151,12 +162,13 @@ export default function RecoveryScreen({navigation}) {
       const frags = generateBackupFragments(JSON.stringify(bundle));
       setFragments(frags);
       setFragmentDist({});
+      setHandedOut({}); // new shares: nothing of these has been handed out
 
       // The phrase shown on this screen is the one these fragments are wrapped
       // under, so it has to become the phrase that unlocks this device too —
       // otherwise the new fragments and the stored bundle disagree.
       await saveRecoveryBundle(bundle);
-      await AsyncStorage.setItem(FRAGMENTS_STORAGE_KEY, JSON.stringify(frags));
+      // Fragments are never stored: they exist in memory for the user to hand out.
     } catch (e) {
       Alert.alert('Error', e.message || 'Failed to generate backup fragments.');
     } finally {
@@ -192,7 +204,10 @@ export default function RecoveryScreen({navigation}) {
   const handleCopyFragment = useCallback((frag, idx) => {
     Clipboard.setString(frag.data);
     Vibration.vibrate(15);
-    Alert.alert('Copied', `Fragment ${frag.id} of 7 copied to clipboard.`);
+    Alert.alert(
+      'Copied',
+      `Fragment ${frag.id} of ${FRAGMENT_SHARES} is on the clipboard. Paste it somewhere that is not this phone — to the person who will keep it, or write it down — then mark it handed out.`,
+    );
   }, []);
 
   const handleGiveFragment = useCallback(async (frag, idx) => {
@@ -220,9 +235,7 @@ export default function RecoveryScreen({navigation}) {
 
       try {
         if (webrtcRef.current && distributor) {
-          // Same derivation the restoring device uses, so the lookup can
-          // actually match. It was previously keyed on the public key here and
-          // on the phrase at the recover end, which could never agree.
+          // Same derivation the restoring device uses, so the lookup matches.
           const tag = await deriveRecoveryTag(seedPhrase);
 
           const stored = await CryptoEngine.loadKeyPair();
@@ -337,10 +350,7 @@ export default function RecoveryScreen({navigation}) {
     setRestoreDerivStatus('deriving');
 
     try {
-      // Unwraps the private key stored at setup. Previously this derived a key,
-      // discarded it, and generated a brand-new random keypair — so "recovery"
-      // silently produced a different identity with a different public key that
-      // none of the user's peers would recognise.
+      // Unwraps the private key stored at setup.
       const identity = await restoreFromPhrase(words);
 
       setRestoreDerivStatus('success');
@@ -510,10 +520,15 @@ export default function RecoveryScreen({navigation}) {
     return Object.values(fragmentDist).filter((d) => d.distributed).length;
   }, [fragmentDist]);
 
+  // Manual hand-out, tracked on this screen only (never stored): what the
+  // user says they have given to someone.
+  const [handedOut, setHandedOut] = useState({});
+  const handedOutCount = Object.values(handedOut).filter(Boolean).length;
+
   const safetyColor =
-    distributedCount >= 5
+    distributedCount >= FRAGMENT_SHARES
       ? theme.success
-      : distributedCount >= 3
+      : distributedCount >= FRAGMENT_THRESHOLD
         ? theme.warning
         : theme.danger;
 
@@ -573,6 +588,35 @@ export default function RecoveryScreen({navigation}) {
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled">
+
+          {legacyRecovery?.state === 'needs-phrase' && (
+            <View style={[styles.card, {backgroundColor: theme.warning + '14', borderColor: theme.warning + '60'}]}>
+              <Text style={[styles.sectionLabel, {color: theme.warning}]}>CONFIRM YOUR RECOVERY PHRASE</Text>
+              <Text style={[styles.restoreDesc, {color: theme.textSecondary}]}>
+                An older version kept recovery data on this phone that this update would otherwise delete. It stays
+                until you confirm your 12-word phrase here. Write the phrase down first, somewhere other than this
+                phone. Confirming saves a current recovery backup under it; only then is the older data removed.
+              </Text>
+              <TextInput
+                style={[styles.restoreTextarea, {color: theme.text, borderColor: theme.border, backgroundColor: theme.bgTertiary}]}
+                value={legacyPhraseInput}
+                onChangeText={setLegacyPhraseInput}
+                placeholder="your twelve recovery words"
+                placeholderTextColor={theme.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                textAlignVertical="top"
+                multiline
+              />
+              <TouchableOpacity
+                style={[styles.genFragBtn, {backgroundColor: theme.warning, opacity: legacyBusy ? 0.6 : 1}]}
+                onPress={handleConfirmLegacyPhrase}
+                disabled={legacyBusy}
+                activeOpacity={0.7}>
+                <Text style={[styles.genFragBtnText, {color: theme.bg}]}>{legacyBusy ? 'Checking…' : 'Confirm phrase'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           {/* ═══════════════════ BACKUP TAB ═══════════════════ */}
           {activeTab === 0 && (
@@ -636,7 +680,7 @@ export default function RecoveryScreen({navigation}) {
                     onPress={handleGenerateFragments}
                     activeOpacity={0.7}>
                     <Text style={[styles.genFragBtnText, {color: theme.bg}]}>
-                      Generate 7 Fragments
+                      Generate {FRAGMENT_SHARES} fragments
                     </Text>
                   </TouchableOpacity>
                 ) : (
@@ -645,20 +689,34 @@ export default function RecoveryScreen({navigation}) {
                     {GUARDIAN_RECOVERY_AVAILABLE ? (
                     <View style={[styles.distCounter, {borderColor: safetyColor + '40'}]}>
                       <Text style={[styles.distCounterText, {color: safetyColor}]}>
-                        {distributedCount}/7 distributed
+                        {distributedCount}/{FRAGMENT_SHARES} distributed
                       </Text>
                       <Text style={[styles.distSafety, {color: safetyColor}]}>
-                        {distributedCount >= 5
+                        {distributedCount >= FRAGMENT_SHARES
                           ? 'Excellent'
-                          : distributedCount >= 3
+                          : distributedCount >= FRAGMENT_THRESHOLD
                             ? 'Adequate'
                             : 'Needs more'}
                       </Text>
                     </View>
                     ) : (
-                      <Text style={[styles.restoreDesc, {color: theme.textSecondary}]}>
-                        {GUARDIAN_RECOVERY_UNAVAILABLE_REASON}. Copy each fragment and hand it to a different trusted person yourself — the app does not track who holds them.
-                      </Text>
+                      <View>
+                        <Text style={[styles.restoreDesc, {color: theme.textSecondary}]}>
+                          What these are for: if you lose this phone, any {FRAGMENT_THRESHOLD} of these {FRAGMENT_SHARES} fragments,
+                          together with your recovery phrase, bring your identity back on a new one.
+                        </Text>
+                        <Text style={[styles.restoreDesc, {color: theme.textSecondary}]}>
+                          What to do now: give each fragment to a different person you trust, outside this app — read it to
+                          them, write it down for them, or send it by another channel. Keep none on this phone. They are not
+                          saved: when you leave this screen they are gone, so hand them out before you do.
+                          ({GUARDIAN_RECOVERY_UNAVAILABLE_REASON}.)
+                        </Text>
+                        <Text style={[styles.restoreDesc, {color: handedOutCount >= FRAGMENT_THRESHOLD ? theme.success : theme.warning}]}>
+                          {handedOutCount}/{FRAGMENT_SHARES} handed out — {handedOutCount >= FRAGMENT_THRESHOLD
+                            ? `restorable: any ${FRAGMENT_THRESHOLD} of them plus your phrase`
+                            : `not a backup yet: at least ${FRAGMENT_THRESHOLD} must be with other people`}
+                        </Text>
+                      </View>
                     )}
 
                     {/* Fragment list */}
@@ -700,6 +758,17 @@ export default function RecoveryScreen({navigation}) {
                                 COPY
                               </Text>
                             </TouchableOpacity>
+                            {!GUARDIAN_RECOVERY_AVAILABLE && (
+                              <TouchableOpacity
+                                style={[styles.fragActionBtn, {backgroundColor: handedOut[frag.id] ? theme.success + '20' : theme.bgSecondary}]}
+                                onPress={() => setHandedOut((h) => ({...h, [frag.id]: !h[frag.id]}))}
+                                accessibilityRole="checkbox"
+                                accessibilityState={{checked: !!handedOut[frag.id]}}>
+                                <Text style={[styles.fragActionText, {color: handedOut[frag.id] ? theme.success : theme.textSecondary}]}>
+                                  {handedOut[frag.id] ? 'HANDED OUT' : 'MARK HANDED OUT'}
+                                </Text>
+                              </TouchableOpacity>
+                            )}
                             <TouchableOpacity
                               style={[
                                 styles.fragActionBtn,

@@ -6,14 +6,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * The gmp-core package root, found by walking up from this module until a
- * package.json appears. This module is compiled to dist/, so a naive
- * `path.join(__dirname, 'data')` resolves to dist/data — a directory that does
- * not hold the checked-in peer list. Walking to the package root gives the same
- * answer whether the caller is running dist/*.js, src/*.ts under ts-node, or an
- * installed copy under node_modules, and it does not depend on process.cwd():
- * the bridge is launched from the repo root, from electron/, and from Railway's
- * container, and all three must read one file.
+ * The gmp-core package root, found by walking up to package.json, so paths
+ * resolve the same from dist/, src/ or node_modules regardless of cwd.
  */
 function findPackageRoot(start: string): string {
   let dir = start;
@@ -30,11 +24,7 @@ function findPackageRoot(start: string): string {
 
 export const PACKAGE_ROOT = findPackageRoot(__dirname);
 
-/**
- * Where the node's mutable state lives. GMP_DATA_DIR moves the whole directory
- * — useful for a container with a mounted volume, and for tests that must not
- * touch the developer's real peer cache.
- */
+/** Where the node's mutable state lives; GMP_DATA_DIR moves it. */
 export const DATA_DIR = process.env.GMP_DATA_DIR
   ? path.resolve(process.env.GMP_DATA_DIR)
   : path.join(PACKAGE_ROOT, 'data');
@@ -44,12 +34,21 @@ export function dataPath(...segments: string[]): string {
 }
 
 /**
- * The public peer list. GMP_PUBLIC_PEERS_PATH overrides it outright — the app's
- * own "no public peer" guidance tells the user to set this, so it has to work.
+ * The shipped public peer list, read from the package (not DATA_DIR).
+ * GMP_PUBLIC_PEERS_PATH replaces it.
  */
 export const PUBLIC_PEERS_FILE = process.env.GMP_PUBLIC_PEERS_PATH
   ? path.resolve(process.env.GMP_PUBLIC_PEERS_PATH)
-  : dataPath('public-peers.json');
+  : path.join(PACKAGE_ROOT, 'data', 'public-peers.json');
+
+/**
+ * Overlays merged on top of the shipped list, lowest precedence first:
+ * DATA_DIR/public-peers.json and DATA_DIR/public-peers.local.json (gitignored).
+ */
+export const PUBLIC_PEERS_OVERLAY_FILES: readonly string[] = [
+  dataPath('public-peers.json'),
+  dataPath('public-peers.local.json'),
+].filter((f) => path.resolve(f) !== path.resolve(PUBLIC_PEERS_FILE));
 
 export const PEER_CACHE_FILE = process.env.GMP_PEER_CACHE_PATH
   ? path.resolve(process.env.GMP_PEER_CACHE_PATH)
@@ -59,12 +58,7 @@ export const NONCE_STATE_FILE = process.env.GMP_NONCE_STATE_PATH
   ? path.resolve(process.env.GMP_NONCE_STATE_PATH)
   : dataPath('nonce-state.json');
 
-/**
- * The append-only session-key claim log. Separate from the nonce state because
- * claims are permanent and counters are not: counters prune and stay bounded,
- * so their file can be rewritten wholesale, while claims only ever accumulate
- * and must never pay an O(n) rewrite per handshake.
- */
+/** The append-only session-key claim log (permanent, unlike pruned counters). */
 export const NONCE_CLAIMS_FILE = process.env.GMP_NONCE_CLAIMS_PATH
   ? path.resolve(process.env.GMP_NONCE_CLAIMS_PATH)
   : dataPath('nonce-claims.log');

@@ -1,0 +1,14 @@
+[
+  {
+    "address": "hayabusa.proxy.rlwy.net",
+    "port": 58516,
+    "tls": false,
+    "nodeId": "562c487c1a10a649179dd7b131527344c9f6bd65e7ebc800b6570dd496371f65b25aec43d1d1eb3937de2bf74e3ce45f7777e6375561f26ec26215f31301ea3a",
+    "roles": [
+      "bootstrap"
+    ],
+    "operator": "",
+    "provider": "railway",
+    "addedAt": 1791654373367
+  }
+]

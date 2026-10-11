@@ -350,14 +350,16 @@ plugin).
 
 ## Not in this build
 
-**Embedded Ghost Mesh (GMP).** `nodejs-mobile-react-native` is not a dependency,
-`mobile/gmp-mobile-bridge.js` is imported by nothing, and
-`nodejs-assets/nodejs-project/main.js` points at `gmp-core/gmp-bridge.js` and
-`gmp-core/gmp-node-manager.js` — paths that moved to `gmp-core/dist/` and that
-would not resolve inside an APK regardless, since gmp-core is not bundled into
-the nodejs-mobile project.
+**Embedded Ghost Mesh (GMP).** No GMP code runs on the phone. There is no
+embedded runtime: `nodejs-mobile-react-native` is not a dependency, and the
+earlier attempt at one — `mobile/gmp-mobile-bridge.js` and
+`nodejs-assets/nodejs-project/main.js` — was removed in commit 1cd5d43. The
+only mesh path is the developer bridge above (a WebSocket to a desktop node),
+which stops at `needs-unlock` until an unlock flow supplies the phrase. What a
+phone-side GMP client would need is sized in
+`gmp-core/docs/mobile-runtime-inventory.md`.
 
-Consequently `CryptoService.js` (used only by the Ghost Mesh setup modal) has no
+Separately, `CryptoService.js` (used only by the Ghost Mesh setup modal) has no
 crypto backend in this build and throws a clear error if called, rather than
 silently returning wrong bytes.
 

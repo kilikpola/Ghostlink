@@ -4,6 +4,7 @@
  * byte-equality against Node's own TextEncoder/TextDecoder.
  */
 import {GhostTextEncoder, GhostTextDecoder} from '../src/utils/text-encoding-polyfill.js';
+import {FIXTURE_B} from '../../test/helpers/fixture-phrases.mjs';
 
 let pass = 0, fail = 0;
 const ok = (n, c) => { c ? (pass++, console.log(`  ok   ${n}`)) : (fail++, console.log(`  FAIL ${n}`)); };
@@ -49,7 +50,7 @@ console.log('\n[4] Realistic inputs');
 {
   const samples = [
     '', 'a', 'hello world',
-    'where biology dove renew ability travel student loud rubber thing duty forget',
+    FIXTURE_B.join(' '),
     'ghostlink-v2-salt', 'ghostlink-storage-v1',
     JSON.stringify({v: 1, wrappedKey: {iv: 'ab'.repeat(12), ciphertext: 'cd'.repeat(40)}}),
     'x'.repeat(10000),

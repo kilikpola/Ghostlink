@@ -6,6 +6,7 @@
  */
 import {webcrypto} from 'crypto';
 import fs from 'fs';
+import {FIXTURE_B} from '../../test/helpers/fixture-phrases.mjs';
 Object.defineProperty(globalThis, 'crypto', {value: webcrypto, configurable: true, writable: true});
 
 let pass = 0, fail = 0;
@@ -78,7 +79,7 @@ console.log('\n[2] Normalisation matches gmp-core');
 console.log('\n[3] Same phrase → same address as the desktop/web client');
 {
   const phrases = [
-    'where biology dove renew ability travel student loud rubber thing duty forget'.split(' '),
+    [...FIXTURE_B],
     generateSeedPhrase(),
     generateSeedPhrase(),
   ];

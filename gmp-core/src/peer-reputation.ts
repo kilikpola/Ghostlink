@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import config from './config.js';
+import type { ReputationEvents } from './events.js';
+import { DEFAULTS } from './config-defaults.js';
 import logger from './logger.js';
 import type {
   PeerTrustLevel,
@@ -11,20 +12,22 @@ interface ReputationOptions {
   recoveryIntervalMs?: number;
 }
 
-export class ReputationManager extends EventEmitter {
+export class ReputationManager extends EventEmitter<ReputationEvents> {
   private node: GMPNodeLike;
   private banDurationMs: number;
   private scores: Map<string, number>;
   private bannedPeers: Map<string, number>;
   private bannedIps: Map<string, number>;
   private recoveryTimer: ReturnType<typeof setInterval>;
+  readonly recoveryIntervalMs: number;
 
   constructor(node: GMPNodeLike, options: ReputationOptions = {}) {
     super();
     this.node = node;
 
-    this.banDurationMs = options.banDurationMs || config.GMP_BAN_DURATION_MS;
-    const recoveryIntervalMs = options.recoveryIntervalMs || config.GMP_REPUTATION_RECOVERY_INTERVAL_MS;
+    this.banDurationMs = options.banDurationMs || DEFAULTS.GMP_BAN_DURATION_MS;
+    const recoveryIntervalMs = options.recoveryIntervalMs || DEFAULTS.GMP_REPUTATION_RECOVERY_INTERVAL_MS;
+    this.recoveryIntervalMs = recoveryIntervalMs;
 
     this.scores = new Map();
     this.bannedPeers = new Map();

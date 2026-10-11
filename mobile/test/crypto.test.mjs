@@ -1,12 +1,10 @@
 /**
- * Verifies mobile crypto against Node's WebCrypto — the same implementation the
- * web app uses via crypto.subtle. Anything that must interoperate (hashes,
- * public keys, AES-GCM payloads, derived keys) is checked for byte equality
- * against WebCrypto, not merely for self-consistency: a wrong-but-consistent
- * implementation is exactly the failure mode being fixed here.
+ * Mobile crypto checked for byte equality against Node's WebCrypto (what the
+ * web app uses): hashes, public keys, AES-GCM payloads, derived keys.
  */
 import {webcrypto} from 'crypto';
 import assert from 'assert';
+import {FIXTURE_B} from '../../test/helpers/fixture-phrases.mjs';
 
 // Node exposes globalThis.crypto as a getter-only property; redefine it so the
 // module under test sees the same shape react-native-get-random-values installs.
@@ -154,7 +152,7 @@ console.log('\n[8] AES-GCM is wire-compatible with WebCrypto');
 
 console.log('\n[9] deriveKeyFromSeed matches the web app exactly');
 {
-  const words = 'where biology dove renew ability travel student loud rubber thing duty forget'.split(' ');
+  const words = [...FIXTURE_B];
   const mine = await C.deriveKeyFromSeed(words);
   const km = await webcrypto.subtle.importKey('raw', utf8(words.join(' ')), 'PBKDF2', false, ['deriveBits']);
   const theirs = toHex(new Uint8Array(await webcrypto.subtle.deriveBits(
@@ -195,10 +193,10 @@ console.log('\n[11] Shamir secret sharing');
   // The real caller passes the JSON backup blob, and combineFragments parses it.
   const blob = {name: 'TestGhost', pubKeyHex: 'ab'.repeat(65), wrappedPrivKey: {iv: '00'.repeat(12)}};
   const frags = generateBackupFragments(JSON.stringify(blob));
-  ok('generateBackupFragments makes 7', frags.length === 7);
+  ok('generateBackupFragments makes 5 by default (3-of-5, GM-M5-2)', frags.length === 5);
   const combined = combineFragments(frags.slice(0, 3).map(f => f.data));
   ok('combineFragments recovers the blob', combined.success && combined.blob.name === 'TestGhost');
-  const outOfOrder = combineFragments([frags[5], frags[0], frags[3]].map(f => f.data));
+  const outOfOrder = combineFragments([frags[4], frags[0], frags[3]].map(f => f.data));
   ok('any 3 fragments work, in any order', outOfOrder.success && outOfOrder.blob.pubKeyHex === blob.pubKeyHex);
   ok('2 fragments are refused', combineFragments(frags.slice(0, 2).map(f => f.data)).success === false);
 }

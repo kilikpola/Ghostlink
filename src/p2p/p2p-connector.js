@@ -377,10 +377,10 @@
       
       if (offerCollision) {
         if (!polite) {
-          console.log('[P2P] Glare detected (impolite), ignoring incoming offer from', peerId);
+          console.debug('[P2P] Glare detected (impolite), ignoring incoming offer from', peerId);
           return;
         }
-        console.log('[P2P] Glare detected (polite), rolling back local offer for', peerId);
+        console.debug('[P2P] Glare detected (polite), rolling back local offer for', peerId);
         await pc.setLocalDescription({ type: 'rollback' });
       }
 
@@ -409,7 +409,7 @@
       if (!pc) return;
 
       if (pc.signalingState === 'stable') {
-        console.log('[P2P] Already stable, ignoring answer from', peerId);
+        console.debug('[P2P] Already stable, ignoring answer from', peerId);
         return;
       }
 
@@ -631,7 +631,7 @@
         const gm = window.ghostlink.ghostMesh;
         
         const un1 = gm.onPeerConnected(async ({ connId, remoteAddress, type }) => {
-          console.log(`[GhostMesh] Accepted incoming connection ${connId} from ${remoteAddress}`);
+          console.debug(`[GhostMesh] Accepted incoming connection ${connId} from ${remoteAddress}`);
         });
         
         const un2 = gm.onData(async ({ connId, data }) => {
@@ -714,14 +714,11 @@
         const msg = JSON.parse(data);
         if (msg.type === 'identity') {
           const peerId = msg.fingerprint;
-          console.log(`[GhostMesh] Received identity from peer ${peerId} (${msg.name})`);
+          console.debug(`[GhostMesh] Received identity from peer ${peerId} (${msg.name})`);
 
-          // A peer identifies itself by fingerprint and announces a public key.
-          // The fingerprint is defined as a truncated SHA-256 of that key
-          // (see fingerprintFromPublicKey in index.html), so the two have to
-          // agree — otherwise anyone can announce their own key under someone
-          // else's fingerprint and the session is established with the wrong
-          // party under the right name.
+          // The announced fingerprint must be the truncated SHA-256 of the
+          // announced key (fingerprintFromPublicKey in index.html), or anyone
+          // could claim another identity's fingerprint.
           const boundFingerprint = await this._fingerprintFor(msg.publicKeyHex);
           if (!boundFingerprint || boundFingerprint !== String(peerId || '').trim().toUpperCase()) {
             console.warn(
@@ -731,13 +728,7 @@
             return;
           }
 
-          // ECDH or nothing.
-          //
-          // This used to fall back to SHA-256(ourFingerprint + ':' + peerId)
-          // when ECDH failed. Both fingerprints are public values, so that
-          // "key" was known to anyone who had seen them — and the remote side
-          // picked when it was used, because any unparseable publicKeyHex sent
-          // derivation down the catch. Refuse the connection instead.
+          // ECDH or nothing: no fallback key derived from public values.
           const privKey = this.identity.privateKey || (this.identity.keyPair && this.identity.keyPair.privateKey);
           if (!privKey) {
             console.warn('[GhostMesh] No local ECDH private key — refusing mesh session.');

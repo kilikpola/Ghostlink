@@ -1,39 +1,15 @@
 /**
  * GhostLink Mobile — Crypto Service
  *
- * Provides all cryptographic operations needed for GhostLink on React Native.
- *
- * React Native does NOT expose the Web Crypto API. This module uses
- * `react-native-quick-crypto` (an OpenSSL-backed, synchronous crypto library)
- * as the primary provider. If unavailable, it falls back to `expo-crypto`
- * for hashing and `react-native-get-random-values` for secure random bytes.
- *
- * Install peer dependencies:
- *   npm install react-native-quick-crypto
- *   # OR for Expo managed workflow:
- *   npx expo install expo-crypto
+ * Cryptographic operations backed by `react-native-quick-crypto` (OpenSSL,
+ * synchronous), resolved lazily because it is not a dependency of this build.
  *
  * @module CryptoService
  */
 
-// ─── Crypto Backend ─────────────────────────────────────────────────────────
-//
-// react-native-quick-crypto provides a Node-compatible `crypto` interface
-// backed by native OpenSSL, giving us ECDH, AES-GCM, PBKDF2, and SHA-256
-// without shipping a JS-only polyfill.
-//
-// Import it at app entry point to polyfill global.crypto:
-//   import 'react-native-quick-crypto';
-//
-// If you are on Expo managed workflow without native modules, swap the
-// implementations below for expo-crypto equivalents (noted in comments).
-
-// react-native-quick-crypto is not a dependency of this build. It is a JSI/C++
-// module and the only consumer of this file is the Ghost Mesh setup modal, which
-// is disabled here (see MOBILE_BUILD.md — embedded GMP is a follow-up). A bare
-// `require` of an uninstalled package is a hard Metro resolution error, not a
-// catchable one, so there is nothing to try/catch: resolve it lazily and let any
-// call fail loudly rather than quietly returning wrong bytes.
+// react-native-quick-crypto is not installed in this build (only the disabled
+// Ghost Mesh setup modal uses this file). Resolve it lazily so any call fails
+// loudly instead of breaking Metro resolution.
 const QUICK_CRYPTO_MISSING =
   '[GhostLink:Crypto] react-native-quick-crypto is not installed in this build. ' +
   'Ghost Mesh identity derivation is unavailable. Install it and rebuild to enable ' +
@@ -271,27 +247,14 @@ const CryptoService = {
    *
    * ⚠ MUST NOT BE USED TO DERIVE A GHOST ADDRESS OR ANY IDENTITY. ⚠
    *
-   * This is a *routing address* for a self-hosted Yggdrasil daemon, not an
-   * identity. It exists only for the Ghost Mesh setup modal, which is gated
-   * off in this build (see MESH_SETUP_AVAILABLE in utils/capabilities.js).
-   *
-   * Its KDF disagrees with the one that produces identities:
+   * A routing address for a self-hosted Yggdrasil daemon, used only by the
+   * (disabled) Ghost Mesh setup modal. Its KDF differs from identity derivation:
    *
    *   this function   PBKDF2-HMAC-SHA256, salt "ghostlink-yggdrasil-v1"
    *   Ghost Address   PBKDF2-HMAC-SHA512, same salt — see
    *                   CryptoEngine.deriveGhostIdentity in utils/crypto.js
    *
-   * Same phrase, same salt, same iterations, different PRF — so different
-   * bytes and a different address. Using this for a Ghost Address would give
-   * a user an address their own node does not answer to, and it would look
-   * like it worked.
-   *
    * Mirrors CryptoEngine.deriveLegacyYggdrasilIP in the web app.
-   *
-   * Derivation flow:
-   *   1. PBKDF2(seed_words, salt="ghostlink-yggdrasil-v1", 100k iter, SHA-256) → 32-byte seed
-   *   2. X25519 keypair from the 32-byte seed (Curve25519 scalar-basepoint multiplication)
-   *   3. Yggdrasil IPv6 address from SHA-512(X25519_public_key)
    *
    * @param {string[]} words Array of 12 or 24 seed words.
    * @returns {Promise<{ publicKeyHex: string, privateKeyHex: string, address: string }>}
@@ -344,21 +307,15 @@ const CryptoService = {
   },
 
   /**
-   * Derive a Yggdrasil IPv6 address from an X25519 public key.
-   *
-   * Algorithm (matches yggdrasil-go address.go):
-   *   1. hash = SHA-512(publicKeyBytes)
-   *   2. Count leading 1-bits in the hash → leadingOnes
-   *   3. Address[0] = 0x02 (Yggdrasil 0200::/7 prefix)
-   *   4. Address[1] = leadingOnes
-   *   5. Remaining 112 bits come from the hash, starting after the leading
-   *      1-bits and the first 0-bit that follows them
-   *   6. Format as compressed IPv6
+   * Yggdrasil IPv6 address from an X25519 public key (as in yggdrasil-go
+   * address.go): 0x02, the count of leading 1-bits of SHA-512(key), then the
+   * 112 hash bits after the first following 0-bit. Private helper of
+   * deriveLegacyYggdrasilIP — see the warning there.
    *
    * @param {Uint8Array} publicKeyBytes 32-byte X25519 public key.
    * @returns {Promise<string>} Yggdrasil IPv6 address string.
+   * @private
    */
-  /** Private helper of deriveLegacyYggdrasilIP — see the warning there. @private */
   async _legacyYggdrasilIPFromKey(publicKeyBytes) {
     const {sha512} = require('@noble/hashes/sha512');
     const hash = sha512(publicKeyBytes);

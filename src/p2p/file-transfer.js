@@ -93,14 +93,9 @@ if (typeof window.EventEmitter === 'undefined') {
 /**
  * Manages encrypted file transfers over WebRTC data channels or the mesh.
  *
- * Every transfer gets a fresh random AES-256-GCM key. The key and the file's
- * metadata travel sealed to the recipient's public key in `file-meta`, so only
- * the holder of the matching private key can read either. (The key used to be
- * SHA-256 of `peerId:transferId:chunkIndex` — values that are all public, and
- * that the two ends did not even agree on, since each side put the *other*
- * peer's id first: nothing on the path was kept out, and no file ever arrived.)
- * Each chunk is bound to its transfer and position through the GCM additional
- * data, so chunks cannot be replayed into another transfer or reordered.
+ * Every transfer gets a fresh random AES-256-GCM key, sent with the file's
+ * metadata sealed to the recipient's public key in `file-meta`. Each chunk is
+ * bound to its transfer and position through the GCM additional data.
  *
  * @param {object} peerManager - sendOnChannel(peerId, channel, obj) + on('file-chunk')
  * @param {object} cryptoEngine - encryptWithPublicKey(), decryptWithPrivateKey()
@@ -115,10 +110,8 @@ class FileTransfer extends EventEmitter {
     this._transfers = new Map(); // `${peerId}\n${transferId}` -> TransferState
     this._inbox = new Map(); // peerId -> tail of that peer's processing chain
     this._pm.on('file-chunk', (peerId, data) => {
-      // Handled strictly in arrival order per peer. Opening a file-meta is
-      // async (ECDH + unseal), and the transport keeps delivering meanwhile:
-      // without the queue, the first chunks reached a transfer that did not
-      // exist yet and were dropped.
+      // Strictly in arrival order per peer: opening file-meta is async, and
+      // chunks must not reach a transfer that does not exist yet.
       const run = () => this._handleFileChunk(peerId, data).catch((e) => {
         console.error('[FileTransfer] receive failed:', e);
       });

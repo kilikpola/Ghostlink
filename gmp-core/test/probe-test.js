@@ -6,6 +6,12 @@
  *      public peer printed at start-up) and its Ghost Address, TCP connect
  *      time, bytes both ways;
  *   2. --expect: the right NodeID passes; a wrong one exits 4, loudly;
+ *  2b. no --expect (the deploy check): the NodeID must be one the merged peer
+ *      list (shipped + .local, revoked excluded) gives for exactly this
+ *      host:port — any of several passes and is named; a listed mismatch is
+ *      4; nothing listed (wrong host, IP instead of the listed hostname, only
+ *      a revoked NodeID) is 5, never a silent pass; --expect overrides; a
+ *      16-hex prefix is refused;
  *   3. failures exit non-zero by stage: nothing listening -> 2; a TCP server
  *      that never speaks GMP -> 3; bad arguments -> 1;
  *   4. the throwaway identity leaves nothing: the process-wide data dir the
@@ -58,12 +64,18 @@ function snapshot(dir) {
   return JSON.stringify(out);
 }
 
+/** The probe's shipped list for a call (GMP_PUBLIC_PEERS_PATH); [] by default. */
+let shipped = [];
+let dataDirForCall = null;
 function gmpProbe(...args) {
+  const listFile = path.join(tmp, `shipped-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(listFile, JSON.stringify(shipped));
   const r = spawnSync(process.execPath, [cli, 'probe', ...args], {
-    env: { ...process.env, GMP_DATA_DIR: realDir, GMP_LOG_LEVEL: 'ERROR' }, encoding: 'utf8', timeout: 60_000,
+    env: { ...process.env, GMP_DATA_DIR: dataDirForCall || realDir, GMP_PUBLIC_PEERS_PATH: listFile, GMP_LOG_LEVEL: 'ERROR' }, encoding: 'utf8', timeout: 60_000,
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
+const entry = (address, nodeId, extra = {}) => ({ address, port, tls: false, nodeId, roles: ['bootstrap'], operator: '', provider: 'test', addedAt: 1, ...extra });
 const field = (out, name) => { const m = out.match(new RegExp(`^\\s+${name}\\s+(.*)$`, 'm')); return m ? m[1].trim() : null; };
 
 // ── a real public peer ───────────────────────────────────────────────────
@@ -93,12 +105,14 @@ const peerNodeId = await new Promise((resolve) => {
 });
 assert(!!peerNodeId, 'a local public peer is up (its NodeID read from its own start-up line)');
 
+shipped = [entry('127.0.0.1', peerNodeId)];
 const before = snapshot(realDir);
 
 console.log('\n=== 1. a completed handshake ===');
 const ok = gmpProbe('127.0.0.1', String(port));
 console.log(ok.out.split('\n').map((l) => `  | ${l}`).join('\n'));
-assert(ok.code === 0, `exit 0 (${ok.code})`);
+assert(ok.code === 0 && /RESULT OK \(NodeID matches the peer list\)/.test(ok.out), `no flags: exit 0, checked against the peer list (${ok.code})`);
+assert(/matched\s+peer-list entry 127\.0\.0\.1:\d+, roles bootstrap, provider test/.test(ok.out), 'it says which list entry matched');
 assert(field(ok.out, 'peer NodeID') === peerNodeId, 'prints the peer\'s full NodeID — the one the public peer printed');
 assert(field(ok.out, 'Ghost Address') === ghostAddressFromNodeId(peerNodeId), `prints its Ghost Address (${field(ok.out, 'Ghost Address')})`);
 assert(/^\d+ ms \(127\.0\.0\.1\)$/.test(field(ok.out, 'TCP connect') || ''), `prints the TCP connect time (${field(ok.out, 'TCP connect')})`);
@@ -114,6 +128,47 @@ const wrong = gmpProbe('127.0.0.1', String(port), '--expect', wrongId);
 assert(wrong.code === 4, `a different NodeID: exit 4 (${wrong.code})`);
 assert(/NODEID MISMATCH/.test(wrong.out) && wrong.out.includes(`expected  ${wrongId}`) && wrong.out.includes(`answered  ${peerNodeId}`),
   'loudly, with both NodeIDs in full');
+
+console.log('\n=== 2b. no --expect: the peer list decides ===');
+{
+  const other = crypto.randomBytes(64).toString('hex');
+  // Two entries for this host:port, the right one only in the .local overlay:
+  // shipped + .local are merged, and any match passes.
+  const twoDir = fs.mkdtempSync(path.join(tmp, 'two-'));
+  fs.writeFileSync(path.join(twoDir, 'public-peers.local.json'), JSON.stringify([entry('127.0.0.1', peerNodeId, { provider: 'local-overlay' })]));
+  shipped = [entry('127.0.0.1', other, { provider: 'shipped-decoy' })];
+  dataDirForCall = twoDir;
+  const two = gmpProbe('127.0.0.1', String(port));
+  dataDirForCall = null;
+  assert(two.code === 0 && /provider local-overlay \(1 of 2 entries for this host:port\)/.test(two.out),
+    `two entries for one host:port (shipped + .local): passes on the one that matches, and says which (${two.code})`);
+
+  shipped = [entry('127.0.0.1', other)];
+  const mis = gmpProbe('127.0.0.1', String(port));
+  assert(mis.code === 4 && mis.out.includes(`expected  ${other}  (peer list)`) && mis.out.includes(`answered  ${peerNodeId}`),
+    `only a different NodeID listed: exit 4, both NodeIDs printed (${mis.code})`);
+
+  shipped = [entry('somewhere.example', peerNodeId)];
+  const none = gmpProbe('127.0.0.1', String(port));
+  assert(none.code === 5 && /NOT IN PEER LIST/.test(none.out), `host:port not listed: exit 5, NOT IN PEER LIST — never a silent pass (${none.code})`);
+  assert(field(none.out, 'peer NodeID') === peerNodeId, 'and it still probed, so the operator sees what answered');
+
+  shipped = [entry('localhost', peerNodeId)];
+  const byIp = gmpProbe('127.0.0.1', String(port));
+  assert(byIp.code === 5, `listed under a hostname, probed by IP: not the listed host:port, exit 5 (${byIp.code})`);
+
+  const REVOKED = '52ab56117354cf7d7f12b8f2de7a428f50462f2146a9cf6c246b21b8c67f7ff357192573bd7944236472b49617edb4e4bff5e7aa8e8eeec1938235caf66afe59';
+  shipped = [entry('127.0.0.1', REVOKED)];
+  const rev = gmpProbe('127.0.0.1', String(port));
+  assert(rev.code === 5, `an entry with a revoked NodeID does not count as listed: exit 5 (${rev.code})`);
+
+  shipped = [entry('127.0.0.1', other)];
+  const over = gmpProbe('127.0.0.1', String(port), '--expect', peerNodeId);
+  assert(over.code === 0 && /matches --expect/.test(over.out), `--expect overrides the list (${over.code})`);
+  const prefix = gmpProbe('127.0.0.1', String(port), '--expect', peerNodeId.slice(0, 16));
+  assert(prefix.code === 1 && /prefixes are refused/.test(prefix.out), `a 16-hex prefix is refused: exit 1 (${prefix.code})`);
+  shipped = [entry('127.0.0.1', peerNodeId)];
+}
 
 console.log('\n=== 3. failures exit non-zero, by stage ===');
 const closedPort = await freePort();

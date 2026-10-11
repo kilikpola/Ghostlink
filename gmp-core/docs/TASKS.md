@@ -197,23 +197,26 @@ never imported before).
 
 ## Deploy verification: `gmp probe` (every deploy, every seed change)
 
-**Status:** standing step.
+**Status:** standing step. After each Railway deploy, and after any change to
+GMP_SEED_PHRASE, run exactly:
 
-After each Railway deploy, and after any change to GMP_SEED_PHRASE:
+    node gmp-core/dist/cli.js probe hayabusa.proxy.rlwy.net 58516
 
-    node gmp-core/dist/cli.js probe hayabusa.proxy.rlwy.net 58516 \
-      --expect 562c487c1a10a649179dd7b131527344c9f6bd65e7ebc800b6570dd496371f65b25aec43d1d1eb3937de2bf74e3ce45f7777e6375561f26ec26215f31301ea3a
-
-The --expect value is the nodeId in data/public-peers.json for that host.
-It runs a real GMP handshake from a throwaway identity (temporary data dir,
-removed; this machine's node state is never touched) and exits:
-0 = the host answered a handshake as the listed NodeID; 2 = nothing accepts
+No flags: the NodeID that answers must be one the peer list gives for exactly
+that host and port (data/public-peers.json merged with
+DATA_DIR/public-peers.local.json, revoked NodeIDs excluded); the matching
+entry is printed. It runs a real GMP handshake from a throwaway identity
+(temporary data dir, removed; this machine's node state is never touched).
+Exit codes: 0 = handshake completed as a listed NodeID; 2 = nothing accepts
 TCP (deploy down, proxy port wrong); 3 = TCP up but no GMP handshake (the
 wrong process — e.g. the standalone bridge — or still starting); 4 = a
-different identity answered (seed variable wrong, or a rotation not made /
-not expected). A deploy is not done until this exits 0. First run,
-2026-10-11: OK, connect 452 ms, handshake 1290 ms, 291 B sent / 285 B
-received. Test: test/probe-test.js (against a local public peer).
+different identity answered (seed variable wrong, rotation not made, or the
+list not updated); 5 = that host:port is not in the peer list (probe the
+listed hostname, not an IP). A deploy is not done until this exits 0.
+`--expect <full 128-hex NodeID>` overrides the list (prefixes are refused).
+Runs 2026-10-11 against the live host: OK, matched the railway bootstrap
+entry, NodeID 562c487c…, connect 302-452 ms, handshake 0.9-1.3 s. Test:
+test/probe-test.js (local public peer; 28 assertions).
 
 ## REVOKED: public peer NodeID 52ab5611… (seed disclosed)
 

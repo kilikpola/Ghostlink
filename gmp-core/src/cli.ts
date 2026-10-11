@@ -422,12 +422,17 @@ async function main(): Promise<void> {
 
 /**
  * `gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]`
- * The deploy verification step (docs/TASKS.md). Exit codes, for scripts:
- *   0 handshake completed (and the NodeID matched --expect, if given)
- *   1 usage error   2 TCP connect failed   3 handshake failed   4 NodeID mismatch
+ * The deploy verification step (docs/TASKS.md): with no --expect, the NodeID
+ * that answers must be one the peer list gives for exactly this host:port
+ * (shipped list + .local overlays, revoked NodeIDs excluded). --expect takes
+ * a full 128-hex NodeID and overrides the list; prefixes are refused.
+ * Exit codes, for scripts:
+ *   0 handshake completed and the NodeID matched (the list, or --expect)
+ *   1 usage error   2 TCP connect failed   3 handshake failed
+ *   4 NodeID mismatch   5 host:port not in the peer list (no --expect)
  */
 async function probeCommand(argv: string[]): Promise<number> {
-  const usage = 'Usage: gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]';
+  const usage = 'Usage: gmp probe <host> <port> [--expect <full 128-hex nodeId>] [--timeout <ms>] [--tls]';
   const positional: string[] = [];
   let expect: string | null = null;
   let timeoutMs = 10_000;
@@ -446,13 +451,32 @@ async function probeCommand(argv: string[]): Promise<number> {
     console.error(usage);
     return 1;
   }
+  // A full NodeID only: a prefix is far easier to collide with, and this is
+  // the check that says the right identity answered.
   if (expect !== null && !/^[0-9a-f]{128}$/.test(expect)) {
-    console.error(`--expect needs a full 128-hex NodeID (got ${expect.length} characters)\n${usage}`);
+    console.error(`--expect needs a full 128-hex NodeID (got ${expect.length} characters); prefixes are refused\n${usage}`);
     return 1;
+  }
+
+  // Without --expect: what the peer list says should answer here.
+  type Listed = { nodeId: string; address: string; port: number; roles: string[]; provider?: string; operator?: string };
+  let listed: Listed[] = [];
+  if (expect === null) {
+    const { loadPublicPeers } = await import('./public-peer-list.js');
+    const want = `${host.toLowerCase()}:${port}`;
+    const seen = new Set<string>();
+    for (const e of loadPublicPeers() as Listed[]) {
+      if (`${String(e.address).toLowerCase()}:${e.port}` !== want || typeof e.nodeId !== 'string') continue;
+      const key = `${e.nodeId.toLowerCase()}|${e.roles.join(',')}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      listed.push({ ...e, nodeId: e.nodeId.toLowerCase() });
+    }
   }
 
   const { probe } = await import('./probe.js');
   console.log(`probe ${host}:${port} (fresh throwaway identity, temporary data dir)`);
+  console.log(`  expecting      ${expect !== null ? `${expect} (--expect)` : listed.length ? `${listed.length} peer-list entr${listed.length === 1 ? 'y' : 'ies'} for ${host}:${port}` : `nothing: ${host}:${port} is not in the peer list`}`);
   const r = await probe(host, port, { timeoutMs, tls });
   console.log(`  TCP connect    ${r.connectMs === null ? 'FAILED' : `${r.connectMs} ms`}${r.remoteAddress ? ` (${r.remoteAddress})` : ''}`);
   console.log(`  handshake      ${r.ok ? `completed in ${r.handshakeMs} ms` : r.stage === 'connect' ? 'not attempted' : 'FAILED'}`);
@@ -464,17 +488,33 @@ async function probeCommand(argv: string[]): Promise<number> {
     console.log(`RESULT ${r.stage === 'connect' ? 'CONNECT FAILED' : 'HANDSHAKE FAILED'}: ${r.error}`);
     return r.stage === 'connect' ? 2 : 3;
   }
-  if (expect !== null && r.nodeId !== expect) {
+
+  const mismatch = (expected: string[], source: string): number => {
     console.log('');
     console.log('  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
     console.log('  !!  NODEID MISMATCH: the host answering is NOT the expected node  !!');
     console.log('  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-    console.log(`  expected  ${expect}`);
+    for (const id of expected) console.log(`  expected  ${id}  (${source})`);
     console.log(`  answered  ${r.nodeId}`);
     console.log('RESULT NODEID MISMATCH');
     return 4;
+  };
+
+  if (expect !== null) {
+    if (r.nodeId !== expect) return mismatch([expect], '--expect');
+    console.log('RESULT OK (NodeID matches --expect)');
+    return 0;
   }
-  console.log(`RESULT OK${expect !== null ? ' (NodeID matches --expect)' : ''}`);
+  if (listed.length === 0) {
+    console.log('');
+    console.log(`RESULT NOT IN PEER LIST: nothing is listed for ${host}:${port} (shipped list + .local, revoked NodeIDs excluded),`);
+    console.log('so there is no NodeID to check this answer against. Probe the listed hostname and port, or pass --expect <full NodeID>.');
+    return 5;
+  }
+  const match = listed.find((e) => e.nodeId === r.nodeId);
+  if (!match) return mismatch(listed.map((e) => e.nodeId), 'peer list');
+  console.log(`  matched        peer-list entry ${match.address}:${match.port}, roles ${match.roles.join(',')}${match.provider ? `, provider ${match.provider}` : ''}${match.operator ? `, operator ${match.operator}` : ''}${listed.length > 1 ? ` (1 of ${listed.length} entries for this host:port)` : ''}`);
+  console.log('RESULT OK (NodeID matches the peer list)');
   return 0;
 }
 
@@ -489,12 +529,14 @@ function printHelp(): void {
   console.log('  gmp rotate-key      Walks through seed generation and rotating identity keys');
   console.log('  gmp ping <nodeId>   Pings a NodeID through the multi-hop mesh');
   console.log('  gmp generate-seed   Generates a cryptographically random 12-word seed phrase');
-  console.log('  gmp probe <host> <port> [--expect <nodeId>] [--timeout <ms>] [--tls]');
+  console.log('  gmp probe <host> <port> [--expect <full NodeID>] [--timeout <ms>] [--tls]');
   console.log('                      Real GMP handshake from a throwaway identity (temp dir, removed;');
   console.log('                      never touches this node\'s data). Prints connect time, bytes,');
-  console.log('                      NodeID and Ghost Address. Exit 0 ok, 2 connect failed,');
-  console.log('                      3 handshake failed, 4 NodeID differs from --expect.');
-  console.log('                      Deploy check: gmp probe <public peer> <port> --expect <its NodeID>');
+  console.log('                      NodeID and Ghost Address, and checks the NodeID against the peer');
+  console.log('                      list entry for exactly <host>:<port> (or against --expect).');
+  console.log('                      Exit 0 ok, 2 connect failed, 3 handshake failed, 4 NodeID');
+  console.log('                      mismatch, 5 <host>:<port> not in the peer list.');
+  console.log('                      Deploy check: gmp probe hayabusa.proxy.rlwy.net 58516');
 }
 
 main().catch((err: unknown) => {

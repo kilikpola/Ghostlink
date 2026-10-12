@@ -91,14 +91,37 @@ async function testRungs() {
   const bh2 = await blackhole(network);
   // Seen least recently, so dialled last: the black holes are in flight when it wins.
   c.peerCache.recordSuccess(good.identity.nodeIdHex, 'memory', good.port);
-  c.peerCache.cache.find((e) => e.nodeId === good.identity.nodeIdHex).lastSeen -= 60000;
   c.peerCache.recordSuccess(bh1.nodeId, 'memory', bh1.port);
   c.peerCache.recordSuccess(bh2.nodeId, 'memory', bh2.port);
+  // Backdate AFTER the last recordSuccess: each one saves, and save() merges
+  // the file back in keeping the newer lastSeen, so a backdate made before
+  // them was silently undone. The order then hung on whether the three
+  // records fell in the same millisecond — it failed on GitLab's runner
+  // (good dialled second, 1 cancelled), passed here.
+  c.peerCache.cache.find((e) => e.nodeId === good.identity.nodeIdHex).lastSeen -= 60000;
+  // Every dial the ladder starts, in order, with when (the ladder calls node.dial).
+  const dials = [];
+  const dial0 = c.dial.bind(c);
+  const t0 = Date.now();
+  c.dial = (address, port, o) => { dials.push({ port, at: Date.now() - t0 }); return dial0(address, port, o); };
   const r1 = await ladder(c);
   timings.cache = r1.ms;
   assert(r1.ok && r1.rung === 'cache', `rung 1 (peer cache): connected in ${r1.ms} ms`);
   await new Promise((r) => setTimeout(r, 50));
-  assert(c.connections.size === 1 && c.bootstrap.lastRun.cancelled >= 2, `the other dials were cancelled (${c.bootstrap.lastRun.cancelled} cancelled, ${c.connections.size} link kept)`);
+  const name = (p) => (p === good.port ? 'good' : p === bh1.port ? 'bh1' : p === bh2.port ? 'bh2' : `?${p}`);
+  const order = dials.map((d) => `${name(d.port)}@${d.at}ms`).join(', ');
+  // Two separate properties, so a failure says which one broke (a single
+  // "cancelled >= 2" could not tell a wrong dial order from a missed cancel).
+  // 1. Order: the cache rung dials the most recently seen first, so the good
+  //    peer (seen a minute earlier) comes after both black holes.
+  assert(dials.length >= 1 && name(dials[dials.length - 1].port) === 'good' && dials.length === 3,
+    `cache candidates are dialled most-recently-seen first: both black holes, then the good peer (${order})`);
+  // 2. Cancellation: every other dial started before the win is cancelled, and
+  //    only the winning link is kept. Control: at least one other dial was in
+  //    flight, else there was nothing to cancel.
+  const inFlight = dials.filter((d) => d.port !== good.port).length;
+  assert(inFlight >= 1 && c.bootstrap.lastRun.cancelled === inFlight && c.connections.size === 1,
+    `every other dial in flight at the win was cancelled (${c.bootstrap.lastRun.cancelled} cancelled of ${inFlight} in flight, ${c.connections.size} link kept; ${order})`);
 
   // Rung 2: the cache knows the peer at a stale address; LAN sees it at the right one.
   const l = await makeNode(network, 'ladder rung lan');

@@ -40,9 +40,29 @@ const run = (extra = []) => spawnSync(electron, [...extra, path.join(here, 'help
   { encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', GMP_LOG_TO_CONSOLE: 'false' }, timeout: 60000 });
 const steps = (r) => Object.fromEntries((r.stdout || '').split('\n').filter((l) => l.startsWith('{"step"')).map((l) => { const j = JSON.parse(l); return [j.step, j]; }));
 
+/**
+ * Why the binary produced no steps, from what the child left behind. Without
+ * this a binary that cannot start (missing shared libraries in a slim CI
+ * image) showed up only as "Electron undefined" — the failure was reported,
+ * its cause was not.
+ */
+function whyNoOutput(res) {
+  const stderr = (res.stderr || '').trim();
+  const lib = stderr.match(/error while loading shared libraries: ([^:\s]+)/);
+  const lines = [
+    `    binary: ${electron}`,
+    `    exit status ${res.status}, signal ${res.signal}${res.error ? `, spawn error ${res.error.code || res.error.message}` : ''}`,
+  ];
+  if (lib) lines.push(`    MISSING SYSTEM LIBRARY ${lib[1]}: this image lacks Electron's runtime libraries (install them before this test; .gitlab-ci.yml desktop-package does)`);
+  if (stderr) lines.push('    stderr (last lines):', ...stderr.split('\n').slice(-8).map((l) => `      ${l}`));
+  else lines.push('    stderr: (empty)');
+  return lines.join('\n');
+}
+
 console.log('=== 1. runtime versus engines floors ===');
 const r = run();
 const s = steps(r);
+if (!s.runtime) console.error(`  ! the Electron binary produced no output — it did not run:\n${whyNoOutput(r)}`);
 const rt = s.runtime ? JSON.parse(s.runtime.detail) : {};
 console.log(`    Electron ${rt.electron}, bundled Node ${rt.node}; system Node ${process.versions.node}`);
 for (const pkg of [path.join(here, '..', 'package.json'), path.join(repo, 'package.json')]) {
@@ -58,7 +78,9 @@ for (const step of ['load', 'default-transport', 'lan-discovery-loaded', 'tcp-ha
 }
 
 console.log('\n=== 3. negative control ===');
-const blocked = steps(run(['--import', path.join(here, 'helpers', 'block-net.mjs')]));
+const blockedRun = run(['--import', path.join(here, 'helpers', 'block-net.mjs')]);
+const blocked = steps(blockedRun);
+if (!blocked.error && !blocked.runtime) console.error(`  ! the blocked run produced no output either:\n${whyNoOutput(blockedRun)}`);
 assert(blocked.error && /BLOCKED import of 'net'/.test(blocked.error.detail) && !blocked['tcp-handshake'],
   'with `net` blocked the same probe fails at the lazy TCP load — this test sees module-loading breaks');
 

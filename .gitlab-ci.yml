@@ -90,6 +90,24 @@ desktop-package:
     - npm run install:gmp
     - npm run build:gmp
     - npm run build
+    # Electron's binary links GTK, NSS, X11, ALSA, CUPS, GBM...; node:22 (Debian,
+    # no desktop) ships none of them, so the binary could not start and the
+    # runtime test failed as "Electron undefined". GitHub's ubuntu runner has
+    # them. ELECTRON_RUN_AS_NODE needs no display, only the libraries.
+    - apt-get update -qq
+    - |
+      apt-get install -y -qq --no-install-recommends \
+        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 \
+        libdbus-1-3 libdrm2 libgtk-3-0 libgbm1 libxcomposite1 libxdamage1 libxfixes3 \
+        libxrandr2 libxkbcommon0 libxcb1 libx11-6 libxext6 libpango-1.0-0 libcairo2 \
+        libexpat1 libudev1 libglib2.0-0 \
+        "$(apt-cache show libasound2t64 >/dev/null 2>&1 && echo libasound2t64 || echo libasound2)"
+    # Fail here, by name, if any library is still missing (the binary is
+    # fetched on first require by Electron 44's index.js).
+    - |
+      E="$(node -p "require('electron')" | tail -n 1)"
+      if ldd "$E" | grep 'not found'; then echo "Electron cannot start: the libraries above are missing from this image"; exit 1; fi
+      echo "Electron's shared libraries are all present ($E)"
     # gmp-core under Electron's bundled Node (the test job has no Electron binary).
     - (cd gmp-core && node test/electron-runtime-test.js)
     # Wire interop with a PINNED older build (INTEROP_OLD_REF in the test).

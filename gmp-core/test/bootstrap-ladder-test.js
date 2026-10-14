@@ -22,6 +22,7 @@ import { createGMPNode } from '../dist/node-factory.js';
 import { DEFAULTS } from '../dist/config.js';
 import { MemoryNetwork, MemoryTransport } from '../dist/transport/memory-transport.js';
 import { loadPublicPeers } from '../dist/public-peer-list.js';
+import { separationFor, SessionExposure } from '../dist/relay/role-separation.js';
 import { TcpTransport } from '../dist/transport/tcp-transport.js';
 import { fileURLToPath } from 'url';
 
@@ -29,6 +30,21 @@ let testsPassed = 0;
 let testsFailed = 0;
 function assert(condition, message) {
   if (condition) { testsPassed++; console.log(`  ✓ ${message}`); } else { testsFailed++; console.error(`  ✗ ${message}`); }
+}
+
+/** No KNOWN (non-empty) operator may hold more than one role; empty/absent may. */
+function oneRolePerKnownOperator(peers) {
+  const byOp = new Map();
+  for (const p of peers) for (const r of p.roles) byOp.set(p.operator, new Set([...(byOp.get(p.operator) || []), r]));
+  for (const [op, roles] of byOp) if (op && roles.size > 1) return { ok: false, offender: op };
+  return { ok: true };
+}
+
+/** Write a public-peers fixture to a temp file and load it (normalised). */
+function loadFixture(entries) {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pp-fixture-')), 'public-peers.json');
+  fs.writeFileSync(f, JSON.stringify(entries));
+  return loadPublicPeers(f);
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gmp-ladder-'));
@@ -301,12 +317,44 @@ function testShippedList() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const raw = JSON.parse(fs.readFileSync(path.join(here, '..', 'data', 'public-peers.json'), 'utf8'));
   const peers = loadPublicPeers(path.join(here, '..', 'data', 'public-peers.json'));
-  assert(raw.every((e) => Array.isArray(e.roles) && e.roles.length > 0 && typeof e.operator === 'string'), 'every shipped entry carries roles and an operator field');
+  // Operator may be a string or ABSENT; absent normalises to unknown ("").
+  assert(raw.every((e) => Array.isArray(e.roles) && e.roles.length > 0 && (e.operator === undefined || typeof e.operator === 'string')),
+    'every shipped entry carries roles; operator is a string or absent (absent = unknown)');
   const unconfirmed = raw.filter((e) => !e.operator).length;
   assert(peers.filter((p) => !p.operator).length === unconfirmed, `an empty operator loads as unknown (${unconfirmed} unconfirmed): it never drives a refusal, only "not separated"`);
-  const rolesByOp = new Map();
-  for (const p of peers) for (const r of p.roles) rolesByOp.set(p.operator, new Set([...(rolesByOp.get(p.operator) || []), r]));
-  assert([...rolesByOp.values()].every((r) => r.size === 1), 'no operator holds more than one role');
+  // No KNOWN (non-empty) operator may hold more than one role. An empty/absent
+  // operator MAY span roles: it is always "not separated" (amber), which is how
+  // RC1's project-run storage peer (same owner as bootstrap) is surfaced.
+  const shipped = oneRolePerKnownOperator(peers);
+  assert(shipped.ok, `no known (non-empty) operator holds more than one role${shipped.offender ? ` (offender: ${shipped.offender})` : ''}`);
+
+  // An empty-operator storage/relay entry is ALWAYS "not separated" (amber).
+  const fresh = new SessionExposure();
+  for (const e of peers) {
+    if (!e.operator && e.roles.some((r) => r === 'storage' || r === 'relay')) {
+      assert(separationFor(e.operator, fresh) === 'unseparated', `empty-operator ${e.roles.join('+')} entry is amber (unseparated)`);
+    }
+  }
+  // POSITIVE CONTROL: a known operator distinct from bootstrap is "separated" (no amber).
+  assert(separationFor('railway-storage', fresh) === 'separated', 'control: a distinct known operator is separated (no amber)');
+
+  // Teeth: one KNOWN operator in two roles still fails the rule.
+  const bad = loadFixture([
+    { address: 'boot', port: 1, tls: false, nodeId: 'c'.repeat(128), roles: ['bootstrap'], operator: 'acme', provider: 'x', addedAt: 1 },
+    { address: 'store', port: 2, tls: false, nodeId: 'd'.repeat(128), roles: ['storage'], operator: 'acme', provider: 'x', addedAt: 1 },
+  ]);
+  assert(!oneRolePerKnownOperator(bad).ok, 'teeth: one KNOWN operator spanning two roles still fails');
+
+  // A/B: the operator-absent storage fixture fails the OLD rule, passes the NEW.
+  const honestRaw = [
+    { address: 'boot', port: 1, tls: false, nodeId: 'a'.repeat(128), roles: ['bootstrap'], operator: '', provider: 'railway', addedAt: 1 },
+    { address: 'store', port: 2, tls: false, nodeId: 'b'.repeat(128), roles: ['storage'], provider: 'railway', addedAt: 1 }, // operator ABSENT
+  ];
+  const honest = loadFixture(honestRaw);
+  const oldRulePass = honestRaw.every((e) => typeof e.operator === 'string')
+    && (() => { const m = new Map(); for (const p of honest) for (const r of p.roles) m.set(p.operator, new Set([...(m.get(p.operator) || []), r])); return [...m.values()].every((s) => s.size === 1); })();
+  const newRulePass = honestRaw.every((e) => e.operator === undefined || typeof e.operator === 'string') && oneRolePerKnownOperator(honest).ok;
+  assert(!oldRulePass && newRulePass, `A/B: operator-absent storage fails OLD (pass=${oldRulePass}) and passes NEW (pass=${newRulePass})`);
   assert(raw.every((e) => /^[0-9a-f]{128}$/.test(e.nodeId)), 'every NodeID is a real 128-hex NodeID (none invented as placeholders)');
   const providers = new Set(raw.map((e) => e.provider));
   const roles = new Set(peers.flatMap((p) => p.roles));

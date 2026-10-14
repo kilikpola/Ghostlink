@@ -43,6 +43,7 @@ function extract(name) {
 }
 
 const SOURCE = [
+  'SecretStore',
   'PeerCache',
   'GHOST_ADDRESS_ALPHABET', 'GHOST_ADDRESS_LENGTH', 'GHOST_ADDRESS_PATTERN', 'NODE_ID_PATTERN',
   'ghostAddressFromNodeId', 'normalizeGhostAddress', 'isGhostAddress', 'isNodeIdHex',
@@ -206,6 +207,107 @@ test('an ambiguous address is reported, not guessed at', async () => {
   ws.reply('resolve', 'resolve-result', { reason: 'ambiguous', address, candidates: [NODE_B, NODE_C] });
   await assert.rejects(joined, /more than one identity/);
   assert.strictEqual(ws.lastSent('connectNode'), undefined, 'no connection was attempted');
+  conn.destroy();
+});
+
+test('joinRoom refuses a pinned contact whose key changed (decided in main, over the bridge)', async () => {
+  const { conn, ws } = await makeStarted();
+  const address = ghostAddressFromNodeId(NODE_B);
+  // Reconnecting to a contact pinned to NODE_C, but the address now resolves to NODE_B.
+  const joined = conn.joinRoom(address, { expectedNodeId: NODE_C });
+  await delay(10);
+  ws.reply('resolve', 'resolve-result', { reason: 'ok', nodeId: NODE_B, address });
+  await delay(10);
+  ws.reply('connectNode', 'connect-result', { connected: true, nodeId: NODE_B });
+  await delay(10);
+  // The renderer only asks; main decides using gmp-core's verified rotations.
+  const pinReq = ws.lastSent('pin-check');
+  assert.ok(pinReq, 'the renderer asked main to decide (pin-check sent over the bridge)');
+  assert.strictEqual(pinReq.pinnedNodeId, NODE_C, 'it sent the pinned NodeID');
+  assert.strictEqual(pinReq.presentedNodeId, NODE_B, 'and the presented NodeID');
+  ws.reply('pin-check', 'pin-result', { decision: 'mismatch' });
+  await assert.rejects(joined, /key has changed/); // the one permitted warning, not merged
+  conn.destroy();
+});
+
+test('joinRoom with the pinned NodeID connects normally (positive control, same path)', async () => {
+  const { conn, ws } = await makeStarted();
+  const address = ghostAddressFromNodeId(NODE_B);
+  const joined = conn.joinRoom(address, { expectedNodeId: NODE_B }); // the pin matches
+  await delay(10);
+  ws.reply('resolve', 'resolve-result', { reason: 'ok', nodeId: NODE_B, address });
+  await delay(10);
+  ws.reply('connectNode', 'connect-result', { connected: true, nodeId: NODE_B });
+  assert.strictEqual(await joined, NODE_B, 'the pinned contact connects');
+  assert.strictEqual(ws.lastSent('pin-check'), undefined, 'a matching key needs no pin-check');
+  conn.destroy();
+});
+
+test('an offline send is refused (not "storing") when no storage host is known', async () => {
+  const { conn, ws } = await makeStarted();
+  assert.strictEqual(conn.hasStorageHost(), null, 'before any status, storage availability is UNKNOWN (null) — the UI shows neutral "sending…"');
+  // Default install: the public peer is bootstrap-only, so a poll reports no host.
+  ws.deliver({ type: 'storage-status', host: null });
+  assert.strictEqual(conn.hasStorageHost(), false, 'connector knows there is no storage host');
+  const ok = conn.sendStored(NODE_B, 'm-nohost', { type: 'queued-message' });
+  assert.strictEqual(ok, false, 'sendStored refuses — nothing is claimed "storing"');
+  assert.strictEqual(ws.lastSent('sf-send'), undefined, 'no deposit was attempted');
+  conn.destroy();
+});
+
+test('resolveAddressResult returns candidates on ambiguous, without throwing', async () => {
+  const { conn, ws } = await makeStarted();
+  const address = ghostAddressFromNodeId(NODE_B);
+  const p = conn.resolveAddressResult(address);
+  await delay(10);
+  ws.reply('resolve', 'resolve-result', { reason: 'ambiguous', address, candidates: [NODE_B, NODE_C] });
+  const r = await p;
+  assert.strictEqual(r.reason, 'ambiguous', 'ambiguous is returned, not thrown');
+  assert.deepStrictEqual(r.candidates, [NODE_B, NODE_C], 'candidates are exposed so the pinned-among-candidates check can run');
+  conn.destroy();
+});
+
+test('resolveAddressResult returns ok+nodeId for a single match (positive control)', async () => {
+  const { conn, ws } = await makeStarted();
+  const address = ghostAddressFromNodeId(NODE_B);
+  const p = conn.resolveAddressResult(address);
+  await delay(10);
+  ws.reply('resolve', 'resolve-result', { reason: 'ok', nodeId: NODE_B, address });
+  const r = await p;
+  assert.strictEqual(r.reason, 'ok');
+  assert.strictEqual(r.nodeId, NODE_B);
+  conn.destroy();
+});
+
+test('pinCheck surfaces update-pin for a gmp-core-verified rotation', async () => {
+  const { conn, ws } = await makeStarted();
+  const p = conn.pinCheck(NODE_C, NODE_B);
+  await delay(10);
+  ws.reply('pin-check', 'pin-result', { decision: 'update-pin' });
+  assert.strictEqual(await p, 'update-pin', 'update-pin lets the renderer re-pin then connect');
+  conn.destroy();
+});
+
+test('pinCheck surfaces accept for a matching key (positive control)', async () => {
+  const { conn, ws } = await makeStarted();
+  const p = conn.pinCheck(NODE_B, NODE_B);
+  await delay(10);
+  ws.reply('pin-check', 'pin-result', { decision: 'accept' });
+  assert.strictEqual(await p, 'accept');
+  conn.destroy();
+});
+
+test('an offline send proceeds to storing/stored when a storage host is present (positive control)', async () => {
+  const { conn, ws } = await makeStarted();
+  const states = [];
+  conn.on('sf-state', (e) => states.push(e));
+  ws.deliver({ type: 'storage-status', host: 'mailbox.example:1', selfHosted: false });
+  assert.strictEqual(conn.hasStorageHost(), true, 'connector knows a storage host exists');
+  const ok = conn.sendStored(NODE_B, 'm-host', { type: 'queued-message' });
+  assert.strictEqual(ok, true, 'sendStored deposits');
+  assert.strictEqual(ws.lastSent('sf-send').localId, 'm-host', 'an sf-send was deposited');
+  ws.deliver({ type: 'sf-stored', localId: 'm-host' }); // the host STORE_ACK
+  assert.ok(states.some((s) => s.localId === 'm-host' && s.state === 'stored'), 'the host ack drives the honest "stored" state');
   conn.destroy();
 });
 

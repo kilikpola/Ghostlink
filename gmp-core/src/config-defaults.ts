@@ -99,15 +99,15 @@ export const DEFAULTS: Readonly<GMPConfig> = Object.freeze({
   GMP_STORAGE_ENABLED: false,
   /** Blob lifetime; expiry is a hard delete. */
   GMP_SF_TTL_MS: 7 * 24 * 60 * 60 * 1000,
-  GMP_SF_BUCKET_MAX_BLOBS: 256,
-  GMP_SF_BUCKET_MAX_BYTES: 16 * 1024 * 1024,
+  GMP_SF_BUCKET_MAX_BLOBS: 1024,
+  GMP_SF_BUCKET_MAX_BYTES: 64 * 1024 * 1024,
   /** Every FETCH_REQUEST carries exactly this many bucket ids. */
   GMP_SF_FETCH_BUCKETS: 4,
   /** Most blobs one FETCH_RESPONSE returns, oldest first. */
   GMP_SF_FETCH_MAX_BLOBS: 256,
   /** Deposits per /24 (IPv6 /48), as a token bucket with its own quota. */
   GMP_SF_DEPOSIT_RATE_PER_MINUTE: 30,
-  GMP_SF_DEPOSIT_BURST: 256,
+  GMP_SF_DEPOSIT_BURST: 16,
   /** Mean poll interval; each poll is jittered to 0.5x-1.5x of it. */
   GMP_SF_POLL_INTERVAL_MS: 15 * 60 * 1000,
   /** Self-hosted mailbox: "host:port" or "host:port#nodeIdHex". Empty: pick a public storage host. */

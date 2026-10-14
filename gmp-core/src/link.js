@@ -15,11 +15,13 @@ import path from 'path';
 import { createRequire } from 'module';
 import {
   deriveIdentityFromSeedPhrase,
+  identityFromDerivedSeed,
   signMessage,
   sha512,
   bytesToHex,
   stringToBytes,
 } from './identity.js';
+import { registerSensitiveValue } from './seed-guard.js';
 import { EphemeralKeySource } from './link/ephemeral-source.js';
 import { advanceBootCounter } from './boot-counter.js';
 import { GMPLink, toHex } from './link/link.js';
@@ -158,6 +160,7 @@ class GMPNode extends EventEmitter {
     timestampWindowMs = null,
     reputationBanDurationMs = null,
     reputationRecoveryIntervalMs = null,
+    derivedSeed = null,
   } = {}) {
     super();
     const cfg = Object.freeze({ ...DEFAULTS, ...(config || {}) });
@@ -178,6 +181,9 @@ class GMPNode extends EventEmitter {
     this.listener = null;
     this.links = new Map();
     this.identity = null;
+    // Raw 32-byte seed from the validated `derivedSeed` factory option, or null.
+    // Used by loadIdentityFromDerivedSeed(); never derived from env/config.
+    this._derivedSeed = derivedSeed ? new Uint8Array(derivedSeed) : null;
     this.connections = new Map();
     // Always built: it owns the HELLO/handshake timeouts, a global concurrent
     // cap and a per-address token bucket. No per-address concurrent cap (CGNAT).
@@ -663,11 +669,60 @@ class GMPNode extends EventEmitter {
 
   async loadIdentity(seedPhrase) {
     this.identity = await deriveIdentityFromSeedPhrase(seedPhrase);
+    // The seed phrase is the sealing material for this node's state files.
+    this._sealStateAndStart(seedPhrase);
+    return this.identity;
+  }
+
+  /**
+   * Load identity from a raw 32-byte seed supplied via the validated
+   * `derivedSeed` factory option (never from env/config). The seed is the
+   * X25519 static private key; every key and the NodeID derive from it exactly
+   * as the seed-phrase path does, minus PBKDF2. State files are sealed under
+   * the seed bytes (not a phrase), so GMP_STRICT_STATE still applies. Sync:
+   * there is no PBKDF2 to await.
+   * @param {Uint8Array} [derivedSeed] Defaults to the seed stored at construction.
+   */
+  loadIdentityFromDerivedSeed(derivedSeed = this._derivedSeed) {
+    if (!(derivedSeed instanceof Uint8Array) || derivedSeed.length !== 32) {
+      throw new Error('loadIdentityFromDerivedSeed: no 32-byte derivedSeed (pass createGMPNode({ derivedSeed }) or an explicit seed)');
+    }
+    this.identity = identityFromDerivedSeed(derivedSeed);
+    // No phrase and no configured GMP_SEED_PHRASE back this node, so the logger
+    // cannot match the seed by its static list. Register every representation of
+    // the raw seed (= the X25519 static private key) that could appear in a log
+    // line, so any of them is withheld. The logger serialises with
+    // JSON.stringify (logger.ts), so a seed reaches a line as hex/base64 when
+    // it is a string, or as a decimal byte array when a Buffer/Uint8Array is in
+    // meta; util.inspect forms ("<Buffer 1a 2b ..>", "Uint8Array(32) [ 26, .. ]")
+    // only arise if app code formats the bytes into the message itself.
+    const seedBuf = Buffer.from(derivedSeed);
+    const bytes = Array.from(seedBuf);
+    for (const form of [
+      seedBuf.toString('hex'),                                        // contiguous hex
+      bytes.map((b) => b.toString(16).padStart(2, '0')).join(' '),    // Buffer inspect body: "1a 2b .."
+      seedBuf.toString('base64'),
+      seedBuf.toString('base64url'),
+      bytes.join(','),                                                // tight decimal array: "26,43,.."
+      bytes.join(', '),                                               // util.inspect / toString body: "26, 43, .."
+    ]) registerSensitiveValue(form);
+    this._sealStateAndStart(seedBuf);
+    return this.identity;
+  }
+
+  /**
+   * Shared post-identity setup for both load paths: seal state files under the
+   * node's secret material (a phrase string, or raw seed bytes), bind the
+   * ephemeral source to the durable boot counter, start storage if enabled, and
+   * assert the mandatory security controls.
+   * @param {string|Buffer} sealMaterial
+   */
+  _sealStateAndStart(sealMaterial) {
     if (this.identity) {
       this.identity.nodeIdHex = Buffer.from(this.identity.nodeId).toString('hex');
     }
-    const cacheKey = crypto.pbkdf2Sync(seedPhrase, 'ghostlink-peer-cache-v1', 100000, 32, 'sha256');
-    const nonceKey = deriveNonceStoreKey(seedPhrase);
+    const cacheKey = crypto.pbkdf2Sync(sealMaterial, 'ghostlink-peer-cache-v1', 100000, 32, 'sha256');
+    const nonceKey = deriveNonceStoreKey(sealMaterial);
     if (this.peerCache) {
       this.peerCache.setEncryptionKey(cacheKey);
     }
@@ -679,9 +734,8 @@ class GMPNode extends EventEmitter {
     // counter cannot be persisted.
     const boot = advanceBootCounter(this.dataDir ? path.join(this.dataDir, 'boot-counter') : dataPath('boot-counter'));
     this.ephemeralSource = new EphemeralKeySource(boot);
-    if (this.config.GMP_STORAGE_ENABLED && !this.storageServer) this._startStorage(seedPhrase);
+    if (this.config.GMP_STORAGE_ENABLED && !this.storageServer) this._startStorage(sealMaterial);
     this._assertSecurityControls();
-    return this.identity;
   }
 
   /** Fail loudly if a mandatory security control is missing. */
@@ -711,17 +765,18 @@ class GMPNode extends EventEmitter {
 
   /**
    * Become a storage host. Blobs live under <dataDir>/storage, sealed at rest
-   * with a seed-derived key.
-   * @param {string} seedPhrase
+   * with a key derived from the node's secret material (seed phrase, or raw
+   * seed bytes on the derivedSeed path).
+   * @param {string|Buffer} sealMaterial
    */
-  _startStorage(seedPhrase) {
+  _startStorage(sealMaterial) {
     const cfg = this.config;
     const store = new BlobStore({
       dir: path.join(this.dataDir || DATA_DIR, 'storage'),
       ttlMs: cfg.GMP_SF_TTL_MS,
       maxBlobsPerBucket: cfg.GMP_SF_BUCKET_MAX_BLOBS,
       maxBytesPerBucket: cfg.GMP_SF_BUCKET_MAX_BYTES,
-      encryptionKey: crypto.pbkdf2Sync(seedPhrase, 'ghostlink-storage-at-rest-v1', 100000, 32, 'sha256'),
+      encryptionKey: crypto.pbkdf2Sync(sealMaterial, 'ghostlink-storage-at-rest-v1', 100000, 32, 'sha256'),
     }).load();
     this.storageServer = new StorageServer(store, {
       fetchBuckets: cfg.GMP_SF_FETCH_BUCKETS,

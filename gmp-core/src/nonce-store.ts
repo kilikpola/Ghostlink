@@ -79,9 +79,14 @@ interface NonceState {
   version: number;
 }
 
-/** The nonce store's at-rest key for a seed phrase. */
-export function deriveNonceStoreKey(seedPhrase: string): Buffer {
-  return crypto.pbkdf2Sync(seedPhrase, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
+/**
+ * The nonce store's at-rest key for a node's secret material. Accepts the seed
+ * phrase (string) or, for a `derivedSeed` node that has no phrase, the raw 32
+ * seed bytes — so its state is sealed and GMP_STRICT_STATE still applies. A
+ * given node always uses one form, so its key is stable across restarts.
+ */
+export function deriveNonceStoreKey(secret: string | Uint8Array): Buffer {
+  return crypto.pbkdf2Sync(secret, 'ghostlink-nonce-store-v1', 100000, 32, 'sha256');
 }
 
 export class NonceStore extends EventEmitter<NoEvents> {

@@ -386,6 +386,24 @@ export async function startBridge(
           break;
         }
 
+        // Decide whether a presented NodeID may be accepted for a pinned
+        // contact. The decision is made HERE (main process), using gmp-core's
+        // verified rotations; the renderer only sends the NodeIDs and shows the
+        // result. accept | update-pin | mismatch.
+        case 'pin-check': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const presentedNodeId = typeof msg.presentedNodeId === 'string' ? msg.presentedNodeId : '';
+          if (!presentedNodeId) {
+            sendTo(session, { type: 'error', code: 'PIN_CHECK_FAILED', message: 'presentedNodeId is required', requestId });
+            break;
+          }
+          const pinnedNodeId = typeof msg.pinnedNodeId === 'string' && msg.pinnedNodeId ? msg.pinnedNodeId : null;
+          const decision = m.pinDecision(pinnedNodeId, presentedNodeId);
+          sendTo(session, { type: 'pin-result', requestId, decision, contactId: msg.contactId });
+          break;
+        }
+
         // Deposit a message for an offline contact. The reply is the
         // manager's 'sf-stored' event (SENT, stored) or an sf-failed error.
         case 'sf-send': {

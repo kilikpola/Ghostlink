@@ -7,6 +7,7 @@ import type { ConfigIssue } from './config.js';
 import metrics from './metrics.js';
 import logger from './logger.js';
 import { ghostAddressFromNodeId, normalizeGhostAddress, findNodeIdsForAddress } from './ghost-address.js';
+import { pinOnPresented, type PinDecision } from './contact-pin.js';
 import type {
   GMPConfig,
   GMPNodeManagerOptions,
@@ -506,7 +507,7 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
     return ghostAddressFromNodeId(this.getNodeId());
   }
 
-  resolveGhostAddress(address: string): { reason: string; nodeId?: string } {
+  resolveGhostAddress(address: string): { reason: string; nodeId?: string; candidates?: string[] } {
     const normalized = normalizeGhostAddress(address);
     if (!normalized) return { reason: 'invalid-address' };
     if (!this._node) return { reason: 'not-found' };
@@ -538,16 +539,61 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
     }
     const matches = findNodeIdsForAddress(knownNodeIds, normalized);
     if (matches.length === 0) return { reason: 'not-found' };
-    if (matches.length > 1) return { reason: 'ambiguous', nodeId: matches[0] };
+    if (matches.length > 1) return { reason: 'ambiguous', nodeId: matches[0], candidates: matches };
     return { reason: 'ok', nodeId: matches[0] };
   }
 
-  /** Resolve a Ghost Address: local knowledge first, then an on-demand mesh query. */
-  async lookupGhostAddress(address: string): Promise<{ reason: string; nodeId?: string }> {
+  /**
+   * Resolve a Ghost Address to a NodeID, refusing to auto-pick when the 45-bit
+   * address is ambiguous. Local knowledge AND the mesh are both consulted and
+   * merged: a confident single local match can still be shadowed by a distinct
+   * identity elsewhere that ground a colliding address, so the mesh is queried
+   * even when local resolves. >1 distinct NodeID across local+mesh is ambiguous
+   * and is logged unconditionally (NodeID prefixes only, never key material).
+   */
+  async lookupGhostAddress(address: string): Promise<{ reason: string; nodeId?: string; candidates?: string[] }> {
     const local = this.resolveGhostAddress(address);
-    if (local.reason !== 'not-found' || !this._node || !this._node.topologyManager) return local;
-    const nodeId = await this._node.topologyManager.queryGhost(address);
-    return nodeId ? { reason: 'ok', nodeId } : local;
+    if (local.reason === 'invalid-address') return local;
+
+    const candidates = new Set<string>();
+    if (local.reason === 'ok' && local.nodeId) candidates.add(local.nodeId.toLowerCase());
+    if (local.reason === 'ambiguous' && local.candidates) {
+      for (const c of local.candidates) candidates.add(c.toLowerCase());
+    }
+    if (this._node && this._node.topologyManager) {
+      try {
+        for (const id of await this._node.topologyManager.queryGhostAll(address)) {
+          candidates.add(id.toLowerCase());
+        }
+      } catch { /* mesh query failed; fall back to whatever local knew */ }
+    }
+
+    const list = [...candidates];
+    if (list.length === 0) return { reason: 'not-found' };
+    if (list.length === 1) return { reason: 'ok', nodeId: list[0] };
+
+    // Family 5: a firing that records nothing is a firing that did not happen.
+    logger.warn('gmp-node-manager', 'ghost-address-ambiguous',
+      `More than one identity matches this Ghost Address; refusing to auto-pick`,
+      { address: normalizeGhostAddress(address) ?? undefined, candidates: list.map((x) => x.slice(0, 16)), count: list.length });
+    return { reason: 'ambiguous', nodeId: list[0], candidates: list };
+  }
+
+  /**
+   * Decide whether a presented NodeID may be accepted for a contact pinned to
+   * `pinnedNodeId` (null = no pin yet, trust-on-first-use). Runs here, in the
+   * main process where the node and its KeyRotationManager live: the renderer
+   * never makes this call, it only sends the presented NodeID and displays the
+   * result. `rotationVerified` is taken from gmp-core's own verified rotations
+   * (KeyRotationManager.isRotationVerified), never from a renderer-observed
+   * event. A mismatch is logged (contact-key-mismatch) inside pinOnPresented.
+   */
+  pinDecision(pinnedNodeId: string | null, presentedNodeId: string): PinDecision {
+    const krm = this._node
+      ? (this._node as unknown as { keyRotationManager?: { isRotationVerified(a: string, b: string): boolean } }).keyRotationManager
+      : null;
+    const rotationVerified = !!(pinnedNodeId && krm && krm.isRotationVerified(pinnedNodeId, presentedNodeId));
+    return pinOnPresented({ pinnedNodeId, presentedNodeId, rotationVerified });
   }
 
   async connectByGhostAddress(address: string): Promise<{ connected: boolean; transport: string }> {

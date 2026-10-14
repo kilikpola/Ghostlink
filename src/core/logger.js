@@ -8,7 +8,8 @@
   const MAX_BUFFER = 5000;
 
   /**
-   * Production structured logger with levels, JSON output, and remote transport
+   * Production structured logger with levels and JSON output. Console + in-memory
+   * only — it has no off-device transport.
    * @class
    */
   class Logger {
@@ -18,7 +19,6 @@
      * @param {Object} [options={}] - Configuration options
      * @param {string} [options.minLevel='info'] - Minimum log level to output
      * @param {boolean} [options.json=false] - Output as JSON format
-     * @param {Object} [options.remote=null] - Remote transport config {url, headers}
      */
     constructor(namespace, options = {}) {
       /** @type {string} Logger namespace */
@@ -27,8 +27,10 @@
       this.minLevel = options.minLevel || 'info';
       /** @type {boolean} Output as JSON */
       this.json = options.json || false;
-      /** @type {Object|null} Remote transport config */
-      this.remote = options.remote || null;
+      // NOTE: no remote/off-device transport. A structured logger must never be
+      // able to ship logs off the device in a packaged build; the sink was dead
+      // code (no caller set it) and is removed so it cannot be wired up. Logs go
+      // to the console and an in-memory buffer only. (RC1 audit, Round-final.)
       /** @type {Array} Internal buffer for recent entries */
       this._buffer = [];
       /** @type {Array} Output log entries */
@@ -80,20 +82,10 @@
       this._out.push(out);
       if (this._out.length > MAX_BUFFER) this._out.shift();
 
-      // Console output
+      // Console output only — logs never leave the device.
       if (level === 'error' || level === 'critical') console.error(out);
       else if (level === 'warn') console.warn(out);
       else console.log(out);
-
-      // Async remote transport for errors/critical
-      if (this.remote && (level === 'error' || level === 'critical')) {
-        fetch(this.remote.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...this.remote.headers },
-          body: JSON.stringify({ ts: new Date().toISOString(), level, namespace: this.namespace, msg, meta }),
-          keepalive: true
-        }).catch(() => {});
-      }
     }
 
     /**
@@ -146,8 +138,7 @@
     child(ns) {
       return new Logger(`${this.namespace}:${ns}`, {
         minLevel: this.minLevel,
-        json: this.json,
-        remote: this.remote
+        json: this.json
       });
     }
 

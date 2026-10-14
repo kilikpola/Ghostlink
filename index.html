@@ -90,14 +90,14 @@
     -->
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'" />
     <title>GhostLink — End-to-End Encrypted P2P Messenger</title>
-    <meta name="description" content="GhostLink is an end-to-end encrypted, peer-to-peer messenger. Your private key never leaves your device — no servers, no accounts, no metadata." />
+    <meta name="description" content="GhostLink is an end-to-end encrypted, peer-to-peer messenger. Your private key never leaves your device — no accounts, and end-to-end encrypted so no server can read your messages." />
     <meta name="theme-color" content="#0B0F17" />
     <!-- Open Graph: only fetched by link-preview crawlers when the app URL is
          shared, never on app load, so this leaks nothing about sessions. -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://kilikpola.github.io/Ghostlink/" />
     <meta property="og:title" content="GhostLink — End-to-End Encrypted P2P Messenger" />
-    <meta property="og:description" content="Peer-to-peer, end-to-end encrypted messaging. Your private key never leaves your device — no servers, no accounts, no metadata." />
+    <meta property="og:description" content="Peer-to-peer, end-to-end encrypted messaging. Your private key never leaves your device — no accounts, and end-to-end encrypted so no server can read your messages." />
     <meta property="og:image" content="https://kilikpola.github.io/Ghostlink/assets/icon-512.png" />
     <!-- The brand mark from assets/ghostlink-favicon.svg: linked directly for
          browsers that support SVG icons, and inlined below as a data-URI
@@ -253,7 +253,8 @@
       "imports": {
         "react": "./vendor/react.js",
         "react-dom/client": "./vendor/react-dom-client.js",
-        "htm": "./vendor/htm.js"
+        "htm": "./vendor/htm.js",
+        "@ghostlink/contact-vault": "./vendor/contact-vault.js"
       }
     }
     </script>
@@ -813,27 +814,14 @@ async function fingerprintFromPublicKey(publicKeyHex) {
 }
 
 // ==================== AT-REST VAULT KEY ====================
-// Device-local secret for message blocks kept in this browser. Never leaves
-// the device.
-const LocalVault = {
-  _key: null,
-  key() {
-    if (this._key) return this._key;
-    let k = null;
-    try {
-      k = localStorage.getItem('gl_vault_key');
-    } catch (e) { console.warn('[LocalVault] Failed to read vault key from storage:', e.message); }
-    if (!k || k.length < 64) {
-      k = Array.from(crypto.getRandomValues(new Uint8Array(32))).
-      map((b) => b.toString(16).padStart(2, "0")).join("");
-      try {
-        localStorage.setItem('gl_vault_key', k);
-      } catch (e) { console.warn('[LocalVault] Failed to persist vault key:', e.message); }
-    }
-    this._key = k;
-    return k;
-  }
-};
+// (LocalVault / gl_vault_key removed — RC1 audit, Part 3.) It held a per-device
+// key in plaintext localStorage and encrypted a `block.encrypted` copy that was
+// never transmitted, never decrypted anywhere, and not part of the block hash —
+// a ciphertext under a key stored in the clear beside it, protecting nothing.
+// Real message protection is: in transit, sealed to the recipient's X25519 key
+// (sealPayload; the send path refuses to transmit otherwise); at rest, the
+// phrase-derived MessageVault key held only in memory. gl_vault_key is deleted
+// from existing installs by a startup migration.
 
 // ==================== MESSAGE HISTORY AT REST ====================
 // Message history is sealed with a key derived from the recovery phrase and
@@ -1099,17 +1087,109 @@ function ghostAddressFromScan(data) {
   return normalizeGhostAddress(data);
 }
 
+// ==================== SECRET STORE (contact vault seam) ====================
+// The contact stores below (gl_peer_cache, gl_gmp_known_peers,
+// gl_gmp_blocked_peers) are the social graph — a SECRET, classified exactly as
+// mobile classifies @ghostlink/peers ("contacts and their addresses"). A NodeID
+// or Ghost Address being *publicly derivable* does not make the *set of people
+// you talk to* public; the set is the secret.
+//
+// So these values go through this seam rather than localStorage directly. When
+// a contact vault is installed on window.__contactVault (Electron, with a
+// 32-byte key from the OS keyring via safeStorage), they are sealed at rest with
+// XChaCha20-Poly1305 — the same envelope mobile uses. When the vault reports
+// secure storage UNAVAILABLE (e.g. Linux safeStorage 'basic_text', a hardcoded
+// key that protects nothing), set() FAILS CLOSED: it refuses to write rather
+// than seal with a key that is not secret, and surfaces it for the UI. When no
+// vault is installed at all (pre-boot, or a non-Electron context with no OS
+// keyring), it falls back to plaintext — the pre-existing posture, unchanged.
+//
+// NOTE (pre-RC1): sealing-in-practice requires the boot step that installs
+// window.__contactVault *before the first contact read*, plus the fail-closed
+// UI banner. Those live in an Electron build (ordering + IPC + UI can only be
+// validated there); this seam and its data-path behaviour are unit-tested in
+// test/contact-vault-wiring.test.js.
+const SecretStore = {
+  // Session-only home for secrets when the device cannot protect them: used
+  // instead of localStorage so NOTHING is ever written in the clear in Electron.
+  _mem: new Map(),
+  // Three modes:
+  //   'vault'     — a sealing vault is installed and usable (OS keyring key).
+  //   'session'   — Electron but no usable vault: FAIL CLOSED, in-memory only,
+  //                 banner shown. Never writes plaintext to disk.
+  //   'plaintext' — explicitly NOT Electron (web/test): legacy plaintext path.
+  _mode() {
+    const w = typeof window !== 'undefined' ? window : {};
+    if (w.__contactVault && w.__contactVault.available && w.__contactVault.available()) return 'vault';
+    if (w.__contactStorageUnavailable || (w.ghostlink && w.ghostlink.isElectron)) return 'session';
+    return 'plaintext';
+  },
+  get(key) {
+    const m = this._mode();
+    // Ordering probe (read back by the Electron test): when was the first
+    // contact read, and in what mode. In Electron a pre-boot read is 'session'
+    // (fail closed), never plaintext.
+    try { if (typeof window !== 'undefined' && window.__firstContactReadAt == null) { window.__firstContactReadAt = (performance && performance.now) ? performance.now() : Date.now(); window.__firstContactReadMode = m; } } catch (_e) {}
+    if (m === 'vault') return window.__contactVault.getItem(key); // sealed->plaintext (migrates in place)
+    if (m === 'session') return this._mem.has(key) ? this._mem.get(key) : null; // session-only, no disk read
+    return localStorage.getItem(key);
+  },
+  set(key, value) {
+    const m = this._mode();
+    if (m === 'vault') { window.__contactVault.setItem(key, value); return; } // seal
+    if (m === 'session') {                                                    // FAIL CLOSED: memory only
+      this._mem.set(key, String(value));
+      if (typeof window !== 'undefined' && typeof window.__onSecretStoreUnavailable === 'function') window.__onSecretStoreUnavailable(key);
+      return;
+    }
+    localStorage.setItem(key, value); // non-Electron/test: explicit plaintext
+  },
+};
+
 // ==================== PEER CACHE (localStorage) ====================
 const PeerCache = {
   KEY: 'gl_peer_cache',
-  load() {try {return JSON.parse(localStorage.getItem(this.KEY) || '{}');} catch {return {};}},
-  save(cache) {localStorage.setItem(this.KEY, JSON.stringify(cache));},
+  load() {try {return JSON.parse(SecretStore.get(this.KEY) || '{}');} catch {return {};}},
+  save(cache) {SecretStore.set(this.KEY, JSON.stringify(cache));},
+  // Like save, but reports failure instead of throwing, so callers can refuse
+  // to treat a contact as saved/pinned when the write did not land (no silent
+  // failure). Logged unconditionally.
+  trySave(cache) {
+    try { this.save(cache); return true; }
+    catch (e) { console.error('[PeerCache] failed to persist contact record:', e && e.message); return false; }
+  },
   addPeer(peerId, info) {
     const cache = this.load();
     cache[peerId] = { ...cache[peerId], ...info, lastSeen: Date.now() };
     this.save(cache);
   },
   getPeer(peerId) {return this.load()[peerId] || null;},
+  // ── Ghost Address pinning (the pin is the contact's full NodeID = the record
+  // key; `pinnedAddress` is the 45-bit address it was added by, so a later
+  // connect by that address can be checked against the pinned NodeID). The
+  // record lives in the contact store, which is sealed at rest via SecretStore
+  // when a vault is installed: a NodeID/address being publicly *derivable* does
+  // not make the *set of contacts* public — that set is the secret. Keyed by
+  // CONTACT (NodeID), so a verified rotation re-keys the record and the pin
+  // follows the contact. ──
+  pinAddress(peerId, address) {
+    const cache = this.load();
+    cache[peerId] = { ...cache[peerId], pinnedAddress: address, lastSeen: Date.now() };
+    return this.trySave(cache);
+  },
+  findByAddress(address) {
+    const cache = this.load();
+    for (const [peerId, rec] of Object.entries(cache)) if (rec && rec.pinnedAddress === address) return peerId;
+    return null;
+  },
+  /** A gmp-core-verified rotation: move the contact record from oldId to newId. */
+  repin(oldId, newId, address) {
+    const cache = this.load();
+    const prev = cache[oldId] || {};
+    cache[newId] = { ...cache[newId], name: prev.name, pinnedAddress: address, lastSeen: Date.now() };
+    if (oldId !== newId) delete cache[oldId];
+    return this.trySave(cache);
+  },
   // The manual-signaling flows historically wrote the key as `pubKeyHex` while
   // everything else uses `publicKeyHex`. Read both so caches written by either
   // path — including ones already on disk — still resolve.
@@ -1170,7 +1250,7 @@ const ShamirSSS = (() => {
   };
 })();
 
-// ==================== BLOCKCHAIN ====================
+// ==================== HASH CHAIN ====================
 const GENESIS_PREV_HASH = "0".repeat(64);
 
 class Chain {
@@ -1354,7 +1434,7 @@ function generateBackupFragments(blobStr) {
       peerId: ''
     };
   });
-  localStorage.setItem('gl_fragment_meta', JSON.stringify(
+  SecretStore.set('gl_fragment_meta', JSON.stringify(
     fragments.map((f) => ({ id: f.id, check: f.check, distributed: f.distributed, peerName: f.peerName, peerId: f.peerId }))
   ));
   return fragments;
@@ -1365,16 +1445,16 @@ function generateBackupFragments(blobStr) {
 // backup, so the same peer must never accumulate more than one. It is empty for
 // fragments handed over out-of-band, where there is nobody to identify.
 function markFragmentDistributed(fragmentId, peerName, peerId = '') {
-  const meta = JSON.parse(localStorage.getItem('gl_fragment_meta') || '[]');
+  const meta = JSON.parse(SecretStore.get('gl_fragment_meta') || '[]');
   const frag = meta.find((f) => f.id === fragmentId);
   if (frag) {frag.distributed = true;frag.peerName = peerName;frag.peerId = peerId;}
-  localStorage.setItem('gl_fragment_meta', JSON.stringify(meta));
+  SecretStore.set('gl_fragment_meta', JSON.stringify(meta));
   return meta;
 }
 
 // Get current distribution status
 function getFragmentStatus() {
-  const meta = JSON.parse(localStorage.getItem('gl_fragment_meta') || '[]');
+  const meta = JSON.parse(SecretStore.get('gl_fragment_meta') || '[]');
   const distributed = meta.filter((f) => f.distributed).length;
   return { total: 7, threshold: 3, distributed, safe: distributed >= 3, fragments: meta };
 }
@@ -1482,12 +1562,14 @@ const RELAYED_UNSEPARATED_EXPLANATION =
 // a timer: 'stored' by the storage host's STORE_ACK, 'delivered' only by the
 // recipient's receipt coming back in a tombstone.
 const SF_STATE_LABELS = {
+  sending: 'sending…',
   storing: 'storing…',
   stored: 'sent (stored)',
   delivered: 'delivered',
   expired: 'no receipt',
 };
 const SF_STATE_TITLES = {
+  sending: 'Peer offline: looking for a mailbox to leave the sealed message in.',
   storing: 'Peer offline: handing the sealed message to its mailbox.',
   stored: 'The mailbox host acknowledged it. It is waiting there, sealed, for the recipient.',
   delivered: 'The recipient opened it and its sealed receipt came back.',
@@ -1497,6 +1579,35 @@ const STORAGE_UNSEPARATED_LABEL = 'Ghost Mesh · Storage not separated';
 const STORAGE_UNSEPARATED_EXPLANATION =
   'Your mailbox host is not known to be run by someone other than the hosts that know your identity. ' +
   'Its operator could link your mailbox to you. Self-host a storage peer to close this (gmp storage-peer).';
+// ── Security-claim gating (RC1 audit) ──
+// A badge may assert only a property a real, tested mechanism backs for THIS
+// object — never a decorative, unconditional claim.
+//   messageBlockTags: a stored block's security tags. The chain-integrity tag is
+//   always meaningful (chainValid comes from chain.verify()); "E2E ENCRYPTED" is
+//   shown only when the block actually carries a sealed AES-256-GCM payload; no
+//   "P2P DIRECT" claim is ever made — the delivery path (direct / relay /
+//   mailbox) is not knowable from a stored block.
+function messageBlockTags(block, chainValid) {
+  const tags = [chainValid
+    ? { label: 'CHAIN VALID', icon: 'check', tone: 'ok' }
+    : { label: 'CHAIN BROKEN', icon: 'x', tone: 'bad' }];
+  if (block && block.encrypted) tags.push({ label: 'E2E ENCRYPTED', icon: 'lock', tone: 'info' });
+  return tags;
+}
+//   peerLiveSecurityTags: "E2E ENCRYPTED" is a LIVE claim, so it is shown only
+//   while a real session exists (status 'online' is set from conn.isConnected()).
+//   An offline / never-connected contact makes no such claim.
+function peerLiveSecurityTags(peer) {
+  return (peer && peer.status === 'online') ? [{ label: 'E2E ENCRYPTED', icon: 'lock' }] : [];
+}
+//   peerKeyVerified: a contact is verified only against the EXACT full public
+//   key the user compared in the ceremony. If the peer later presents any
+//   different key, this returns false — the badge clears rather than vouching
+//   for a key nobody checked. (The ceremony compares a 160-bit safety number
+//   derived from both full public keys; the stored check here is the full key.)
+function peerKeyVerified(recordedKey, currentKey) {
+  return !!currentKey && !!recordedKey && recordedKey === currentKey;
+}
 function meshModeLabel(transport) {
   return MESH_TRANSPORT_LABELS[transport] || MESH_TRANSPORT_LABELS.direct;
 }
@@ -1637,10 +1748,20 @@ function setSessionTurnServers(list) {
 }
 
 function getIceServers() {
-  const servers = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' }];
+  const servers = [];
+  // Third-party STUN is OFF by default (RC1 audit, Round 3 item 3): a STUN
+  // server learns the user's public IP. It is opt-in via Settings, stored in
+  // gl_settings.useGoogleStun (non-secret). With it off, WebRTC uses host
+  // candidates only (LAN / same-network), plus any user-supplied TURN relay.
+  try {
+    const settings = JSON.parse(localStorage.getItem('gl_settings') || '{}');
+    if (settings && settings.useGoogleStun === true) {
+      servers.push(
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' });
+    }
+  } catch (e) { /* no/( malformed settings: no third-party STUN */ }
 
   try {
     if (localStorage.getItem('gl_turn_fallback') === 'true') {
@@ -1661,8 +1782,36 @@ function getIceServers() {
         }
       }
     }
-  } catch (e) {/* malformed config — fall back to STUN-only */}
+  } catch (e) {/* malformed config — STUN-only */}
   return servers;
+}
+
+// The live connection mode, derived from the SELECTED ICE candidate pair rather
+// than assumed. A TURN relay candidate on either end means the path is relayed;
+// host/srflx/prflx is a direct path. (RC1 audit, Round 3 item 2 — replaces the
+// old unconditional pc.__mode = 'P2P Direct'.)
+function iceModeLabel(localType, remoteType) {
+  if (localType === 'relay' || remoteType === 'relay') return 'Relayed (TURN)';
+  if (!localType && !remoteType) return 'Connecting…';
+  return 'Direct (P2P)';
+}
+// Read the selected candidate pair from getStats and report the real mode.
+async function applyIceMode(pc, setMode) {
+  try {
+    const stats = await pc.getStats();
+    const cands = {};
+    let pair = null;
+    stats.forEach((r) => {
+      if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands[r.id] = r;
+      if (r.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded'))) pair = r;
+    });
+    if (!pair) stats.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated) pair = r; });
+    const localType = pair && cands[pair.localCandidateId] && cands[pair.localCandidateId].candidateType;
+    const remoteType = pair && cands[pair.remoteCandidateId] && cands[pair.remoteCandidateId].candidateType;
+    const label = iceModeLabel(localType, remoteType);
+    pc.__mode = label;
+    if (typeof setMode === 'function') setMode(label);
+  } catch (e) { /* stats unavailable: leave the mode as it is */ }
 }
 
 // Helper to discover the local LAN IP address of this device using WebRTC
@@ -1761,7 +1910,7 @@ const KNOWN_PEERS_MAX = 100;
 
 function loadBlockedPeers() {
   try {
-    const raw = JSON.parse(localStorage.getItem(BLOCKED_PEERS_KEY) || '[]');
+    const raw = JSON.parse(SecretStore.get(BLOCKED_PEERS_KEY) || '[]');
     return new Set(Array.isArray(raw) ? raw.filter(isNodeIdHex) : []);
   } catch (e) {
     return new Set();
@@ -1773,7 +1922,7 @@ function setPeerBlocked(nodeId, blocked) {
   try {
     const set = loadBlockedPeers();
     if (blocked) set.add(nodeId); else set.delete(nodeId);
-    localStorage.setItem(BLOCKED_PEERS_KEY, JSON.stringify(Array.from(set)));
+    SecretStore.set(BLOCKED_PEERS_KEY, JSON.stringify(Array.from(set)));
   } catch (e) { console.warn('[Peers] Failed to update blocked peers:', e.message); }
 }
 
@@ -1789,7 +1938,7 @@ function loadKnownPeers() {
   };
 
   try {
-    const raw = JSON.parse(localStorage.getItem(KNOWN_PEERS_KEY) || '[]');
+    const raw = JSON.parse(SecretStore.get(KNOWN_PEERS_KEY) || '[]');
     if (Array.isArray(raw)) for (const p of raw) if (p) add(p.nodeId, p.name, p.lastConnectedAt);
   } catch (e) {/* fall through to the chat cache */}
 
@@ -1810,16 +1959,16 @@ function rememberKnownPeer(nodeId, info = {}) {
   try {
     const peers = loadKnownPeers().filter((p) => p.nodeId !== nodeId);
     peers.unshift({ nodeId, name: info.name || null, lastConnectedAt: Date.now() });
-    localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(peers.slice(0, KNOWN_PEERS_MAX)));
+    SecretStore.set(KNOWN_PEERS_KEY, JSON.stringify(peers.slice(0, KNOWN_PEERS_MAX)));
   } catch (e) {/* storage full or blocked — reconnect still works this session */}
 }
 
 function forgetKnownPeer(nodeId) {
   setPeerBlocked(nodeId, true);
   try {
-    const raw = JSON.parse(localStorage.getItem(KNOWN_PEERS_KEY) || '[]');
+    const raw = JSON.parse(SecretStore.get(KNOWN_PEERS_KEY) || '[]');
     const kept = (Array.isArray(raw) ? raw : []).filter((p) => p && p.nodeId !== nodeId);
-    localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(kept));
+    SecretStore.set(KNOWN_PEERS_KEY, JSON.stringify(kept));
   } catch (e) { console.warn('[Peers] Failed to forget peer:', e.message); }
 }
 
@@ -1978,6 +2127,24 @@ class GMPBridgeConnector {
   }
 
   /**
+   * Resolve an address to the FULL result ({ reason, nodeId, candidates }) rather
+   * than throwing on ambiguity. Used by the pinned-contact path, which must see
+   * the candidate list to connect only to the pinned NodeID when it is among them.
+   */
+  async resolveAddressResult(address, { timeoutMs = 20000 } = {}) {
+    const normalized = normalizeGhostAddress(address);
+    if (!normalized) return { reason: 'invalid-address' };
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = await this._request({ type: 'resolve', address: normalized }, 'resolve-result');
+      if (last.reason !== 'not-found') return last;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return last || { reason: 'not-found' };
+  }
+
+  /**
    * Open a session with a peer by NodeID. Dialling deliberately lifts a
    * previous force-removal; inbound connections never do.
    */
@@ -1989,6 +2156,22 @@ class GMPBridgeConnector {
     }
     rememberKnownPeer(result.nodeId || nodeId);
     return result;
+  }
+
+  /**
+   * Ask the main process whether `presentedNodeId` may be accepted for a contact
+   * pinned to `pinnedNodeId` (null = no pin yet, trust-on-first-use). The
+   * decision — 'accept' | 'update-pin' | 'mismatch' — is made in gmp-core using
+   * its verified key rotations; the renderer only displays the result. A
+   * Ghost Address is a 45-bit hint, so a contact is identified by its full
+   * NodeID, never its address.
+   */
+  async pinCheck(pinnedNodeId, presentedNodeId, contactId = null) {
+    const reply = await this._request(
+      { type: 'pin-check', pinnedNodeId: pinnedNodeId || null, presentedNodeId, contactId },
+      'pin-result'
+    );
+    return reply.decision;
   }
 
   /** Quietly re-establish every known peer session after the bridge returns. */
@@ -2162,7 +2345,7 @@ class GMPBridgeConnector {
             return;
           }
 
-          if (msg.type === 'resolve-result' || msg.type === 'connect-result') {
+          if (msg.type === 'resolve-result' || msg.type === 'connect-result' || msg.type === 'pin-result') {
             this._settleRequest(msg);
             return;
           }
@@ -2211,7 +2394,11 @@ class GMPBridgeConnector {
             const state = { 'sf-stored': 'stored', 'sf-delivered': 'delivered', 'sf-expired': 'expired', 'sf-failed': 'failed' }[msg.type];
             if (msg.localId) this.emit('sf-state', { localId: msg.localId, state, reason: msg.message || null, code: msg.code || null });
           } else if (msg.type === 'storage-status') {
-            this.emit('storage-status', { host: msg.host || null, separation: msg.separation || 'none', selfHosted: !!msg.selfHosted, pending: msg.pending || 0 });
+            // Remember the latest status so a send can refuse up front when no
+            // storage host is known (host === null), rather than optimistically
+            // claiming "storing" for a message that has nowhere to go.
+            this.storageStatus = { host: msg.host || null, separation: msg.separation || 'none', selfHosted: !!msg.selfHosted, pending: msg.pending || 0 };
+            this.emit('storage-status', this.storageStatus);
           } else if (msg.type === 'external-address') {
             // What a public peer says this node looks like from outside, learned
             // over BINDING_REQUEST. Worth keeping even when it matches the local
@@ -2336,6 +2523,9 @@ class GMPBridgeConnector {
    */
   sendStored(peerId, localId, dataObj) {
     if (this._blocked.has(peerId) || !this.wsOpen) return false;
+    // No mailbox exists if we've learned there is no storage host. Refuse up
+    // front rather than claiming the message is "storing" with nowhere to go.
+    if (this.storageStatus && this.storageStatus.host === null) return false;
     this.ws.send(JSON.stringify({
       type: 'sf-send',
       localId,
@@ -2343,6 +2533,12 @@ class GMPBridgeConnector {
       payload: typeof dataObj === 'string' ? dataObj : JSON.stringify(dataObj)
     }));
     return true;
+  }
+
+  /** True once we know a storage host exists; false if we know none does; null if unknown. */
+  hasStorageHost() {
+    if (!this.storageStatus) return null;
+    return this.storageStatus.host !== null;
   }
 
   pollMailbox(reason) {
@@ -2494,13 +2690,27 @@ class GMPBridgeConnector {
    *
    * Returns the connected peer's NodeID.
    */
-  async joinRoom(code) {
+  async joinRoom(code, { expectedNodeId = null } = {}) {
     const raw = typeof code === 'string' ? code.trim() : '';
     if (!raw) throw new Error('No connection code given');
 
+    // When reconnecting to an already-pinned contact, the caller passes that
+    // contact's full NodeID. The pin decision is made in the main process; a
+    // mismatch with no gmp-core-verified rotation is refused here. Omitted (new
+    // contact / trust-on-first-use) this guard does nothing.
+    const guardPin = async (connectedNodeId) => {
+      if (!expectedNodeId || !connectedNodeId) return connectedNodeId;
+      if (connectedNodeId.toLowerCase() === expectedNodeId.toLowerCase()) return connectedNodeId;
+      const decision = await this.pinCheck(expectedNodeId, connectedNodeId);
+      if (decision === 'mismatch') {
+        throw new Error("This contact's key has changed. Messages from the new key are not shown under this contact.");
+      }
+      return connectedNodeId;
+    };
+
     if (isNodeIdHex(raw)) {
       const result = await this.connectToNode(raw.toLowerCase());
-      return result.nodeId;
+      return guardPin(result.nodeId);
     }
 
     const address = normalizeGhostAddress(raw);
@@ -2510,7 +2720,7 @@ class GMPBridgeConnector {
       }
       const resolved = await this.resolveAddress(address);
       const result = await this.connectToNode(resolved.nodeId);
-      return result.nodeId;
+      return guardPin(result.nodeId);
     }
 
     const legacy = this._parseLegacyLanCode(raw);
@@ -2652,6 +2862,20 @@ function GhostLinkApp() {
     const timers = selfDestructTimersRef.current;
     return () => {timers.forEach(clearTimeout);timers.clear();};
   }, []);
+  // Migration: an earlier build kept Ghost Address pins in a plaintext,
+  // address-keyed map (gl_address_pins). Pins now live on the contact record
+  // (PeerCache, keyed by NodeID). Drop the old key so a stale address pin can
+  // never shadow the contact-record pin.
+  useEffect(() => {
+    try { localStorage.removeItem('gl_address_pins'); }
+    catch (e) { console.error('[migration] could not remove gl_address_pins:', e && e.message); }
+    // Migration: delete gl_vault_key (the removed LocalVault's plaintext key).
+    // It protected nothing (its ciphertext never left the device and was never
+    // decrypted); dropping it leaves no at-rest secret behind. Message history
+    // at rest stays protected by the phrase-derived MessageVault key.
+    try { localStorage.removeItem('gl_vault_key'); }
+    catch (e) { console.error('[migration] could not remove gl_vault_key:', e && e.message); }
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearch, setShowSearch] = useState(false);
 
@@ -2735,10 +2959,8 @@ function GhostLinkApp() {
   const [buyEmail, setBuyEmail] = useState("");
   const [buyFileBlob, setBuyFileBlob] = useState(null);
   const [buyFileName, setBuyFileName] = useState("");
-  const [buyRefId, setBuyRefId] = useState("");
   const [buyCountdown, setBuyCountdown] = useState(900);
   const [buyTimerExpired, setBuyTimerExpired] = useState(false);
-  const [buyVerifying, setBuyVerifying] = useState(false);
   const buyCountdownTimerRef = useRef(null);
 
   // Countdown timer for rate quote lock in payment details.
@@ -2916,7 +3138,7 @@ function GhostLinkApp() {
   const [showVerificationCeremony, setShowVerificationCeremony] = useState(false);
   const [verificationPeer, setVerificationPeer] = useState(null);
   const [safetyNumber, setSafetyNumber] = useState('');
-  const [verificationComplete, setVerificationComplete] = useState(() => loadPersisted(VERIFIED_STORAGE_KEY, {}));
+  const [verificationComplete, setVerificationComplete] = useState(() => { try { const d = SecretStore.get(VERIFIED_STORAGE_KEY); return d ? JSON.parse(d) : {}; } catch { return {}; } });
 
   // Message Reactions
   const [messageReactions, setMessageReactions] = useState({}); // { messageHash: { emoji: [peerId, ...] } }
@@ -3301,19 +3523,10 @@ function GhostLinkApp() {
     return () => clearInterval(interval);
   }, []);
 
-  // Simulated verification query latency
-  useEffect(() => {
-    if (!crypto?.subtle) return;
-    if (showBuyModal && buyStep === 6) {
-      setBuyVerifying(true);
-      const timer = setTimeout(() => {
-        setBuyVerifying(false);
-        setBuyRefId('GL-' + Math.random().toString(36).substring(2, 10).toUpperCase());
-        setBuyStep(7);
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [showBuyModal, buyStep]);
+  // (Removed: the simulated on-chain query step and its random GL-xxxx reference
+  // — RC1. The app cannot and does not verify payment; a timer that then shows a
+  // reference is a false confirmation. The honest flow sends the user's details
+  // to support by email; support activates the license.)
 
   useEffect(() => {
     if (view === "splash") {
@@ -3897,8 +4110,6 @@ function GhostLinkApp() {
               block.remoteHash = msg.blockHash;
               block.isReceived = true;
             }
-            // Re-encrypt at rest under this device's own vault key.
-            block.encrypted = await CryptoEngine.encrypt(content, LocalVault.key());
             bumpChain();
 
             // Arm the sender's expiry on this copy too. Without this the message
@@ -4541,7 +4752,7 @@ function GhostLinkApp() {
           // unwrapPrivKey succeeding proves this phrase belongs to this install,
           // so it is safe to derive the history key from it.
           await unlockHistoryVault(words);
-          const fragMeta = localStorage.getItem("gl_fragment_meta");
+          const fragMeta = SecretStore.get('gl_fragment_meta');
           // Reconstruct fragment objects from metadata (no data, just display info)
           setIdentity({ keyPair: { privateKey: privKey }, publicKeyHex: d.pubKeyHex || d.publicKeyHex, fingerprint: d.fingerprint, name: d.name });
           setRestoreStatus("ok");
@@ -4696,7 +4907,6 @@ function GhostLinkApp() {
       const peerId = target?.peerId || peers.find((p) => p.id === convoKey)?.fingerprint || String(convoKey);
 
       const block = await chain.add(identity.name, content.trim(), type, meta);
-      block.encrypted = await CryptoEngine.encrypt(content.trim(), LocalVault.key());
       bumpChain();
       setMessages((prev) => ({ ...prev, [convoKey]: [...(prev[convoKey] || []), block] }));
       if (!target) {
@@ -4755,12 +4965,25 @@ function GhostLinkApp() {
       }
 
       if (offline) {
+        // If we already know there is no storage host, say so plainly instead
+        // of claiming the message is being handed to a mailbox that does not
+        // exist. (A default install has no public storage host.)
+        if (conn.hasStorageHost() === false) {
+          markSendFailed('Not sent: this peer is offline and no storage host is available to hold the message.');
+          return;
+        }
+        // 'storing…' only once a storage host is known; otherwise the neutral
+        // 'sending…', so we never claim a mailbox we have not found yet.
+        const initialState = conn.hasStorageHost() === true ? 'storing' : 'sending';
         setMessages((prev) => ({
           ...prev,
-          [convoKey]: (prev[convoKey] || []).map((m) => m.hash === block.hash ? { ...m, deliveryState: 'storing' } : m)
+          [convoKey]: (prev[convoKey] || []).map((m) => m.hash === block.hash ? { ...m, deliveryState: initialState } : m)
         }));
+        // sendStored refuses (false) when the bridge is gone or no storage host
+        // is known; the storage host's STORE_ACK ('stored') or an 'sf-failed'
+        // (e.g. NO_STORAGE_HOST) will correct the state either way.
         if (!conn.sendStored(peerId, block.hash, { type: 'queued-message', sender: identity.name, sealed, blockHash: block.hash })) {
-          markSendFailed('Not sent: the Ghost Mesh bridge dropped before the message could be stored.');
+          markSendFailed('Not sent: this peer is offline and no mailbox is available to hold the message.');
         }
         return;
       }
@@ -4980,7 +5203,6 @@ function GhostLinkApp() {
     // Clear everything, including state outside React: the chain, the vault
     // keys and window.seedPhrase.
     MessageVault.lock();
-    LocalVault._key = null;
     historyHydratedRef.current = { messages: false, chain: false };
     chain.blocks = [];
     bumpChain();
@@ -5060,12 +5282,9 @@ function GhostLinkApp() {
 
       // Create a new RTCPeerConnection for this call
       const callConfig = {
-        iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        ...getIceServers().filter((s) => !s.urls.includes('google.com'))]
+        // Same ICE policy as the mesh: STUN only if the user opted in, plus any
+        // user TURN relay. No hardcoded third-party STUN (RC1 audit, Round 3).
+        iceServers: getIceServers()
 
       };
       const pc = new RTCPeerConnection(callConfig);
@@ -5266,12 +5485,9 @@ function GhostLinkApp() {
 
       // Create RTCPeerConnection for the call
       const callConfig = {
-        iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        ...getIceServers().filter((s) => !s.urls.includes('google.com'))]
+        // Same ICE policy as the mesh: STUN only if the user opted in, plus any
+        // user TURN relay. No hardcoded third-party STUN (RC1 audit, Round 3).
+        iceServers: getIceServers()
 
       };
       const pc = new RTCPeerConnection(callConfig);
@@ -5582,11 +5798,72 @@ function GhostLinkApp() {
     }
 
     setJoinStatus(`Looking for ${address || 'peer'} on the mesh...`);
+    // Pin by CONTACT: the pin is the contact's full NodeID, stored on the
+    // contact record (PeerCache, pinnedAddress). A 45-bit address can collide,
+    // so a later connect by a pinned address is checked against that NodeID by
+    // the MAIN process (conn.pinCheck). A verified rotation re-keys the record,
+    // so the pin follows the contact, not the (changed) address.
+    const pinnedNodeId = address ? PeerCache.findByAddress(address) : null;
     try {
+      if (pinnedNodeId) {
+        // FAIL CLOSED: if the decision path is missing we do not connect.
+        if (typeof conn.resolveAddressResult !== 'function' || typeof conn.pinCheck !== 'function') {
+          console.error('[join] pin-check path unavailable; refusing to connect to pinned contact', address);
+          setJoinStatus(null);
+          addToast("Couldn't check this contact's key — not connected.", 'error');
+          return;
+        }
+        const resolved = await conn.resolveAddressResult(address);
+        let presented = null;
+        if (resolved.reason === 'ambiguous') {
+          // Connect only to the pinned NodeID if it is among the candidates;
+          // never auto-pick a non-pinned one.
+          const cands = (resolved.candidates || []).map((x) => String(x).toLowerCase());
+          if (!cands.includes(pinnedNodeId.toLowerCase())) {
+            setJoinStatus(null);
+            addToast(`${address} matches more than one identity on the mesh — ask your peer for their full NodeID`, 'error');
+            return;
+          }
+          presented = pinnedNodeId;
+        } else if (resolved.reason === 'ok' && resolved.nodeId) {
+          presented = resolved.nodeId;
+        } else {
+          setJoinStatus(null);
+          addToast(`${address} is not reachable on the mesh right now. Make sure your peer has GhostLink open.`, 'error');
+          return;
+        }
+        const decision = await conn.pinCheck(pinnedNodeId, presented);
+        if (decision === 'mismatch') {
+          setJoinStatus(null);
+          addToast("This contact's key has changed. Messages from the new key are not shown under this contact.", 'error');
+          return; // do not merge
+        }
+        if (decision === 'update-pin') {
+          // gmp-core verified a rotation: move the pin to the new NodeID first.
+          if (!PeerCache.repin(pinnedNodeId, presented, address)) {
+            setJoinStatus(null);
+            addToast("Couldn't save this contact's new key — not connected.", 'error');
+            return; // no silent failure: don't connect if the pin didn't persist
+          }
+        }
+        await conn.connectToNode(presented);
+        setJoinStatus(null); setJoinCode(''); setShowInvite(false);
+        addToast(`Connected to ${address}`, 'success');
+        return;
+      }
+
+      // New contact (or non-address code): connect, then pin the address (TOFU).
       const peerNodeId = await conn.joinRoom(raw);
       setJoinStatus(null);
       setJoinCode('');
       setShowInvite(false);
+      if (address && peerNodeId) {
+        if (!PeerCache.pinAddress(peerNodeId, address)) {
+          // Connection succeeded but the pin did not persist: say so, do not
+          // present it as a pinned (verified-on-reconnect) contact.
+          addToast('Connected, but this contact could not be saved — it will not be key-checked next time.', 'error');
+        }
+      }
       // A legacy LAN dial resolves no NodeID, so fall back to echoing the code.
       addToast(`Connected to ${address || (peerNodeId || '').slice(0, 12) || raw}`, 'success');
     } catch (e) {
@@ -5712,7 +5989,7 @@ function GhostLinkApp() {
           iceServers: getIceServers()
         });
         quickPcRef.current = pc;
-        pc.__mode = 'P2P Direct';
+        pc.__mode = null; // unknown until the ICE pair is selected (see applyIceMode)
 
         // Create the 3 data channels
         const msgDc = pc.createDataChannel('messages', { ordered: true });
@@ -5736,6 +6013,7 @@ function GhostLinkApp() {
         pc.onconnectionstatechange = () => {
           const state = pc.connectionState;
           if (state === 'connected') {
+            applyIceMode(pc, setConnectionMode); // report the REAL path (direct vs TURN relay)
             // Direct P2P connected. The onopen data channel logic handles state transition.
             // Close relay websocket
             if (quickWsRef.current) {
@@ -5892,7 +6170,7 @@ function GhostLinkApp() {
           iceServers: getIceServers()
         });
         quickPcRef.current = pc;
-        pc.__mode = 'P2P Direct';
+        pc.__mode = null; // unknown until the ICE pair is selected (see applyIceMode)
 
         pc.__remoteFingerprint = data.fingerprint;
         pc.__remoteName = data.name;
@@ -5926,6 +6204,7 @@ function GhostLinkApp() {
         pc.onconnectionstatechange = () => {
           const state = pc.connectionState;
           if (state === 'connected') {
+            applyIceMode(pc, setConnectionMode); // report the REAL path (direct vs TURN relay)
             if (quickWsRef.current) {
               try {quickWsRef.current.close();} catch (e) {}
               quickWsRef.current = null;
@@ -6079,7 +6358,7 @@ function GhostLinkApp() {
     const recorded = verificationComplete[peer.id];
     if (!recorded) return false;
     const current = peer.pubKey || getPeerPublicKey(peer.fingerprint || peer.id);
-    return !!current && recorded === current;
+    return peerKeyVerified(recorded, current);
   }, [verificationComplete, getPeerPublicKey]);
 
   const confirmVerification = () => {
@@ -6092,7 +6371,7 @@ function GhostLinkApp() {
     }
     setVerificationComplete((prev) => {
       const next = { ...prev, [verificationPeer.id]: verifiedKey };
-      savePersisted(VERIFIED_STORAGE_KEY, next);
+      SecretStore.set(VERIFIED_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
     addToast(`Contact ${verificationPeer.name} verified`, 'success');
@@ -6666,8 +6945,8 @@ function GhostLinkApp() {
     tip: "The 12-word phrase you just saw is the ONLY way to recover your account. Keep it offline."
   },
   {
-    title: "Zero Server Architecture",
-    desc: "Unlike other apps, Ghostlink establishes direct WebRTC tunnels between devices. No metadata is stored, and no server ever sees your messages.",
+    title: "End-to-End Encrypted",
+    desc: "Every message is sealed to the recipient's key before it leaves your device. Devices connect directly where they can. A bootstrap server helps them find each other, and a storage server holds sealed messages while a contact is offline — neither can read them.",
     icon: "shield",
     tip: "You can connect via QR codes or Manual Signals if the internet is restricted."
   },
@@ -6747,7 +7026,7 @@ function GhostLinkApp() {
               <${I} t="ghost" s=${100} c=${PALETTE.spectral} />
             </div>
             <h1 style=${{ fontSize: 42, fontWeight: 900, letterSpacing: 4, color: ink.ink, margin: "0 0 8px 0", fontFamily: ink.font.primary }}>GHOSTLINK</h1>
-            <div style=${{ fontSize: 14, color: ink.inkLight, letterSpacing: 2, marginBottom: 40, opacity: 0.7 }}>P2P · Encrypted · Private</div>
+            <div style=${{ fontSize: 14, color: ink.inkLight, letterSpacing: 2, marginBottom: 40, opacity: 0.7 }}>Peer-to-Peer · End-to-End Encrypted</div>
             <div style=${{ display: "flex", gap: 8, alignItems: "center" }}>
               ${[0, 1, 2, 3].map((i) => html`<div key=${i} style=${{
                 width: 8, height: 8, borderRadius: "50%", background: ink.peach,
@@ -6763,12 +7042,12 @@ function GhostLinkApp() {
               <div style=${{ width: 1, height: 12, background: PALETTE.divider }} />
               <div style=${{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: ink.cream }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke=${ink.cream} strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
-                P2P Direct
+                Peer-to-Peer
               </div>
               <div style=${{ width: 1, height: 12, background: PALETTE.divider }} />
               <div style=${{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: ink.cream }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke=${ink.cream} strokeWidth="2"><rect x="1" y="4" width="8" height="7" rx="1"/><rect x="15" y="13" width="8" height="7" rx="1"/><path d="M9 8h6v8H9"/></svg>
-                Blockchain
+                Hash-Chained
               </div>
             </div>
           </div>`;
@@ -6786,15 +7065,15 @@ function GhostLinkApp() {
                 <div style=${{ marginBottom: 14, animation: "floatSoft 3s ease-in-out infinite" }}><${I} t="ghost" s=${56} c=${PALETTE.spectral} /></div>
                 <h2 style=${{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: 2, color: ink.ink, fontFamily: ink.font.primary }}>GHOSTLINK</h2>
                 <p style=${{ fontSize: 12, color: ink.inkLight, marginTop: 8, lineHeight: 1.6, fontFamily: ink.font.primary }}>
-                  Your private key never leaves this device. All communication is peer-to-peer, end-to-end encrypted, and blockchain-verified.
+                  Your private key never leaves this device. All communication is peer-to-peer, end-to-end encrypted, and hash-chained.
                 </p>
               </div>
 
               <div style=${{ background: `${ink.peach}12`, border: `1px solid ${ink.peachLight}`, borderRadius: 16, padding: 14, marginBottom: 24 }}>
                 ${[
   { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.peach} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>`, label: "AES-256-GCM + ECDH P-256 Encryption" },
-  { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.rose} strokeWidth="2"><rect x="1" y="4" width="8" height="7" rx="1"/><rect x="15" y="13" width="8" height="7" rx="1"/><path d="M9 8h6v8H9"/></svg>`, label: "SHA-256 Blockchain Message Integrity" },
-  { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.lavender} strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>`, label: "P2P Direct · Zero Servers · Zero Metadata" },
+  { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.rose} strokeWidth="2"><rect x="1" y="4" width="8" height="7" rx="1"/><rect x="15" y="13" width="8" height="7" rx="1"/><path d="M9 8h6v8H9"/></svg>`, label: "SHA-256 Hash-Chained Message Integrity" },
+  { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.lavender} strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>`, label: "Peer-to-Peer · No accounts · End-to-end encrypted" },
   { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.terracotta} strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`, label: "Self-Destructing Messages" },
   { icon: html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=${ink.sage} strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg>`, label: "Chunked Encrypted File Transfer" }].
   map((f, i) => html`<div key=${i} style=${{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0" }}>
@@ -6905,7 +7184,10 @@ function GhostLinkApp() {
               <div style=${{ width: 88, height: 88, borderRadius: 22, background: `${peer?.color || PALETTE.graphite}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, fontWeight: 700, marginBottom: 16, border: `2px solid ${th.accent}33` }}>${peer?.avatar || "?"}</div>
               <div style=${{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>${peer?.name || "Unknown"}</div>
               <div style=${{ display: "flex", gap: 6, marginBottom: 8 }}>
-                <${Tag} color=${th.accent} icon="lock">E2E ENCRYPTED<//>
+                ${/* "ENCRYPTED" not "E2E ENCRYPTED": WebRTC media is DTLS-SRTP, but with a
+                    manual SDP exchange the DTLS fingerprint is not bound to the peer's
+                    GhostLink identity, so we do not claim end-to-end to that identity. */ ''}
+                ${Object.keys(remoteStreams).length > 0 ? html`<${Tag} color=${th.accent} icon="lock">ENCRYPTED<//>` : html`<${Tag} color=${th.textSecondary}>CONNECTING…<//>`}
                 <${Tag} color=${th.accent2}>${callType === "video" ? "VIDEO" : callType === "screen" ? "SCREEN SHARE" : "VOICE"}<//>
               </div>
               <div style=${{ fontSize: 32, fontWeight: 300, color: th.accent, marginBottom: 40, letterSpacing: 6, fontFamily: "'Space Grotesk', sans-serif" }}>${fmtCallT(callTimer)}</div>
@@ -7289,8 +7571,8 @@ function GhostLinkApp() {
                   <div style=${{ fontSize: 9, color: th.textSecondary, letterSpacing: 1.5, textTransform: "uppercase", marginTop: 10 }}>What GhostLink uses</div>
                   <div style=${{ display: "flex", gap: 8, marginTop: 4 }}>
                     <${Tag} color=${th.accent} icon="shield">AES-256<//>
-                    <${Tag} color=${th.accent2} icon="chain">BLOCKCHAIN<//>
-                    <${Tag} color=${th.accent3} icon="lock">ZERO TRUST<//>
+                    <${Tag} color=${th.accent2} icon="chain">HASH CHAIN<//>
+                    <${Tag} color=${th.accent3} icon="lock">NO ACCOUNTS<//>
                   </div>
                 </div>` : html`<>
                   
@@ -7329,7 +7611,7 @@ function GhostLinkApp() {
                           <div style=${{ fontSize: 9.5, color: th.textSecondary }}>
                             ${isWorkspace ?
   `${activeWorkspace?.members?.length || 1} members · ${convoMsgs.length} blocks` :
-  `${convoMsgs.length} blocks · E2E encrypted · P2P`}
+  `${convoMsgs.length} blocks · E2E encrypted`}
                           </div>
                         </div>
                       </div>
@@ -7392,8 +7674,8 @@ function GhostLinkApp() {
   filteredMsgs.length === 0 && !searchQuery && html`<div style=${
   { textAlign: "center", padding: 50, color: th.textSecondary }}>
                         <${I} t="shield" s=${36} c=PALETTE.mist />
-                        <div style=${{ marginTop: 14, fontSize: 13, fontWeight: 600 }}>Encrypted channel established</div>
-                        <div style=${{ marginTop: 4, fontSize: 10 }}>Messages are blockchain-chained and P2P encrypted</div>
+                        <div style=${{ marginTop: 14, fontSize: 13, fontWeight: 600 }}>No messages yet</div>
+                        <div style=${{ marginTop: 4, fontSize: 10 }}>Messages are sealed to the recipient's key before they leave your device, and hash-chained.</div>
                         <div style=${{ marginTop: 12, display: "flex", gap: 6, justifyContent: "center" }}>
                           <${Tag} color=${th.accent}>ECDH P-256<//>
                           <${Tag} color=${th.accent2}>AES-256-GCM<//>
@@ -7742,9 +8024,7 @@ function GhostLinkApp() {
                     </div>`}
                   <div style=${
   { marginTop: 16, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <${Tag} color=${th.accent} icon="check">VERIFIED<//>
-                    <${Tag} color=${th.accent2} icon="lock">E2E ENCRYPTED<//>
-                    <${Tag} color=${th.accent3} icon="zap">P2P DIRECT<//>
+                    ${messageBlockTags(showBlockInfo, chainValid).map((t) => html`<${Tag} key=${t.label} color=${t.tone === 'bad' ? PALETTE.crimson : t.tone === 'ok' ? th.accent : th.accent2} icon=${t.icon}>${t.label}<//>`)}
                     ${showBlockInfo.meta?.selfDestruct && html`<${Tag} color=PALETTE.amber icon="timer">SELF-DESTRUCT ${showBlockInfo.meta.selfDestruct}s<//>`}
                   </div>
                 </div>
@@ -7956,7 +8236,7 @@ inviteTab === "create" ? html`<>
                           <div style=${{ width: 28, height: 28, borderRadius: "50%", border: `3px solid ${th.accent}20`, borderTopColor: th.accent, animation: "spin 0.8s linear infinite" }} />
                         </div>` : html`<div style=${{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
                         <div style=${{ fontSize: 11, color: th.textSecondary, lineHeight: 1.6, textAlign: "center", marginBottom: 4, padding: "0 10px" }}>
-                          This is your permanent Ghost Address. Send it to anyone, anywhere —<br/>they paste it into Connect and you are linked. No servers, no IP addresses.
+                          This is your permanent Ghost Address. Send it to anyone, anywhere —<br/>they paste it into Connect and you are linked. End-to-end encrypted — no server can read your messages.
                         </div>
                         <div style=${{ width: "100%", background: `${th.accent}08`, border: `1px dashed ${th.accent}35`, borderRadius: 14, padding: "20px 12px", textAlign: "center" }}>
                           <div style=${{ fontFamily: "monospace", fontSize: 26, fontWeight: 700, color: th.accent, letterSpacing: 2, wordBreak: "break-all" }}>${inviteCode}</div>
@@ -8023,7 +8303,7 @@ inviteTab === "create" ? html`<>
                   <div style=${{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>${activePeer.name}</div>
                   <div style=${{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 16, flexWrap: "wrap" }}>
                     <${Tag} color=${activePeer.status === "online" ? th.accent : th.textSecondary}>${activePeer.status?.toUpperCase()}<//>
-                    <${Tag} color=${th.accent2} icon="lock">E2E ENCRYPTED<//>
+                    ${peerLiveSecurityTags(activePeer).map((t) => html`<${Tag} key=${t.label} color=${th.accent2} icon=${t.icon}>${t.label}<//>`)}
                     ${isPeerVerified(activePeer) ?
   html`<${Tag} color=${th.accent} icon="check">VERIFIED<//>` :
   html`<${Tag} color=PALETTE.amber>UNVERIFIED<//>`}
@@ -8031,7 +8311,7 @@ inviteTab === "create" ? html`<>
                   <div style=${{ textAlign: "left", background: th.bg3, borderRadius: 10, padding: 14 }}>
                     ${[
   { label: "Public Key", value: activePeer.pubKey ? `${activePeer.pubKey.slice(0, 20)}…` : "Not received yet" },
-  { label: "Connection", value: "WebRTC P2P Direct" },
+  { label: "Connection", value: activePeer.status === "online" ? (connectionMode || "Connected") : "Not connected" },
   { label: "Encryption", value: "ECDH + AES-256-GCM" },
   { label: "Messages", value: `${convoMsgs.length} blocks` },
   { label: "Chain Status", value: chainValid ? "Valid" : "Broken" }].
@@ -8324,7 +8604,7 @@ inviteTab === "create" ? html`<>
                       <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                         <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
                           <${I} t="globe" s=${14} c=th.textSecondary />
-                          <span style=${{ fontSize: 12, color: PALETTE.mist }}>TURN Server Fallback</span>
+                          <span style=${{ fontSize: 12, color: PALETTE.mist }}>TURN relay server</span>
                         </div>
                         <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
                           <${Tag} color=${turnFallbackEnabled ? th.accent3 : 'th.textSecondary'}>${turnFallbackEnabled ? 'CONFIGURED' : 'OFF'}<//>
@@ -8645,7 +8925,7 @@ inviteTab === "create" ? html`<>
                   </div>
 
                   <div style=${{ marginTop: 16, textAlign: "center", fontSize: 9, color: th.textSecondary }}>
-                    GhostLink v0.0.2 · Zero Trust · Zero Trace · Built with love
+                    GhostLink v0.0.2 · End-to-end encrypted · No accounts · Built with love
                   </div>
                 </div>
               </div>`}
@@ -9028,12 +9308,25 @@ inviteTab === "create" ? html`<>
                   </div>
 
                   <div style=${{ background: `${th.accent3}06`, border: `1px solid ${th.accent3}12`, borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 10, color: th.textSecondary, lineHeight: 1.6 }}>
-                    TURN servers relay media when direct P2P is blocked by symmetric NAT. Configure your own TURN server for maximum reliability.
+                    TURN relay servers relay media when a direct connection is blocked by symmetric NAT. Configure your own TURN relay server for maximum reliability.
                   </div>
 
                   <div style=${{ marginBottom: 16 }}>
+                    <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <span style=${{ fontSize: 12, color: PALETTE.mist }}>Use Google's STUN server</span>
+                      <button onClick=${() => setSettings((s) => ({ ...s, useGoogleStun: !s.useGoogleStun }))} style=${{
+    width: 40, height: 22, borderRadius: 11, border: "none",
+    background: settings.useGoogleStun ? th.accent3 : PALETTE.divider,
+    cursor: "pointer", position: "relative", transition: "all 0.2s ease"
+  }}>
+                        <div style=${{ width: 16, height: 16, borderRadius: "50%", background: PALETTE.frost, position: "absolute", top: 3, left: settings.useGoogleStun ? 21 : 3, transition: "all 0.2s ease" }} />
+                      </button>
+                    </div>
+                    <div style=${{ fontSize: 10, color: th.textSecondary, lineHeight: 1.6, marginBottom: 16 }}>
+                      Off by default. Google's STUN server helps calls and direct connections reach you across NAT — but Google will see your IP address. With it off, direct connections work on the same network only (your own TURN relay still applies).
+                    </div>
                     <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                      <span style=${{ fontSize: 12, color: PALETTE.mist }}>Enable TURN Fallback</span>
+                      <span style=${{ fontSize: 12, color: PALETTE.mist }}>Enable TURN relay</span>
                       <button onClick=${() => toggleTurnFallback(!turnFallbackEnabled)} style=${{
     width: 40, height: 22, borderRadius: 11, border: "none",
     background: turnFallbackEnabled ? th.accent3 : PALETTE.divider,
@@ -9089,7 +9382,7 @@ inviteTab === "create" ? html`<>
                       <${I} t="check" s=${12} c=PALETTE.spectral /> COMPLETED
                     </div>
                     ${[
-  "E2E encrypted chat with blockchain integrity",
+  "E2E encrypted chat with hash-chain integrity",
   "BIP39 seed phrase identity generation",
   "Shamir's Secret Sharing backup GF(256) — 7 shares, threshold 3",
   "PBKDF2 key derivation from seed (100K iterations)",
@@ -9098,7 +9391,7 @@ inviteTab === "create" ? html`<>
   "Encrypted file transfer (64KB chunks, per-chunk AES-GCM)",
   "Voice / Video calls via WebRTC",
   "Screen sharing",
-  "Blockchain chain explorer",
+  "Hash-chain explorer",
   "QR code invite generation with Reed-Solomon",
   "Responsive layouts (mobile / tablet / desktop)",
   "Offline message queue (IndexedDB, 24h TTL)",
@@ -9106,7 +9399,7 @@ inviteTab === "create" ? html`<>
   "Voice messages with waveform",
   "Contact verification ceremony (safety numbers)",
   "Group key agreement UI",
-  "TURN server fallback config",
+  "TURN relay server config",
   "Push notifications (web)",
   "Biometric unlock detection"].
   map((item, i) => html`<div key=${
@@ -9155,7 +9448,7 @@ inviteTab === "create" ? html`<>
                   </div>
 
                   <div style=${{ marginTop: 20, textAlign: "center", fontSize: 9, color: th.textSecondary }}>
-                    GhostLink v0.0.2 · Zero Trust · Zero Trace
+                    GhostLink v0.0.2 · End-to-end encrypted · No accounts
                   </div>
                 </div>
               </div>`}
@@ -9854,8 +10147,8 @@ inviteTab === "create" ? html`<>
 
                       <div style=${{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
                         <div>
-                          <span style=${{ fontSize: 10, color: PALETTE.mist, fontWeight: 600, display: "block", marginBottom: 6 }}>TRANSACTION ID (TXID / HASH):</span>
-                          <input type="text" placeholder="Enter blockchain transaction hash" value=${
+                          <span style=${{ fontSize: 10, color: PALETTE.mist, fontWeight: 600, display: "block", marginBottom: 6 }}>Transaction hash (for support):</span>
+                          <input type="text" placeholder="Transaction hash (for support)" value=${
 
 
   buyTxHash} onChange=${
@@ -9905,38 +10198,27 @@ inviteTab === "create" ? html`<>
                         <button onClick=${
 
   () => {
-    if (!buyTxHash.trim()) {alert('TXID is required');return;}
+    if (!buyTxHash.trim()) {alert('Transaction hash is required');return;}
     if (!buyFileBlob) {alert('Screenshot is required');return;}
     if (!buyEmail.trim() || !buyEmail.includes('@')) {alert('Valid delivery email is required');return;}
-    setBuyStep(6);
+    setBuyStep(7);
   }} style=${
   { flex: 1, padding: "12px", borderRadius: 8, border: "none", background: th.accent, color: PALETTE.obsidian, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
-                          [ Submit Verification ]
+                          [ Continue ]
                         </button>
                       </div>
                     </div>`}
 
-                  
-                  ${
 
-  buyStep === 6 && html`<div style=${
-  { textAlign: "center", padding: "30px 10px", animation: "fadeIn 0.2s ease" }}>
-                      <div style=${{ display: "inline-block", width: 40, height: 40, border: `3px solid ${th.accent}20`, borderTopColor: th.accent, borderRadius: "50%", animation: "ripple 1s linear infinite", marginBottom: 20 }} />
-                      <div style=${{ fontSize: 13, fontWeight: 700, color: th.text, marginBottom: 8 }}>Querying Blockchain Network...</div>
-                      <div style=${{ fontSize: 10, color: th.textSecondary, fontFamily: "monospace" }}>Checking confirmations for tx ${buyTxHash.substring(0, 16)}...</div>
-                    </div>`}
-
-                  
                   ${
   buyStep === 7 && html`<div style=${
   { animation: "fadeIn 0.2s ease" }}>
-                      <div style=${{ fontSize: 13, fontWeight: 700, color: PALETTE.amber, marginBottom: 12, textAlign: "center" }}>⚠️ AUTOMATED CHECK UNRESOLVED</div>
+                      <div style=${{ fontSize: 13, fontWeight: 700, color: PALETTE.amber, marginBottom: 12, textAlign: "center" }}>Payment is not verified in the app</div>
                       <div style=${{ fontSize: 11, color: PALETTE.mist, lineHeight: 1.5, marginBottom: 16 }}>
-                        Our automated verifier could not immediately find your transaction confirmation on-chain. Please complete verification by sending your details to support manually.
+                        This app cannot check the blockchain or confirm your payment. After sending the amount to the address shown, contact support with your transaction hash and they will activate your license. Nothing here means your payment has been received or verified.
                       </div>
 
                       <div style=${{ background: th.bg3, border: "1px solid " + th.border, borderRadius: 10, padding: 12, fontSize: 10, color: PALETTE.mist, lineHeight: 1.6, marginBottom: 16 }}>
-                        <div><strong>Reference ID:</strong> <span style=${{ fontFamily: "monospace", color: th.accent }}>${buyRefId}</span></div>
                         <div><strong>Delivery Email:</strong> ${buyEmail}</div>
                         <div><strong>Transaction:</strong> ${buyCryptoAmount ? `${buyCryptoAmount} ${buyCoin}` : `${buyCoin} (amount per your on-chain transaction)`}</div>
                         <div style=${{ wordBreak: "break-all" }}><strong>TXID:</strong> <span style=${{ fontFamily: "monospace" }}>${buyTxHash}</span></div>
@@ -9970,9 +10252,7 @@ inviteTab === "create" ? html`<>
       `Duration: ${buyBilling === 'lifetime' ? 'Lifetime' : buyDuration + ' ' + (buyBilling === 'monthly' ? 'month(s)' : 'year(s)')}\n` +
       `Amount Paid: ${buyCryptoAmount ? `${buyCryptoAmount} ${buyCoin}` : `${buyCoin} — see transaction hash`} (${buyTotalPriceUSD} USD order total)\n` +
       `Transaction Hash: ${buyTxHash}\n` +
-      `Device ID: ${deviceId || 'N/A'}\n` +
-      `Verification Status: Pending Manual Review\n` +
-      `Reference ID: ${buyRefId}\n\n` +
+      `Device ID: ${deviceId || 'N/A'}\n\n` +
       `[Screenshot attached separately — please attach the downloaded payment screenshot to this email before sending]`
     );
     window.location.href = `mailto:ghostlink@proton.me?subject=${subject}&body=${body}`;
@@ -9990,11 +10270,10 @@ inviteTab === "create" ? html`<>
   buyStep === 8 && html`<div style=${
   { textAlign: "center", animation: "fadeIn 0.2s ease" }}>
                       <div style=${{ fontSize: 32, marginBottom: 12 }}>📬</div>
-                      <div style=${{ fontSize: 15, fontWeight: 800, color: th.accent, marginBottom: 8 }}>Verification Details Sent</div>
+                      <div style=${{ fontSize: 15, fontWeight: 800, color: th.accent, marginBottom: 8 }}>Your email client opened</div>
                       <div style=${{ fontSize: 11, color: PALETTE.mist, lineHeight: 1.6, marginBottom: 20 }}>
-                        We have queued your activation request under Reference ID: <strong style=${{ color: PALETTE.frost, fontFamily: "monospace" }}>${buyRefId}</strong>.<br /><br />
-                        Once the transaction has been verified by our team, your activation key will be delivered to: <strong style=${{ color: PALETTE.frost }}>${buyEmail}</strong>.<br /><br />
-                        Copy the received license key and paste it directly into the Settings activation input field to unlock your Pro features.
+                        Send that email to support (attach the downloaded screenshot first). The app has not verified or received your payment — support reviews it manually and replies to <strong style=${{ color: PALETTE.frost }}>${buyEmail}</strong> with your license key.<br /><br />
+                        Paste the license key into the Settings activation field to unlock your plan.
                       </div>
                       
                       <button onClick=${
@@ -10013,7 +10292,84 @@ inviteTab === "create" ? html`<>
 
 }
 
-createRoot(document.getElementById('root')).render(html`<${ErrorBoundary}><${GhostLinkApp} /><//>`);
+// ─── Contact-vault boot: install at-rest sealing BEFORE the app mounts ───────
+// Ordering contract: window.__contactVault (or the fail-closed session flag) is
+// set before createRoot().render(), so the first contact read a React component
+// makes never precedes it. The SecretStore seam is also fail-closed on its own
+// (Electron + no vault => session-only, never plaintext), so a stray pre-boot
+// read is safe regardless — defence in depth. window.__vaultBootDoneAt /
+// __firstContactReadAt are the ordering probe read back by the Electron test.
+function __glHexToU8(h) {
+  if (typeof h !== 'string' || !/^[0-9a-f]+$/i.test(h) || h.length % 2) return null;
+  const u = new Uint8Array(h.length / 2);
+  for (let i = 0; i < u.length; i++) u[i] = parseInt(h.substr(i * 2, 2), 16);
+  return u;
+}
+function __glShowSecureStorageBanner(reason) {
+  try {
+    if (document.getElementById('gl-secure-banner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'gl-secure-banner';
+    bar.setAttribute('role', 'status');
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#3a2e00;color:#ffd166;border-bottom:1px solid #ffd166;padding:10px 16px;font:13px system-ui,-apple-system,"Segoe UI",sans-serif;text-align:center;';
+    bar.textContent = 'No system keyring found — your identity and contacts aren’t saved on this device.' + (reason ? ' (' + reason + ')' : '');
+    document.body.appendChild(bar);
+  } catch (_e) { /* non-DOM/test context */ }
+}
+// On an unavailable backend, pull any plaintext a prior build left on disk into
+// the in-memory session (so contacts still work this launch) and REMOVE it from
+// disk — session-only, with no plaintext social graph left at rest. Unlike the
+// seed (irreplaceable, kept), contacts are re-addable, so losing them on the
+// next restart is the intended fail-closed cost. Sealed blobs are left as-is
+// (encrypted; harmless).
+function __glHoistPlaintextToSession(keys) {
+  for (const k of keys) {
+    try {
+      const raw = localStorage.getItem(k);
+      if (raw != null && !raw.startsWith('gl-sealed:v1:')) { SecretStore._mem.set(k, raw); localStorage.removeItem(k); }
+    } catch (_e) { /* ignore */ }
+  }
+}
+async function installContactVaultBeforeMount() {
+  const gl = (typeof window !== 'undefined' && window.ghostlink) || null;
+  if (!gl || !gl.isElectron || !gl.contactVault) return; // non-Electron: plaintext path, unchanged
+  const SECRET_KEYS = ['gl_peer_cache', 'gl_gmp_known_peers', 'gl_gmp_blocked_peers', 'gl_verified_contacts', 'gl_fragment_meta'];
+  try {
+    const mod = await import('@ghostlink/contact-vault');
+    const [keyRes, status] = await Promise.all([
+      gl.contactVault.getKey(),
+      gl.secureStorage ? gl.secureStorage.status() : Promise.resolve({ available: false }),
+    ]);
+    const keyBytes = keyRes && keyRes.available && keyRes.keyHex ? __glHexToU8(keyRes.keyHex) : null;
+    if (keyBytes && keyBytes.length === 32) {
+      // Crash-safe migration FIRST (write sealed -> verify -> overwrite), then
+      // install the vault so every later read/write is sealed.
+      mod.migrateAllCrashSafe(localStorage, SECRET_KEYS, keyBytes);
+      window.__contactVault = mod.createContactVault({
+        storage: localStorage,
+        getKey: () => keyBytes,
+        onUnavailable: () => __glShowSecureStorageBanner(),
+      });
+    } else {
+      window.__contactStorageUnavailable = true;      // SecretStore => session-only
+      window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner(status && status.reason);
+      __glHoistPlaintextToSession(SECRET_KEYS);        // clear any prior plaintext off disk
+      __glShowSecureStorageBanner(status && status.reason);
+    }
+  } catch (e) {
+    // Never fall through to plaintext in Electron: fail closed, session-only.
+    window.__contactStorageUnavailable = true;
+    window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner('secure storage could not be initialised');
+    try { __glHoistPlaintextToSession(['gl_peer_cache', 'gl_gmp_known_peers', 'gl_gmp_blocked_peers', 'gl_verified_contacts', 'gl_fragment_meta']); } catch (_e2) {}
+    __glShowSecureStorageBanner('secure storage could not be initialised');
+    console.error('[contact-vault] boot failed; running session-only:', e && e.message);
+  }
+}
+(async () => {
+  await installContactVaultBeforeMount();
+  try { window.__vaultBootDoneAt = (performance && performance.now) ? performance.now() : Date.now(); } catch (_e) {}
+  createRoot(document.getElementById('root')).render(html`<${ErrorBoundary}><${GhostLinkApp} /><//>`);
+})();
     </script>
   </body>
 </html>

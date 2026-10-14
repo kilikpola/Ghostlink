@@ -86,6 +86,23 @@ function identityFromSeed(seed: Uint8Array): NodeIdentity {
   };
 }
 
+/**
+ * Build the full identity from a 32-byte, already-KDF'd seed — the exact value
+ * deriveIdentityFromSeedPhrase produces internally after PBKDF2. The seed IS the
+ * X25519 static private key; the Ed25519 signing key and the NodeID are derived
+ * from it (see identityFromSeed above). Exposed so a holder of an already-derived
+ * seed can rebuild the identity without re-running PBKDF2: the validated
+ * `derivedSeed` factory option, and mobile (native async KDF, then pass the seed
+ * in). Validates length only; the factory owns the policy refusals (all-zero,
+ * mutual exclusion with a seed phrase).
+ */
+export function identityFromDerivedSeed(seed: Uint8Array): NodeIdentity {
+  if (!(seed instanceof Uint8Array) || seed.length !== SEED_LENGTH) {
+    throw new Error(`identityFromDerivedSeed: seed must be exactly ${SEED_LENGTH} raw bytes`);
+  }
+  return identityFromSeed(seed);
+}
+
 // Distinct info strings, so the same (bootCounter, processSequence) can never
 // derive a scalar and a throwaway identity seed that collide.
 const EPHEMERAL_INFO = stringToBytes('gmp-ephemeral-scalar-v1');

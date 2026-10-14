@@ -3,9 +3,10 @@
  * hard-deleted (removeFileDurableSync), since expiry must not leave data on
  * disk the way an append-only log would.
  *
- * Blobs leave only by TTL expiry (default 7 days) or LRU eviction past
- * maxBlobsPerBucket (256) / maxBytesPerBucket (16 MiB). No client can delete a
- * blob or report reading one.
+ * Blobs leave only by TTL expiry (default 7 days) or eviction of the
+ * OLDEST-DEPOSITED blob (lowest seq) past maxBlobsPerBucket / maxBytesPerBucket.
+ * Reads never change eviction order, so a flooder cannot keep its own blobs
+ * alive by re-fetching them. No client can delete a blob or report reading one.
  *
  * Sequence numbers (fetch cursors) strictly increase across restarts:
  * max(last + 1, clock-ms x 1000).
@@ -148,7 +149,14 @@ export class BlobStore {
     return this.lastSeq;
   }
 
-  /** Store one blob. Evicts least-recently-used blobs of the bucket to make room. */
+  /**
+   * Store one blob. When the bucket is full, evicts the OLDEST-DEPOSITED blob
+   * (lowest seq) to make room — not the least-recently-read. At bucketCount=1
+   * every client fetches every blob, so reads say nothing about delivery; a
+   * flooder could otherwise keep its own junk alive by re-fetching it. Deposit
+   * order cannot be refreshed by reads, so a flooder's blobs age out like any
+   * other and honest blobs are not evicted first.
+   */
   put(bucket: number, blob: Buffer): { blobId: string; expiresAt: number; evicted: string[] } {
     this.sweep();
     const now = this.clock();
@@ -157,10 +165,10 @@ export class BlobStore {
       const list = [...(this.byBucket.get(bucket) ?? [])].map((id) => this.blobs.get(id)!);
       const bytes = list.reduce((n, m) => n + m.size, 0);
       if (list.length === 0 || (list.length < this.maxBlobs && bytes + blob.length <= this.maxBytes)) break;
-      const lru = list.reduce((a, b) => (b.lastAccess < a.lastAccess ? b : a));
-      this.hardDelete(lru.blobId);
+      const oldest = list.reduce((a, b) => (b.seq < a.seq ? b : a));
+      this.hardDelete(oldest.blobId);
       this.evictions++;
-      evicted.push(lru.blobId);
+      evicted.push(oldest.blobId);
     }
     const meta: BlobMeta = {
       blobId: crypto.randomBytes(16).toString('hex'),
@@ -185,14 +193,16 @@ export class BlobStore {
       .sort((a, b) => a.seq - b.seq);
   }
 
-  /** The stored blob bytes; marks it used (LRU). */
+  /**
+   * The stored blob bytes. Reading does NOT change the blob's eviction position:
+   * eviction is by deposit order (seq), so re-fetching cannot keep a blob alive.
+   */
   read(blobId: string): Buffer | null {
     const m = this.blobs.get(blobId);
     if (!m) return null;
     const raw = this.unseal(fs.readFileSync(this.blobPath(blobId)));
     const u = raw && BlobStore.unpack(raw);
     if (!u) return null;
-    m.lastAccess = this.clock();
     return u.body;
   }
 

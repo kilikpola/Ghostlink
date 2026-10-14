@@ -30,6 +30,8 @@ const INVOKE_CHANNELS = [
   'ghostmesh-send',
   'ghostmesh-close',
   'gmp-start',
+  'contact-vault-key',
+  'secure-storage-status',
 ];
 
 const RECEIVE_CHANNELS = [
@@ -117,6 +119,20 @@ contextBridge.exposeInMainWorld('ghostlink', {
 
   gmp: {
     start: (seed) => secureInvoke('gmp-start', seed),
+  },
+
+  /* ── Contact vault key (OS keyring, fail-closed) ────────────────
+     Returns {available:true, keyHex} when the OS keyring really
+     protects the key, else {available:false, reason, backend}. The
+     renderer must treat available:false as "no secure storage": keep
+     contacts in memory and warn, never seal with a weak key. */
+  contactVault: {
+    getKey: () => secureInvoke('contact-vault-key'),
+  },
+
+  /* ── Secure storage status (drives the fail-closed banner) ────── */
+  secureStorage: {
+    status: () => secureInvoke('secure-storage-status'),
   },
 
   /* ── Tray actions listener ──────────────────────────────────── */

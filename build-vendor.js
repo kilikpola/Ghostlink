@@ -86,6 +86,21 @@ async function main() {
     });
   }
 
+  // The desktop contact vault: our own source, with @noble/ciphers
+  // (XChaCha20-Poly1305) inlined so the renderer seals contacts at rest the
+  // same way mobile does. Bundled ESM, reached through the importmap entry
+  // "@ghostlink/contact-vault". No runtime CDN fetch; one source is both the
+  // tested module (test/contact-vault.test.mjs imports vendor-src/) and shipped.
+  await esbuild.build({
+    entryPoints: [path.join(VENDOR_SRC, 'contact-vault.js')],
+    bundle: true,
+    format: 'esm',
+    target: 'es2020',
+    minify: true,
+    platform: 'browser',
+    outfile: path.join(VENDOR_DIR, 'contact-vault.js')
+  });
+
   // tweetnacl ships a prebuilt browser file; copy it as-is.
   const nacl = path.join(ROOT, 'node_modules', 'tweetnacl', 'nacl-fast.min.js');
   fs.copyFileSync(nacl, path.join(VENDOR_DIR, 'nacl-fast.min.js'));

@@ -356,6 +356,13 @@ export interface GMPNodeConstructorOptions {
   disableBootstrap?: boolean;
   bootstrapParallelCount?: number;
   isPublicPeer?: boolean;
+  /**
+   * A raw 32-byte, already-KDF'd seed to build the identity from, in place of a
+   * seed phrase. Validated and accepted only as an in-process option by
+   * createGMPNode (never env/config); the node then derives every key and the
+   * NodeID from it. For mobile (native PBKDF2) and deterministic test identities.
+   */
+  derivedSeed?: Uint8Array;
 }
 
 // ── Structural views of the link.js runtime objects ──

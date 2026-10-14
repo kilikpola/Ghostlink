@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "buildCommand": "cd gmp-core && npm install && npm run build"
+  },
+  "deploy": {
+    "startCommand": "bash -c \"cd gmp-core && npm install && npm run build && node dist/cli.js storage-peer\""
+  }
+}

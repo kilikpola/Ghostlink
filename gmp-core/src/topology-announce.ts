@@ -425,6 +425,29 @@ export class TopologyManager extends EventEmitter<NoEvents> {
     return this._query({ ghost }, timeoutMs);
   }
 
+  /**
+   * Resolve a Ghost Address to EVERY distinct authentic NodeID that matches it,
+   * within the query's normal lifetime. A Ghost Address is only 45 bits, so more
+   * than one identity can map to it (including a ground-to-collide impostor);
+   * first-wins (queryGhost) would silently pick one. The caller treats >1 as
+   * ambiguous and never auto-picks. Returns [] if none resolve.
+   */
+  async queryGhostAll(address: string, timeoutMs = 3000): Promise<string[]> {
+    const ghost = normalizeGhostAddress(address);
+    if (!this.node.identity || !ghost) return [];
+    const id = crypto.randomBytes(16).toString('hex');
+    this.seenQueries.add(id);
+    const paths = await this._askAll({ ghost }, this.routeQueryTtl, id, null, timeoutMs);
+    for (const path of paths) for (const edge of path) this.updateLSDB({ ...edge, ttl: 0 });
+    this.rebuildRoutingTable();
+    const ends = new Set<string>();
+    for (const path of paths) {
+      const end = toHex(path[path.length - 1].connectedToNodeId);
+      if (this.node.routingTable.getBestRoute(end)) ends.add(end);
+    }
+    return [...ends];
+  }
+
   private async _query(sel: Selector, timeoutMs: number): Promise<string | null> {
     if (!this.node.identity) return null;
     const id = crypto.randomBytes(16).toString('hex');
@@ -477,6 +500,44 @@ export class TopologyManager extends EventEmitter<NoEvents> {
           link.sendRouteQuery({ id, ttl, ...sel });
         } catch {
           if (--outstanding === 0) finish(null);
+        }
+      }
+    });
+  }
+
+  /**
+   * Like _ask, but collects EVERY authentic matching path rather than resolving
+   * on the first. Waits until all asked neighbours answer or the lifetime
+   * (timeoutMs) elapses — the same budget as _ask, no new timeout. Used only for
+   * Ghost Address resolution, where a 45-bit collision means several distinct
+   * identities can legitimately answer.
+   */
+  private _askAll(sel: Selector, ttl: number, id: string, exclude: string | null, timeoutMs: number): Promise<AnnouncementEntry[][]> {
+    const asked = this._queryTargets(exclude);
+    if (asked.length === 0) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      let outstanding = asked.length;
+      let done = false;
+      const paths: AnnouncementEntry[][] = [];
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        for (const l of asked) this.pendingAnswers.delete(`${id}|${toHex(l.remoteNodeId)}`);
+        resolve(paths);
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      if (timer.unref) timer.unref();
+      for (const link of asked) {
+        const via = toHex(link.remoteNodeId);
+        this.pendingAnswers.set(`${id}|${via}`, (a) => {
+          if (a.path && this._validPath(via, sel, a.path)) paths.push(a.path);
+          if (--outstanding === 0) finish();
+        });
+        try {
+          link.sendRouteQuery({ id, ttl, ...sel });
+        } catch {
+          if (--outstanding === 0) finish();
         }
       }
     });

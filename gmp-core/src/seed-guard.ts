@@ -45,10 +45,27 @@ export function findSeedPhrase(text: string): number {
 }
 
 /**
- * True if `text` holds a seed phrase: a run of accepted words, or any of
- * `knownSecrets` verbatim (a configured seed need not be made of list words).
+ * Secrets registered at runtime, consulted by containsSeedPhrase in addition to
+ * the caller's list. A `derivedSeed` node has no seed phrase and no configured
+ * GMP_SEED_PHRASE, so the logger's static [env, config] list cannot match its
+ * raw seed; the node registers that seed's hex and base64 here so either form is
+ * withheld wherever it appears. Hex (64) and base64 (44) clear the 8-char floor.
+ */
+const registeredSecrets = new Set<string>();
+
+/** Withhold any log line containing `value`. No-op for values under 8 chars. */
+export function registerSensitiveValue(value: string): void {
+  const v = (value || '').trim();
+  if (v.length >= 8) registeredSecrets.add(v);
+}
+
+/**
+ * True if `text` holds a seed phrase: a run of accepted words, any of
+ * `knownSecrets` verbatim, or any runtime-registered secret (a configured or
+ * derived seed need not be made of list words).
  */
 export function containsSeedPhrase(text: string, knownSecrets: ReadonlyArray<string | undefined> = []): boolean {
   for (const s of knownSecrets) if (s && s.trim().length >= 8 && text.includes(s.trim())) return true;
+  for (const s of registeredSecrets) if (text.includes(s)) return true;
   return findSeedPhrase(text) >= 0;
 }

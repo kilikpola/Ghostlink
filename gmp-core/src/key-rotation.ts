@@ -28,6 +28,13 @@ export class KeyRotationManager extends EventEmitter<KeyRotationEvents> {
   private seenSequenceNumbers: Set<string>;
   private sequenceNumber: number;
   private readonly ttl: number;
+  /**
+   * Rotations this node has VERIFIED (old NodeID -> new NodeID, both lowercase).
+   * Written only after the signature check below passes, so membership here is
+   * exactly "gmp-core verified this rotation". Contact pinning consults it to
+   * tell a legitimate key change from an impostor; see isRotationVerified.
+   */
+  private verifiedRotations: Map<string, string>;
 
   constructor(node: GMPNodeLike, options: { topologyTtl?: number } = {}) {
     super();
@@ -35,6 +42,24 @@ export class KeyRotationManager extends EventEmitter<KeyRotationEvents> {
     this.ttl = options.topologyTtl || DEFAULTS.GMP_TOPOLOGY_TTL;
     this.seenSequenceNumbers = new Set();
     this.sequenceNumber = 0;
+    this.verifiedRotations = new Map();
+  }
+
+  /**
+   * True iff a chain of VERIFIED rotations links `fromNodeId` to `toNodeId`.
+   * Only edges recorded after a passing signature check are followed, so this
+   * never reports a forged or unsigned "rotation" as verified.
+   */
+  isRotationVerified(fromNodeId: string, toNodeId: string): boolean {
+    const to = (toNodeId || '').toLowerCase();
+    let cur = (fromNodeId || '').toLowerCase();
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      if (cur === to) return true;
+      seen.add(cur);
+      cur = (this.verifiedRotations.get(cur) || '').toLowerCase();
+    }
+    return cur === to && cur !== '';
   }
 
   floodRotation(cert: KeyRotationPayload): void {
@@ -126,6 +151,9 @@ export class KeyRotationManager extends EventEmitter<KeyRotationEvents> {
 
     const newNodeIdHex = toHex(cert.newNodeId);
     this.node.peerCache.replaceNodeId(oldNodeIdHex, newNodeIdHex, cert.newPublicKey);
+    // Record the verified old -> new edge for contact pinning. Reached only
+    // after the signature check above passed.
+    this.verifiedRotations.set(oldNodeIdHex.toLowerCase(), newNodeIdHex.toLowerCase());
 
     this.node.routingTable.removeRoutesVia(oldNodeIdHex);
     if (this.node.routingTable.routes.has(oldNodeIdHex)) {

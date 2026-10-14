@@ -26,6 +26,8 @@ const Store = require('electron-store');
 const net = require('net');
 const { createTray, updateBadge, flashTray, destroyTray } = require('./tray');
 const { initUpdater, updateReady, quitAndInstall } = require('./updater');
+const { getContactVaultKey, secureStorageStatus } = require('./contact-key');
+const { createSeedStore } = require('./seed-store');
 let gmpManager = null;
 let gmpBridge = null;
 let gmpStarting = null;
@@ -115,61 +117,15 @@ const store = new Store({
 /* ─── Recovery seed at rest ─────────────────────────────────── */
 
 /**
- * The GMP seed phrase (master identity) is stored via safeStorage, bound to the
- * OS keychain. If the platform cannot provide that, refuse rather than store
- * it in the clear.
+ * The GMP seed phrase (master identity) at rest. FAIL CLOSED via
+ * secureBackendOk (NOT the raw safeStorage.isEncryptionAvailable(), which can
+ * be true for Linux 'basic_text' — a hardcoded key that protects nothing). On
+ * an untrustworthy backend the seed is not persisted; the renderer shows an
+ * amber banner and the identity is re-entered each launch. See seed-store.js.
  */
-const SEED_STORE_KEY = 'gmp_seed_phrase_enc';
-const LEGACY_SEED_STORE_KEY = 'gmp_seed_phrase';
-
-function seedStorageAvailable() {
-  try {
-    return safeStorage.isEncryptionAvailable();
-  } catch (_e) {
-    return false;
-  }
-}
-
-function setStoredSeed(seed) {
-  if (typeof seed !== 'string' || !seed.trim()) {
-    throw new Error('Refusing to store an empty seed phrase.');
-  }
-  if (!seedStorageAvailable()) {
-    throw new Error(
-      'OS secure storage is unavailable, so the recovery phrase cannot be ' +
-      'stored safely. On Linux this usually means no keyring (gnome-keyring ' +
-      'or kwallet) is running.'
-    );
-  }
-  store.set(SEED_STORE_KEY, safeStorage.encryptString(seed).toString('base64'));
-  // Clear any copy left by an older build that wrote it in the clear.
-  store.delete(LEGACY_SEED_STORE_KEY);
-  return true;
-}
-
-function getStoredSeed() {
-  const sealed = store.get(SEED_STORE_KEY);
-  if (sealed) {
-    if (!seedStorageAvailable()) return null;
-    try {
-      return safeStorage.decryptString(Buffer.from(sealed, 'base64'));
-    } catch (err) {
-      console.error('[Electron GMP] Stored seed could not be decrypted:', err.message);
-      return null;
-    }
-  }
-
-  // One-time migration off the plaintext key written by older builds.
-  const legacy = store.get(LEGACY_SEED_STORE_KEY);
-  if (!legacy) return null;
-  try {
-    setStoredSeed(legacy);
-    console.log('[Electron GMP] Migrated recovery phrase into OS secure storage.');
-  } catch (err) {
-    console.warn('[Electron GMP] Could not migrate seed to secure storage:', err.message);
-  }
-  return legacy;
-}
+const seedStore = createSeedStore({ safeStorage, store });
+const setStoredSeed = (seed) => seedStore.setSeed(seed);
+const getStoredSeed = () => seedStore.getSeed();
 
 /* ─── Ghost Mesh TCP bridge state ───────────────────────────── */
 // Must differ from the GMP node's port (default 49500): both bind [::] in this
@@ -474,6 +430,15 @@ function setupIPC() {
   });
 
   /* ── File operations ────────────────────────────────────────── */
+  // The desktop contact vault's 32-byte data key, from safeStorage (OS keyring).
+  // Fails closed on basic_text / no keyring: the renderer then keeps contacts in
+  // memory and shows a warning rather than sealing with a key that protects nothing.
+  ipcMain.handle('contact-vault-key', () => getContactVaultKey(safeStorage, store));
+
+  // One source of truth for the fail-closed UI banner: is this device able to
+  // protect secrets at rest at all? Used for both the seed and the contacts.
+  ipcMain.handle('secure-storage-status', () => secureStorageStatus(safeStorage));
+
   ipcMain.handle('save-file', async (_e, data, filename) => {
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       defaultPath: filename,
@@ -513,13 +478,21 @@ function setupIPC() {
 
   /* ── GMP Node/Bridge IPC Handlers ───────────────────────────── */
   ipcMain.handle('gmp-start', async (_e, seed) => {
+    // Persisting the seed and running the node are independent: if secure
+    // storage is unavailable we still start the session (identity works this
+    // launch), we just do NOT write the seed to disk, and we tell the renderer
+    // so it can show the amber "identity isn't saved on this device" banner.
+    // Never fall back to plaintext.
+    let seedPersisted = false;
+    let seedPersistError = null;
     try {
-      setStoredSeed(seed);
+      seedPersisted = setStoredSeed(seed) === true;
     } catch (err) {
-      return { error: err.message };
+      seedPersistError = err.message;
+      console.warn('[Electron GMP] Seed not persisted (running session-only):', err.message);
     }
     await startGMPNode(seed);
-    return true;
+    return { ok: true, seedPersisted, seedPersistError, secureStorage: secureStorageStatus(safeStorage) };
   });
 
   /* ── Auto-update trigger ────────────────────────────────────── */

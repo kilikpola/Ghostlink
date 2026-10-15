@@ -183,7 +183,10 @@ async function startNode(isPublic: boolean = false): Promise<void> {
     const status = await manager.start();
     console.log(`GMP Node successfully started. NodeID: ${status.nodeId}`);
 
-    startBridge(manager, config.GMP_BRIDGE_PORT, config.GMP_BRIDGE_HOST);
+    // `gmp start` / `gmp public-peer` is the explicit self-host/server entry, so
+    // it opts into a tokenless bridge (startBridge logs a warning on every start).
+    // Programmatic startBridge callers still get a hard refusal without a token.
+    await startBridge(manager, config.GMP_BRIDGE_PORT, config.GMP_BRIDGE_HOST, { allowTokenless: true });
 
     const shutdown = async (): Promise<void> => {
       console.log('\nShutting down GMP node gracefully...');

@@ -2319,7 +2319,10 @@ class GMPBridgeConnector {
         // must stay removed across a bridge restart — otherwise _restoreSessions
         // would quietly dial them back in. removePeer/unblockPeer own that set.
 
-        this.ws = new WebSocket(getBridgeWsUrl());
+        // Present the per-launch bridge token (Electron) as a WebSocket
+        // subprotocol so the bridge accepts this renderer and rejects any other
+        // local client. Absent in the CLI/web build (tokenless bridge).
+        this.ws = new WebSocket(getBridgeWsUrl(), (typeof window !== 'undefined' && window.__bridgeToken) ? [window.__bridgeToken] : undefined);
         this.ws.onopen = () => {
           this.wsOpen = true;
           this.bridgeReachable = true;
@@ -5917,11 +5920,13 @@ function GhostLinkApp() {
     setQuickMode('host');
     setQuickSignalStep('host-connecting');
 
+    // CSPRNG, 12 symbols x 5 bits = 60 bits of entropy (RC1 audit F4). The 32-symbol
+    // alphabet is a power of two, so (byte & 31) is unbiased (256 % 32 === 0).
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const rb = new Uint8Array(12);
+    crypto.getRandomValues(rb);
     let code = '';
-    for (let i = 0; i < 6; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    for (let i = 0; i < 12; i++) code += chars.charAt(rb[i] & 31);
     setQuickRoomCode(code);
 
     const url = getFormattedRelayUrl();
@@ -10367,6 +10372,9 @@ async function installContactVaultBeforeMount() {
 }
 (async () => {
   await installContactVaultBeforeMount();
+  // Fetch the per-launch bridge token BEFORE the app mounts (and thus before the
+  // connector opens the bridge WebSocket). Electron only; held in memory.
+  try { if (window.ghostlink && window.ghostlink.bridgeToken) window.__bridgeToken = await window.ghostlink.bridgeToken(); } catch (_e) {}
   try { window.__vaultBootDoneAt = (performance && performance.now) ? performance.now() : Date.now(); } catch (_e) {}
   createRoot(document.getElementById('root')).render(html`<${ErrorBoundary}><${GhostLinkApp} /><//>`);
 })();

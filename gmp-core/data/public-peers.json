@@ -10,5 +10,16 @@
     "operator": "",
     "provider": "railway",
     "addedAt": 1791654373367
+  },
+  {
+    "address": "centerbeam.proxy.rlwy.net",
+    "port": 28336,
+    "tls": false,
+    "nodeId": "e65f1ae7b41b30d01dfbeca5f3f210d5bd74a3f911adfe4e53aa18085893b983de95db1c8e89a4c5d991d480553da4f26eced43983d2de63b85d157b37be9040",
+    "roles": [
+      "storage"
+    ],
+    "provider": "railway",
+    "addedAt": 1792002281527
   }
 ]

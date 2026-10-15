@@ -352,12 +352,41 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
   }
 
   /** One ladder dial: capped, cancellable, and cancelling everything else if it wins. */
+  /**
+   * True when the shipped public-peer list (union of all list files) names this
+   * NodeID with roles that do NOT include "bootstrap". Applies to every rung
+   * (cache, LAN, public, peer-exchange): the public rung already filters list
+   * entries by role, but cache/LAN/exchange candidates are learned by NodeID
+   * with no role, so this NodeID-keyed check is the chokepoint that stops a
+   * poisoned peer-exchange entry from dialing a storage-/relay-only host.
+   * Logged unconditionally when it fires.
+   */
+  private _roleBlockedFromBootstrap(nodeIdHex: string): boolean {
+    const id = nodeIdHex.toLowerCase();
+    for (const e of loadPublicPeers(this.publicPeersPath || undefined)) {
+      if (e.nodeId && e.nodeId.toLowerCase() === id && !(e.roles || []).includes('bootstrap')) {
+        logger.warn('bootstrap', 'role-blocked-dial',
+          `Refusing to dial ${id.slice(0, 16)}… for bootstrap: the shipped list marks it ${JSON.stringify(e.roles)} (no bootstrap role)`,
+          { nodeId: id, roles: e.roles });
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async _ladderDial(run: LadderRun, rung: LadderRung, c: DialableCandidate, remainingMs: number, rungControllers: Set<AbortController>): Promise<void> {
     const nodeIdHex = c.nodeId;
     // Failures are remembered per NodeID *and address*: a peer that failed at
     // a stale cached address may still answer where the LAN or a list says it is.
     const attemptKey = `${nodeIdHex}@${c.address}:${c.port}`;
     if (!nodeIdHex || this._linked(nodeIdHex) || this.dialingNodeIds.has(nodeIdHex) || this.failedAttempts.has(attemptKey)) return;
+    // Role gate (keyed on NodeID, before any dial): never bootstrap through a
+    // NodeID the shipped list marks with roles that do not include "bootstrap"
+    // (e.g. the storage-only peer). Otherwise a peer that advertised that NodeID
+    // via peer exchange could make us dial it directly, exposing our identity to
+    // it, after which every store-forward deposit there is refused
+    // (STORAGE_ON_BOOTSTRAP_HOST) — a targeted denial of offline delivery.
+    if (this._roleBlockedFromBootstrap(nodeIdHex)) return;
     this.dialingNodeIds.add(nodeIdHex);
     const controller = new AbortController();
     run.controllers.add(controller);

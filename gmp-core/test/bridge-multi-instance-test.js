@@ -96,7 +96,7 @@ async function testBrowsers() {
     defaultPort: 0,
     managerOptions: { transport: new MemoryTransport(network), GMP_METRICS_PORT: METRICS_PORT },
   });
-  const bridge = await startBridge(null, 0, '127.0.0.1', { registry });
+  const bridge = await startBridge(null, 0, '127.0.0.1', { registry, allowTokenless: true });
 
   console.log('\n=== 1. different seeds -> different nodes ===');
   const a = new Client(bridge.port); const b = new Client(bridge.port);
@@ -194,7 +194,7 @@ async function testHostNode() {
     defaultPort: 0,
     managerOptions: { transport, GMP_METRICS_PORT: METRICS_PORT },
   });
-  const bridge = await startBridge(host, 0, '127.0.0.1', { registry });
+  const bridge = await startBridge(host, 0, '127.0.0.1', { registry, allowTokenless: true });
   await host.start();
 
   const noSeed = new Client(bridge.port);

@@ -104,7 +104,10 @@ async function testSchema() {
   assert(JSON.stringify(by['c.example']?.roles) === '["bootstrap","relay"]', 'both roles allowed');
   assert(!by['d.example'] && !by['e.example'], 'entries with no valid role array are dropped');
   const shipped = loadPublicPeers(path.join(here, '..', 'data', 'public-peers.json'));
-  assert(shipped.length >= 1 && shipped.every((p) => p.roles.includes('bootstrap')), 'the shipped list still loads as bootstrap hosts');
+  // The invariant is that the shipped list still provides a bootstrap host —
+  // NOT that every entry is one. A storage- or relay-only entry is allowed
+  // (the public bootstrap rung filters by role; see testRealListNeverDialsStorage).
+  assert(shipped.length >= 1 && shipped.some((p) => p.roles.includes('bootstrap')), 'the shipped list still provides at least one bootstrap host');
 }
 
 async function testBootstrapUsesBootstrapRole() {
@@ -130,6 +133,57 @@ async function testBootstrapUsesBootstrapRole() {
     absent: () => !dialled.includes(R.port) && ![...E.connections.values()].some((l) => hex(l.remoteNodeId) === R.identity.nodeIdHex),
     message: 'a relay-only host is never dialled for bootstrap',
   });
+}
+
+// With the REAL shipped list, the bootstrap ladder's public rung must never
+// offer the storage-only peer as a candidate (dialling it directly would show
+// it this node's real identity and then every store-forward deposit would be
+// refused with STORAGE_ON_BOOTSTRAP_HOST). Positive control: the same entry,
+// re-tagged roles:["bootstrap"], IS offered.
+async function testRealListNeverDialsStorage() {
+  console.log('\n=== 2b. the shipped storage-only peer is never a bootstrap-rung candidate ===');
+  const network = new MemoryNetwork();
+  const node = await makeNode(network, 'roles real-list bootstrapper');
+  const realPath = path.join(here, '..', 'data', 'public-peers.json');
+  const shipped = loadPublicPeers(realPath);
+  const storage = shipped.find((p) => p.roles.includes('storage') && !p.roles.includes('bootstrap'));
+  assert(!!storage, 'the shipped list has a storage-only entry to test against');
+
+  node.bootstrap.publicPeersPath = realPath;
+  const pub = node.bootstrap._publicCandidates();
+  assert(pub.length >= 1 && pub.every((c) => c.roles.includes('bootstrap')), 'public rung offers only bootstrap-role hosts');
+  assert(!pub.some((c) => (c.nodeId || '').toLowerCase() === storage.nodeId.toLowerCase()), 'the storage-only peer is NEVER a bootstrap-rung candidate');
+
+  // POSITIVE CONTROL: the same entry with roles ["bootstrap"] IS offered.
+  const fixture = peersFile(shipped.map((p) => (p === storage ? { ...p, roles: ['bootstrap'] } : p)));
+  node.bootstrap.publicPeersPath = fixture;
+  const pub2 = node.bootstrap._publicCandidates();
+  assert(pub2.some((c) => (c.nodeId || '').toLowerCase() === storage.nodeId.toLowerCase()), 'control: re-tagged roles:["bootstrap"], that same entry IS offered');
+}
+
+async function testPeerExchangePoisoning() {
+  console.log('\n=== 2c. role-blind rungs refuse a poisoned storage NodeID (peer-exchange poisoning) ===');
+  const network = new MemoryNetwork();
+  const node = await makeNode(network, 'roles poisoning victim');
+  const S = 'aa'.repeat(64); // storage-only peer NodeID (what a malicious peer advertises)
+  const B = 'bb'.repeat(64); // ordinary bootstrap peer NodeID (positive control)
+  node.bootstrap.publicPeersPath = peersFile([
+    { address: 'storage.example', port: 1, nodeId: S, addedAt: 0, lastVerified: 0, roles: ['storage'] },
+    { address: 'boot.example', port: 2, nodeId: B, addedAt: 0, lastVerified: 0, roles: ['bootstrap'] },
+  ]);
+  // Unit: the NodeID-keyed role gate.
+  assert(node.bootstrap._roleBlockedFromBootstrap(S) === true, 'a storage-only NodeID is role-blocked from bootstrap dials');
+  assert(node.bootstrap._roleBlockedFromBootstrap(B) === false, 'a bootstrap-role NodeID is not blocked');
+  // Dial chokepoint: _ladderDial must not dial the blocked NodeID; must dial the control.
+  const dialed = [];
+  node.dial = (address, port) => { dialed.push(port); return Promise.reject(new Error('spy')); };
+  const run = { won: false, controllers: new Set(), rung: null, cancelled: 0, t0: Date.now(), attempts: [] };
+  // A malicious peer advertised S via peer exchange (role-blind rung): must NOT dial.
+  await node.bootstrap._ladderDial(run, 'peer-exchange', { nodeId: S, address: 'storage.example', port: 1 }, 1000, new Set());
+  assert(!dialed.includes(1), 'NEW: the poisoned storage NodeID is never dialed for bootstrap');
+  // POSITIVE CONTROL: an ordinary bootstrap NodeID advertised the same way IS dialed.
+  await node.bootstrap._ladderDial(run, 'peer-exchange', { nodeId: B, address: 'boot.example', port: 2 }, 1000, new Set());
+  assert(dialed.includes(2), 'control: a bootstrap NodeID advertised via peer exchange IS dialed');
 }
 
 async function testHardRules() {
@@ -330,6 +384,8 @@ async function run() {
   try {
     await testSchema();
     await testBootstrapUsesBootstrapRole();
+    await testRealListNeverDialsStorage();
+    await testPeerExchangePoisoning();
     await testHardRules();
     await testListedAliasBeforeDial();
     await testSeparationState();

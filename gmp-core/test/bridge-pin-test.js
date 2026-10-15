@@ -45,7 +45,7 @@ async function run() {
   const BRIDGE_PORT = 3211;
   const manager = new GMPNodeManager({ seedPhrase: 'bridge pin test manager seed phrase one', GMP_PORT: 0, disableBootstrap: true, dataDir: tmp('mgr') });
   await manager.start();
-  const bridge = await startBridge(manager, BRIDGE_PORT, '127.0.0.1');
+  const bridge = await startBridge(manager, BRIDGE_PORT, '127.0.0.1', { allowTokenless: true });
 
   // Capture the main-process mismatch log (family 5).
   const lines = [];

@@ -32,6 +32,7 @@ const INVOKE_CHANNELS = [
   'gmp-start',
   'contact-vault-key',
   'secure-storage-status',
+  'bridge-token',
 ];
 
 const RECEIVE_CHANNELS = [
@@ -134,6 +135,9 @@ contextBridge.exposeInMainWorld('ghostlink', {
   secureStorage: {
     status: () => secureInvoke('secure-storage-status'),
   },
+
+  /* ── Per-launch bridge token (presented as a WebSocket subprotocol) ── */
+  bridgeToken: () => secureInvoke('bridge-token'),
 
   /* ── Tray actions listener ──────────────────────────────────── */
   onTrayAction: (callback) => secureOn('tray-action', callback),

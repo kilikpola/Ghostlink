@@ -116,8 +116,8 @@ class BridgeClient {
     await hub.start();
 
     // Bridges are handed a pre-built manager, the same way Electron does it.
-    aliceBridge = await startBridge(aliceManager, 3102, '127.0.0.1');
-    bobBridge = await startBridge(bobManager, 3103, '127.0.0.1');
+    aliceBridge = await startBridge(aliceManager, 3102, '127.0.0.1', { allowTokenless: true });
+    bobBridge = await startBridge(bobManager, 3103, '127.0.0.1', { allowTokenless: true });
 
     aliceClient = new BridgeClient('ws://127.0.0.1:3102');
     bobClient = new BridgeClient('ws://127.0.0.1:3103');

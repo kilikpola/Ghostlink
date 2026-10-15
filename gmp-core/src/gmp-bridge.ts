@@ -4,6 +4,7 @@ import net from 'net';
 import http from 'http';
 import https from 'https';
 import { readFileSync } from 'fs';
+import { timingSafeEqual } from 'crypto';
 import { resolve } from 'path';
 import { GMPNodeManager } from './gmp-node-manager.js';
 import { NodeRegistry, RegistryError } from './node-registry.js';
@@ -38,6 +39,20 @@ export interface BridgeOptions {
   maxNodes?: number;
   /** Supply a registry (tests); otherwise one is built. */
   registry?: NodeRegistry;
+  /**
+   * A per-launch secret the client must present (as a WebSocket subprotocol) to
+   * connect, regardless of Origin. When set (Electron passes a CSPRNG token),
+   * any connection without it is refused — so another local process or user
+   * cannot drive the node. Omitted for the CLI/self-host path (Origin/IP only).
+   */
+  authToken?: string;
+  /**
+   * Explicit opt-in to start a bridge WITHOUT an auth token (localhost dev /
+   * self-host). Without this (or GMP_BRIDGE_ALLOW_TOKENLESS=1) startBridge
+   * refuses to start when no token is given, so a tokenless bridge can never be
+   * created by accident. When used, a warning is logged on every start.
+   */
+  allowTokenless?: boolean;
 }
 
 export interface BridgeHandle {
@@ -68,16 +83,27 @@ export async function startBridge(
   const sessions = new Set<Session>();
 
   const lanMode = bridgeHost === '0.0.0.0';
-  const allowNullOrigin = process.env.GMP_BRIDGE_ALLOW_NULL_ORIGIN === '1';
+  const authToken = options.authToken ?? null;
+  const allowTokenless = options.allowTokenless === true || process.env.GMP_BRIDGE_ALLOW_TOKENLESS === '1';
   const isAllowedIP = (ip: string): boolean => isLocalIP(ip) || (lanMode && isPrivateLANIP(ip));
+
+  // Refuse to start a tokenless bridge unless explicitly allowed, so one is
+  // never created by accident (any local process could otherwise drive the node).
+  if (!authToken && !allowTokenless) {
+    throw new Error(
+      'startBridge: refusing to start without an auth token. Pass { authToken } ' +
+      '(the Electron app does), or explicitly opt into a localhost dev/self-host ' +
+      'bridge with { allowTokenless: true } or GMP_BRIDGE_ALLOW_TOKENLESS=1.');
+  }
+  if (!authToken) {
+    logger.warn('bridge', 'tokenless-bridge',
+      'Bridge started WITHOUT an auth token (explicit dev/self-host opt-in). Any local ' +
+      'process or user that passes the Origin/IP checks can drive this node. Use the ' +
+      'token path (Electron) for an untrusted multi-user host.');
+  }
 
   if (lanMode) {
     logger.warn('bridge', 'lan-mode-enabled', 'Bridge bound to all interfaces — only use on trusted LAN, never expose to internet', { bridgeHost });
-  }
-  if (allowNullOrigin) {
-    logger.warn('bridge', 'null-origin-allowed',
-      'GMP_BRIDGE_ALLOW_NULL_ORIGIN=1 — opaque "null" origins accepted. Any website can reach ' +
-      'the bridge from a sandboxed iframe while this is set.');
   }
 
   let tlsAvailable = false;
@@ -118,7 +144,30 @@ export async function startBridge(
       { error: err.message });
   }
 
-  const wss = new WebSocketServer({ noServer: true });
+  // Echo the client's first offered subprotocol so a browser WebSocket that
+  // presents the bridge token (as a subprotocol) gets a confirmed handshake.
+  // The token itself is validated in upgradeAllowed before this runs.
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols: (protocols: Set<string>): string | false => {
+      const first = protocols.values().next().value;
+      return first ?? false;
+    },
+  });
+
+  // Constant-time check that one of the offered WebSocket subprotocols equals
+  // the per-launch bridge token. Never logs the token value.
+  const tokenPresented = (req: http.IncomingMessage): boolean => {
+    if (!authToken) return true;
+    const header = req.headers['sec-websocket-protocol'];
+    const offered = (Array.isArray(header) ? header.join(',') : (header || ''))
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const want = Buffer.from(authToken);
+    return offered.some((p) => {
+      const got = Buffer.from(p);
+      return got.length === want.length && timingSafeEqual(got, want);
+    });
+  };
 
   const rejectUpgrade = (socket: net.Socket, status: number, message: string): void => {
     try { socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`); } catch (_e) {}
@@ -134,17 +183,24 @@ export async function startBridge(
         : 'Unauthorized: Only localhost connections are allowed');
       return false;
     }
-    // Origin is the only cross-site control a WebSocket has, and a browser
-    // attacking 127.0.0.1 connects from 127.0.0.1. The opaque 'null' origin
-    // (sandboxed iframes) is refused. A missing Origin is accepted: non-browser
-    // clients send none and cannot be driven cross-site.
+    // Per-launch token: when set, it is required regardless of Origin, so
+    // another local process/user (which passes the IP check and may send no
+    // Origin) still cannot connect. Checked before Origin; never logs the token.
+    if (!tokenPresented(req)) {
+      logger.warn('bridge', 'client-rejected-token', 'WebSocket connection without a valid bridge token refused');
+      rejectUpgrade(socket, 401, 'Unauthorized: a valid bridge token is required');
+      return false;
+    }
+    // Origin is an additional cross-site control. A browser attacking 127.0.0.1
+    // connects from 127.0.0.1. The opaque 'null' origin (sandboxed iframes) is
+    // always refused. A missing Origin is accepted only for the tokenless
+    // CLI/self-host path; with a token set, the token gate above already applied.
     const origin = req.headers.origin;
     if (origin !== undefined && origin !== 'file://') {
-      if (origin === 'null' && !allowNullOrigin) {
+      if (origin === 'null') {
         logger.warn('bridge', 'client-rejected-origin',
           'WebSocket connection with opaque "null" origin refused — this is how a sandboxed ' +
-          'iframe on any site would reach the bridge. Set GMP_BRIDGE_ALLOW_NULL_ORIGIN=1 only ' +
-          'if a trusted local client genuinely presents it.', { origin });
+          'iframe on any site would reach the bridge.', { origin });
         rejectUpgrade(socket, 403, 'Forbidden: Opaque origin not allowed');
         return false;
       }
@@ -512,5 +568,10 @@ if (isMain) {
   logger.info('gmp-bridge', 'standalone', `Standalone bridge on ${host}:${port}: no node of its own; nodes are created per client session. This process is not a GMP public peer (that is \`gmp public-peer\`).`);
   void import('./claim-log-diagnostic.js')
     .then(({ logStartupClaimLogCheck }) => (process.env.GMP_SEED_PHRASE ? logStartupClaimLogCheck('gmp-bridge', process.env.GMP_SEED_PHRASE) : null))
-    .finally(() => startBridge(null, port, host));
+    // The standalone bridge is the explicit self-host entry, so it opts into a
+    // tokenless bridge (startBridge logs a warning on every start).
+    .finally(() => startBridge(null, port, host, { allowTokenless: true }).catch((e) => {
+      logger.error('gmp-bridge', 'start-refused', (e as Error).message);
+      process.exit(1);
+    }));
 }

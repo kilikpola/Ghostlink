@@ -22,7 +22,7 @@ async function run() {
 
   // Start bridge on test port 3009 (startBridge is async — must be awaited so the
   // listener is bound and `wss` is defined before we connect / tear down).
-  const { wss } = await startBridge(null, 3009);
+  const { wss } = await startBridge(null, 3009, '127.0.0.1', { allowTokenless: true });
 
   // Scenario 1: Allowed local origin (http://localhost:3000)
   const successPromise = new Promise((resolve) => {

@@ -21,9 +21,16 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const Store = require('electron-store');
 const net = require('net');
+
+// Per-launch bridge token (CSPRNG, 256-bit). The renderer presents it to the
+// local bridge as a WebSocket subprotocol; the bridge rejects any connection
+// without it, so another local process or user cannot drive this node. Held in
+// memory only — never written to a URL, localStorage, file, or log.
+const bridgeAuthToken = crypto.randomBytes(32).toString('hex');
 const { createTray, updateBadge, flashTray, destroyTray } = require('./tray');
 const { initUpdater, updateReady, quitAndInstall } = require('./updater');
 const { getContactVaultKey, secureStorageStatus } = require('./contact-key');
@@ -54,7 +61,7 @@ function startGMPNode(seedPhrase) {
       const { startBridge } = await coreModule('gmp-bridge.js');
 
       gmpManager = new GMPNodeManager(electronManagerOptions({ seedPhrase }));
-      gmpBridge = await startBridge(gmpManager, 3002);
+      gmpBridge = await startBridge(gmpManager, 3002, '127.0.0.1', { authToken: bridgeAuthToken });
       const { port } = await gmpManager.start();
       console.log(`[Electron GMP] Node Manager started on port ${port}, Bridge on 3002`);
     })().catch((err) => {
@@ -434,6 +441,10 @@ function setupIPC() {
   // Fails closed on basic_text / no keyring: the renderer then keeps contacts in
   // memory and shows a warning rather than sealing with a key that protects nothing.
   ipcMain.handle('contact-vault-key', () => getContactVaultKey(safeStorage, store));
+
+  // The per-launch bridge token, for the renderer to present when it opens the
+  // local bridge WebSocket. Only this renderer (via the preload bridge) can read it.
+  ipcMain.handle('bridge-token', () => bridgeAuthToken);
 
   // One source of truth for the fail-closed UI banner: is this device able to
   // protect secrets at rest at all? Used for both the seed and the contacts.

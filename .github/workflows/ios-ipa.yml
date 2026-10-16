@@ -49,6 +49,14 @@ jobs:
         with:
           xcode-version: '16.2'
 
+      # The image ships Xcode 16.2 without its iOS 18.2 platform, and the
+      # storyboard/asset compilers refuse to run without it ("iOS 18.2
+      # Platform Not Installed").
+      - name: Install the iOS platform for Xcode 16.2
+        run: |
+          xcodebuild -downloadPlatform iOS
+          xcodebuild -showsdks | grep -i iphoneos
+
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.2'

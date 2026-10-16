@@ -41,7 +41,7 @@ import Animated, {
   SlideInDown,
   Easing,
 } from 'react-native-reanimated';
-import {useTheme} from '../context/ThemeContext';
+import {useTheme, PALETTE} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
 import PeerAvatar from '../components/PeerAvatar';
 import {CALLS_AVAILABLE} from '../utils/capabilities';
@@ -49,16 +49,17 @@ import {CALLS_AVAILABLE} from '../utils/capabilities';
 // ─── Constants ─────────────────────────────────────────────
 const {width: SCREEN_WIDTH, height: SCREEN_HEIGHT} = Dimensions.get('window');
 
-const ACCENT = '#00ffa3';
-const ACCENT2 = '#b347ff';
-const BG = '#0a0a0f';
-const BG_TERTIARY = '#1a1a25';
-const TEXT_PRIMARY = '#e0e0e0';
-const TEXT_SECONDARY = '#8a8a9a';
-const TEXT_MUTED = '#5a5a6a';
-const BORDER_COLOR = 'rgba(255,255,255,0.06)';
-const DANGER = '#ff4466';
-const SUCCESS = '#00ffa3';
+// The shared palette (this screen carried the old neon one).
+const ACCENT = PALETTE.accent;
+const ACCENT2 = PALETTE.accent2;
+const BG = PALETTE.bg;
+const BG_TERTIARY = PALETTE.bgTertiary;
+const TEXT_PRIMARY = PALETTE.text;
+const TEXT_SECONDARY = PALETTE.textSecondary;
+const TEXT_MUTED = PALETTE.textMuted;
+const BORDER_COLOR = PALETTE.border;
+const DANGER = PALETTE.danger;
+const SUCCESS = PALETTE.success;
 
 const PIP_WIDTH = 120;
 const PIP_HEIGHT = 160;
@@ -273,7 +274,7 @@ function ControlButton({icon, label, onPress, active, activeColor, dangerBg, siz
     ? (activeColor || ACCENT) + '60'
     : BORDER_COLOR;
   const textColor = dangerBg
-    ? '#fff'
+    ? PALETTE.onAccent
     : active
     ? activeColor || ACCENT
     : TEXT_PRIMARY;
@@ -298,7 +299,7 @@ function ControlButton({icon, label, onPress, active, activeColor, dangerBg, siz
         <Text
           style={[
             styles.controlLabel,
-            {color: dangerBg ? '#fff' : active ? activeColor || ACCENT : TEXT_SECONDARY},
+            {color: dangerBg ? PALETTE.onAccent : active ? activeColor || ACCENT : TEXT_SECONDARY},
           ]}>
           {label}
         </Text>
@@ -652,7 +653,7 @@ export default function CallScreen({route, navigation}) {
             <View style={styles.pipVideo}>
               <Text style={styles.pipLabel}>You</Text>
               <View style={styles.pipCameraIndicator}>
-                <Text style={{fontSize: 10}}>
+                <Text style={{fontSize: 11}}>
                   {isFrontCamera ? '🤳' : '📷'}
                 </Text>
               </View>
@@ -847,7 +848,7 @@ const styles = StyleSheet.create({
   },
   remoteVideoPlaceholder: {
     flex: 1,
-    backgroundColor: '#0d0d15',
+    backgroundColor: PALETTE.bg,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -891,7 +892,7 @@ const styles = StyleSheet.create({
   },
   pipVideo: {
     flex: 1,
-    backgroundColor: '#161622',
+    backgroundColor: PALETTE.bgSecondary,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -996,7 +997,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   controlLabel: {
-    fontSize: 9,
+    fontSize: 11,
     fontWeight: '600',
     marginTop: 3,
     letterSpacing: 0.3,
@@ -1085,7 +1086,7 @@ const styles = StyleSheet.create({
   },
   incomingRejectText: {
     color: '#fff',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     marginTop: 4,
     letterSpacing: 0.3,
@@ -1108,7 +1109,7 @@ const styles = StyleSheet.create({
   },
   incomingAcceptText: {
     color: BG,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     marginTop: 4,
     letterSpacing: 0.3,

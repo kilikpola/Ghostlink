@@ -25,10 +25,8 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
-  Alert,
   StatusBar,
   ActivityIndicator,
-  PanResponder,
 } from 'react-native';
 // Text and TextInput come from the scaled wrappers so the user's chosen
 // size reaches every literal in this file's StyleSheet. See ScaledText.js.
@@ -47,8 +45,11 @@ import Animated, {
   withTiming,
   Easing,
 } from 'react-native-reanimated';
-import {useTheme} from '../context/ThemeContext';
+import Clipboard from '@react-native-clipboard/clipboard';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {useTheme, PALETTE} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
+import Icon from '../components/Icon';
 import WebRTCService from '../services/WebRTCService';
 import {CALLS_AVAILABLE, CALLS_UNAVAILABLE_REASON} from '../utils/capabilities';
 import {parseInboundChat, parseInboundAck} from '../utils/untrusted';
@@ -57,16 +58,20 @@ import PeerAvatar from '../components/PeerAvatar';
 // ─── Constants ─────────────────────────────────────────────
 const {width: SCREEN_WIDTH, height: SCREEN_HEIGHT} = Dimensions.get('window');
 
-const ACCENT = '#00ffa3';
-const ACCENT2 = '#b347ff';
-const BG = '#0a0a0f';
-const BG_SECONDARY = '#12121a';
-const BG_TERTIARY = '#1a1a25';
-const TEXT_PRIMARY = '#e0e0e0';
-const TEXT_SECONDARY = '#8a8a9a';
-const TEXT_MUTED = '#5a5a6a';
-const BORDER_COLOR = 'rgba(255,255,255,0.06)';
-const DANGER = '#ff4466';
+// The shared palette. This screen had its own older one (#00ffa3 neon, a
+// purple sender label, #5a5a6a timestamps at 2.6:1), so a conversation
+// looked like a different app from the list that opened it.
+const ACCENT = PALETTE.accent;
+const BG = PALETTE.bg;
+const BG_SECONDARY = PALETTE.bgSecondary;
+const BG_TERTIARY = PALETTE.bgTertiary;
+const TEXT_PRIMARY = PALETTE.text;
+const TEXT_SECONDARY = PALETTE.textSecondary;
+const TEXT_MUTED = PALETTE.textMuted;
+const BORDER_COLOR = PALETTE.border;
+const DANGER = PALETTE.danger;
+const WARNING = PALETTE.warning;
+const ON_ACCENT = PALETTE.onAccent;
 
 const EMOJIS = [
   '😀','😂','😍','🥰','😎','🤔','😤','😭','🥺','😅',
@@ -74,26 +79,6 @@ const EMOJIS = [
   '🤝','🚀','💡','🔒','⚠️','📎','📁','🛡️','🌐','💬',
   '😈','🤖','👻','💎','🌙','✨','🎵','🎮','☕','🍕',
 ];
-
-const FILE_ICONS = {
-  pdf: {icon: '📄', color: '#ff4444'},
-  doc: {icon: '📝', color: '#4488ff'},
-  docx: {icon: '📝', color: '#4488ff'},
-  zip: {icon: '📦', color: '#ffaa00'},
-  rar: {icon: '📦', color: '#ffaa00'},
-  png: {icon: '🖼️', color: '#00cc88'},
-  jpg: {icon: '🖼️', color: '#00cc88'},
-  jpeg: {icon: '🖼️', color: '#00cc88'},
-  gif: {icon: '🖼️', color: '#b347ff'},
-  mp4: {icon: '🎬', color: '#b347ff'},
-  mp3: {icon: '🎵', color: '#ff6600'},
-  py: {icon: '🐍', color: '#3776ab'},
-  js: {icon: '⚡', color: '#f7df1e'},
-  ts: {icon: '⚡', color: '#3178c6'},
-  json: {icon: '📋', color: '#6a6a7a'},
-  txt: {icon: '📃', color: '#8a8a9a'},
-  apk: {icon: '📱', color: '#3ddc84'},
-};
 
 const MESSAGE_STATUS = {
   SENDING: 'sending',
@@ -207,110 +192,22 @@ function TypingIndicator() {
 
 // ─── Read Receipt Icon ─────────────────────────────────────
 
+/**
+ * Shape, not just colour, tells the states apart: clock, one tick, two ticks,
+ * two accent ticks, and an alert. Each also has a spoken label.
+ */
+const RECEIPTS = {
+  [MESSAGE_STATUS.SENDING]: {icon: 'clock', color: TEXT_MUTED, label: 'Sending'},
+  [MESSAGE_STATUS.SENT]: {icon: 'check', color: TEXT_MUTED, label: 'Sent'},
+  [MESSAGE_STATUS.DELIVERED]: {icon: 'checkDouble', color: TEXT_MUTED, label: 'Delivered'},
+  [MESSAGE_STATUS.READ]: {icon: 'checkDouble', color: ACCENT, label: 'Read'},
+  [MESSAGE_STATUS.FAILED]: {icon: 'alert', color: DANGER, label: 'Not sent'},
+};
+
 function ReadReceipt({status}) {
-  if (status === MESSAGE_STATUS.SENDING) {
-    return <Text style={styles.receiptSending}>○</Text>;
-  }
-  if (status === MESSAGE_STATUS.SENT) {
-    return <Text style={styles.receiptSent}>✓</Text>;
-  }
-  if (status === MESSAGE_STATUS.DELIVERED) {
-    return <Text style={styles.receiptDelivered}>✓✓</Text>;
-  }
-  if (status === MESSAGE_STATUS.READ) {
-    return <Text style={styles.receiptRead}>✓✓</Text>;
-  }
-  if (status === MESSAGE_STATUS.FAILED) {
-    return <Text style={styles.receiptFailed}>!</Text>;
-  }
-  return null;
-}
-
-// ─── Voice Record Button ───────────────────────────────────
-
-function VoiceRecordButton({onRecordComplete}) {
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordDuration, setRecordDuration] = useState(0);
-  const [swipeCancelled, setSwipeCancelled] = useState(false);
-  const recordInterval = useRef(null);
-  const startX = useRef(0);
-  const pulseScale = useSharedValue(1);
-
-  useEffect(() => {
-    if (isRecording) {
-      pulseScale.value = withRepeat(
-        withSequence(
-          withTiming(1.2, {duration: 600}),
-          withTiming(1, {duration: 600}),
-        ),
-        -1,
-      );
-    } else {
-      pulseScale.value = withTiming(1, {duration: 200});
-    }
-  }, [isRecording, pulseScale]);
-
-  const pulseStyle = useAnimatedStyle(() => ({
-    transform: [{scale: pulseScale.value}],
-  }));
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        startX.current = evt.nativeEvent.pageX;
-        setIsRecording(true);
-        setSwipeCancelled(false);
-        setRecordDuration(0);
-        Vibration.vibrate(30);
-        recordInterval.current = setInterval(() => {
-          setRecordDuration(d => d + 1);
-        }, 1000);
-      },
-      onPanResponderMove: (evt) => {
-        const dx = evt.nativeEvent.pageX - startX.current;
-        if (dx < -80) {
-          setSwipeCancelled(true);
-        }
-      },
-      onPanResponderRelease: () => {
-        if (recordInterval.current) clearInterval(recordInterval.current);
-        if (!swipeCancelled && recordDuration > 0 && onRecordComplete) {
-          onRecordComplete(recordDuration);
-        }
-        setIsRecording(false);
-        setRecordDuration(0);
-        setSwipeCancelled(false);
-      },
-    }),
-  ).current;
-
-  if (isRecording) {
-    return (
-      <Animated.View
-        entering={FadeIn.duration(150)}
-        style={styles.voiceRecordingBar}>
-        <Animated.View style={[styles.voiceRecordDot, pulseStyle]} />
-        <Text style={styles.voiceRecordTime}>
-          {formatVoiceDuration(recordDuration)}
-        </Text>
-        <Text style={styles.voiceRecordHint}>
-          {swipeCancelled ? 'Release to cancel' : '< Swipe to cancel'}
-        </Text>
-        <View {...panResponder.panHandlers} style={styles.voiceRecordHandle}>
-          <Text style={styles.voiceRecordIcon}>🎙️</Text>
-        </View>
-      </Animated.View>
-    );
-  }
-
-  return (
-    <View {...panResponder.panHandlers}>
-      <View style={styles.voiceBtn}>
-        <Text style={{fontSize: 18}}>🎙️</Text>
-      </View>
-    </View>
-  );
+  const r = RECEIPTS[status];
+  if (!r) return null;
+  return <Icon name={r.icon} size={14} color={r.color} strokeWidth={2.2} />;
 }
 
 // ─── File Message Card ─────────────────────────────────────
@@ -319,15 +216,11 @@ function FileMessageCard({file}) {
   const ext = file.name
     ? file.name.split('.').pop().toLowerCase()
     : 'unknown';
-  const fileInfo = FILE_ICONS[ext] || {icon: '📄', color: TEXT_MUTED};
-
   return (
     <View style={styles.fileCard}>
-      <View style={[styles.fileIconBox, {backgroundColor: fileInfo.color + '20'}]}>
-        <Text style={styles.fileIconEmoji}>{fileInfo.icon}</Text>
-        <Text style={[styles.fileExtLabel, {color: fileInfo.color}]}>
-          {ext.toUpperCase()}
-        </Text>
+      <View style={styles.fileIconBox}>
+        <Icon name="file" size={20} color={TEXT_SECONDARY} />
+        <Text style={styles.fileExtLabel}>{ext.toUpperCase()}</Text>
       </View>
       <View style={styles.fileDetails}>
         <Text style={styles.fileNameText} numberOfLines={1}>
@@ -337,11 +230,6 @@ function FileMessageCard({file}) {
           {formatFileSize(file.size || 0)}
         </Text>
       </View>
-      <TouchableOpacity
-        style={styles.fileDownloadBtn}
-        onPress={() => Vibration.vibrate(15)}>
-        <Text style={styles.fileDownloadIcon}>⬇️</Text>
-      </TouchableOpacity>
     </View>
   );
 }
@@ -355,6 +243,8 @@ function ImageMessage({uri, onPress}) {
     <TouchableOpacity
       activeOpacity={0.85}
       onPress={onPress}
+      accessibilityRole="imagebutton"
+      accessibilityLabel="Image. Opens full screen"
       style={styles.imageMessageContainer}>
       {!loaded && (
         <View style={styles.imagePlaceholder}>
@@ -392,7 +282,7 @@ function DateHeader({timestamp}) {
   return (
     <View style={styles.dateHeaderWrap}>
       <View style={styles.dateHeaderLine} />
-      <Text style={styles.dateHeaderText}>
+      <Text style={styles.dateHeaderText} accessibilityRole="header">
         {formatDateHeader(timestamp)}
       </Text>
       <View style={styles.dateHeaderLine} />
@@ -415,8 +305,20 @@ function MessageBubbleInline({
     ? SlideInRight.duration(200).springify()
     : SlideInLeft.duration(200).springify();
 
-  const bubbleBg = isMine ? 'rgba(0,255,163,0.12)' : BG_TERTIARY;
-  const bubbleBorder = isMine ? ACCENT + '30' : BORDER_COLOR;
+  const bubbleBg = isMine ? PALETTE.bubbleMine : BG_TERTIARY;
+
+  const text = message.plainText || message.text || '';
+  const receipt = isMine ? RECEIPTS[message.status || 'sent'] : null;
+  const a11yLabel = [
+    isMine ? 'You' : message.sender || 'Peer',
+    isPinned && 'pinned',
+    text,
+    formatTime(message.timestamp),
+    receipt && receipt.label,
+    isEndToEnd(message) && 'end-to-end encrypted',
+  ]
+    .filter(Boolean)
+    .join(', ');
 
   return (
     <Animated.View
@@ -432,17 +334,21 @@ function MessageBubbleInline({
           onLongPress && onLongPress(message);
         }}
         delayLongPress={400}
+        accessibilityLabel={a11yLabel}
+        accessibilityHint="Long press for reply, copy and pin"
+        accessibilityActions={[{name: 'longpress', label: 'Message actions'}]}
+        onAccessibilityAction={() => onLongPress && onLongPress(message)}
         style={[
           styles.msgBubble,
+          isMine ? styles.msgBubbleMine : styles.msgBubbleTheirs,
           {
             backgroundColor: bubbleBg,
-            borderColor: isPinned ? '#ffaa00' + '60' : bubbleBorder,
-            borderWidth: isPinned ? 1.5 : 1,
+            borderColor: isPinned ? WARNING : 'transparent',
           },
         ]}>
         {isPinned && (
           <View style={styles.pinnedBadge}>
-            <Text style={styles.pinnedIcon}>📌</Text>
+            <Icon name="pin" size={12} color={WARNING} />
             <Text style={styles.pinnedLabel}>Pinned</Text>
           </View>
         )}
@@ -478,31 +384,6 @@ function MessageBubbleInline({
           <FileMessageCard file={message.file} />
         )}
 
-        {message.type === 'voice' && (
-          <View style={styles.voiceMsgWrap}>
-            <TouchableOpacity style={styles.voicePlayBtn}>
-              <Text style={{fontSize: 16}}>▶️</Text>
-            </TouchableOpacity>
-            <View style={styles.voiceWaveform}>
-              {Array.from({length: 20}).map((_, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.voiceBar,
-                    {
-                      height: 4 + Math.random() * 16,
-                      backgroundColor: isMine ? ACCENT + '80' : TEXT_MUTED,
-                    },
-                  ]}
-                />
-              ))}
-            </View>
-            <Text style={styles.voiceDurationText}>
-              {formatVoiceDuration(message.voiceDuration || 0)}
-            </Text>
-          </View>
-        )}
-
         {(message.plainText || message.text) &&
           message.type !== 'system' && (
             <Text style={styles.msgText}>
@@ -529,13 +410,16 @@ function MessageBubbleInline({
  *   webrtc-e2e    — direct, sealed with AES-256-GCM (utils/session-crypto.js)
  *   anything else — only DTLS on the hop; no padlock is shown.
  */
+function isEndToEnd(message) {
+  return !!message && message.encrypted === true &&
+    (message.transport === 'gmp' || message.transport === 'webrtc-e2e');
+}
+
 function TransportBadge({message}) {
   if (!message) return null;
-  const endToEnd = message.encrypted === true &&
-    (message.transport === 'gmp' || message.transport === 'webrtc-e2e');
 
-  if (endToEnd) {
-    return <Text style={styles.transportBadgeSecure} accessibilityLabel="End-to-end encrypted">🔒</Text>;
+  if (isEndToEnd(message)) {
+    return <Icon name="lock" size={12} color={TEXT_MUTED} />;
   }
   // Explicitly unlabelled rather than reassuring.
   if (message.transport === 'webrtc-plain') {
@@ -556,8 +440,12 @@ function EmojiOverlay({visible, onSelect, onClose}) {
       style={styles.emojiOverlay}>
       <View style={styles.emojiOverlayHeader}>
         <Text style={styles.emojiOverlayTitle}>Emoji</Text>
-        <TouchableOpacity onPress={onClose}>
-          <Text style={styles.emojiCloseBtn}>✕</Text>
+        <TouchableOpacity
+          onPress={onClose}
+          style={styles.iconBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Close emoji">
+          <Icon name="close" size={20} color={TEXT_SECONDARY} />
         </TouchableOpacity>
       </View>
       <View style={styles.emojiGrid}>
@@ -565,6 +453,8 @@ function EmojiOverlay({visible, onSelect, onClose}) {
           <TouchableOpacity
             key={idx}
             style={styles.emojiGridItem}
+            accessibilityRole="button"
+            accessibilityLabel={`Insert ${emoji}`}
             onPress={() => {
               Vibration.vibrate(10);
               onSelect(emoji);
@@ -577,60 +467,17 @@ function EmojiOverlay({visible, onSelect, onClose}) {
   );
 }
 
-// ─── Attach Menu ───────────────────────────────────────────
-
-function AttachMenu({visible, onClose, onSelect}) {
-  if (!visible) return null;
-
-  const options = [
-    {key: 'camera', icon: '📷', label: 'Camera'},
-    {key: 'gallery', icon: '🖼️', label: 'Gallery'},
-    {key: 'file', icon: '📁', label: 'File'},
-  ];
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}>
-      <TouchableWithoutFeedback onPress={onClose}>
-        <View style={styles.attachOverlay}>
-          <Animated.View
-            entering={SlideInDown.duration(200)}
-            style={styles.attachMenu}>
-            {options.map(opt => (
-              <TouchableOpacity
-                key={opt.key}
-                style={styles.attachOption}
-                onPress={() => {
-                  Vibration.vibrate(15);
-                  onSelect(opt.key);
-                  onClose();
-                }}>
-                <View style={styles.attachIconWrap}>
-                  <Text style={styles.attachIcon}>{opt.icon}</Text>
-                </View>
-                <Text style={styles.attachLabel}>{opt.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </Animated.View>
-        </View>
-      </TouchableWithoutFeedback>
-    </Modal>
-  );
-}
-
 // ─── Context Menu ──────────────────────────────────────────
 
 function ContextMenu({visible, message, onClose, onAction, isPinned}) {
   if (!visible || !message) return null;
 
+  // Delete is left out until there is a way to delete: it asked "Remove
+  // this message?" and then did nothing on confirm.
   const actions = [
-    {key: 'reply', label: 'Reply', icon: '↩️'},
-    {key: 'copy', label: 'Copy Text', icon: '📋'},
-    {key: 'pin', label: isPinned ? 'Unpin' : 'Pin', icon: '📌'},
-    {key: 'delete', label: 'Delete', icon: '🗑️', danger: true},
+    {key: 'reply', label: 'Reply', icon: 'reply'},
+    {key: 'copy', label: 'Copy', icon: 'copy'},
+    {key: 'pin', label: isPinned ? 'Unpin' : 'Pin', icon: 'pin'},
   ];
 
   return (
@@ -643,7 +490,8 @@ function ContextMenu({visible, message, onClose, onAction, isPinned}) {
         <View style={styles.contextOverlay}>
           <Animated.View
             entering={FadeIn.duration(150)}
-            style={styles.contextMenu}>
+            style={styles.contextMenu}
+            accessibilityViewIsModal>
             <View style={styles.contextPreview}>
               <Text style={styles.contextPreviewText} numberOfLines={2}>
                 {message.plainText || message.text || ''}
@@ -653,18 +501,13 @@ function ContextMenu({visible, message, onClose, onAction, isPinned}) {
               <TouchableOpacity
                 key={action.key}
                 style={styles.contextItem}
+                accessibilityRole="menuitem"
                 onPress={() => {
                   Vibration.vibrate(15);
                   onAction(action.key);
                 }}>
-                <Text style={styles.contextItemIcon}>{action.icon}</Text>
-                <Text
-                  style={[
-                    styles.contextItemLabel,
-                    action.danger && {color: DANGER},
-                  ]}>
-                  {action.label}
-                </Text>
+                <Text style={styles.contextItemLabel}>{action.label}</Text>
+                <Icon name={action.icon} size={20} color={TEXT_PRIMARY} />
               </TouchableOpacity>
             ))}
           </Animated.View>
@@ -676,7 +519,7 @@ function ContextMenu({visible, message, onClose, onAction, isPinned}) {
 
 // ─── Image Fullscreen Viewer ───────────────────────────────
 
-function ImageViewer({visible, uri, onClose}) {
+function ImageViewer({visible, uri, onClose, topInset = 0}) {
   if (!visible || !uri) return null;
 
   return (
@@ -686,8 +529,12 @@ function ImageViewer({visible, uri, onClose}) {
       animationType="fade"
       onRequestClose={onClose}>
       <View style={styles.imageViewerBg}>
-        <TouchableOpacity style={styles.imageViewerClose} onPress={onClose}>
-          <Text style={styles.imageViewerCloseText}>✕</Text>
+        <TouchableOpacity
+          style={[styles.imageViewerClose, {top: topInset + 8}]}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Close image">
+          <Icon name="close" size={22} color="#FFFFFF" />
         </TouchableOpacity>
         <Image
           source={{uri}}
@@ -703,6 +550,7 @@ function ImageViewer({visible, uri, onClose}) {
 
 export default function ChatScreen({route, navigation}) {
   const {theme} = useTheme();
+  const insets = useSafeAreaInsets();
   const {
     identity,
     peers,
@@ -718,12 +566,10 @@ export default function ChatScreen({route, navigation}) {
   const [inputText, setInputText] = useState('');
   const [inputHeight, setInputHeight] = useState(40);
   const [showEmoji, setShowEmoji] = useState(false);
-  const [showAttach, setShowAttach] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [contextMessage, setContextMessage] = useState(null);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [pinnedMessageIds, setPinnedMessageIds] = useState(new Set());
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const [viewerImage, setViewerImage] = useState(null);
   // No typing frames exist on the wire yet.
   const [peerTyping] = useState(false);
@@ -923,8 +769,8 @@ export default function ChatScreen({route, navigation}) {
           inputRef.current?.focus();
           break;
         case 'copy':
-          // In production: Clipboard.setString(contextMessage.plainText || contextMessage.text)
-          Alert.alert('Copied', 'Message text copied to clipboard');
+          // This said "Copied" and copied nothing.
+          Clipboard.setString(contextMessage.plainText || contextMessage.text || '');
           break;
         case 'pin':
           setPinnedMessageIds(prev => {
@@ -937,12 +783,6 @@ export default function ChatScreen({route, navigation}) {
             return next;
           });
           break;
-        case 'delete':
-          Alert.alert('Delete Message', 'Remove this message?', [
-            {text: 'Cancel', style: 'cancel'},
-            {text: 'Delete', style: 'destructive', onPress: () => {}},
-          ]);
-          break;
       }
 
       setShowContextMenu(false);
@@ -951,50 +791,14 @@ export default function ChatScreen({route, navigation}) {
     [contextMessage],
   );
 
-  // ── Pull to Load Older ──
-
-  const handleLoadOlder = useCallback(() => {
-    if (loadingOlder) return;
-    setLoadingOlder(true);
-    // Simulate loading older messages
-    setTimeout(() => setLoadingOlder(false), 1200);
-  }, [loadingOlder]);
+  // Every message is already in memory: there is no older page to fetch, so
+  // the "Loading older messages" spinner at the top was a 1.2s timer.
 
   // ── Emoji Select ──
 
   const handleEmojiSelect = useCallback(emoji => {
     setInputText(prev => prev + emoji);
   }, []);
-
-  // ── Attach ──
-
-  const handleAttach = useCallback(type => {
-    Alert.alert(
-      'Attach',
-      `${type.charAt(0).toUpperCase() + type.slice(1)} picker would open here`,
-    );
-  }, []);
-
-  // ── Voice Record Complete ──
-
-  const handleVoiceRecord = useCallback(
-    duration => {
-      const roomId = peerId || 'general';
-      const voiceMsg = {
-        id: `msg_${Date.now()}_voice`,
-        sender: identity?.name || 'You',
-        outgoing: true,
-        text: 'Voice message',
-        plainText: 'Voice message',
-        timestamp: Date.now(),
-        type: 'voice',
-        voiceDuration: duration,
-        status: MESSAGE_STATUS.SENT,
-      };
-      addMessage(roomId, voiceMsg);
-    },
-    [peerId, identity, addMessage],
-  );
 
   // ── Render Item ──
 
@@ -1050,18 +854,7 @@ export default function ChatScreen({route, navigation}) {
 
   const keyExtractor = useCallback(item => item.id, []);
 
-  // Memoised so the list header/footer do not remount on every keystroke.
-  const listHeader = useMemo(
-    () =>
-      loadingOlder ? (
-        <View style={styles.loadingOlder}>
-          <ActivityIndicator color={ACCENT} size="small" />
-          <Text style={styles.loadingOlderText}>Loading older messages...</Text>
-        </View>
-      ) : null,
-    [loadingOlder],
-  );
-
+  // Memoised so the list footer does not remount on every keystroke.
   const listFooter = useMemo(
     () => (peerTyping ? <TypingIndicator /> : null),
     [peerTyping],
@@ -1070,7 +863,6 @@ export default function ChatScreen({route, navigation}) {
   const listEmpty = useMemo(
     () => (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyIcon}>👻</Text>
         <Text style={styles.emptyTitle}>No messages yet</Text>
         <Text style={styles.emptyDesc}>
           Send a message to start the conversation.
@@ -1094,51 +886,50 @@ export default function ChatScreen({route, navigation}) {
 
   return (
     <View style={[styles.container, {backgroundColor: theme?.bg || BG}]}>
-      <StatusBar barStyle="light-content" backgroundColor={BG} />
+      <StatusBar barStyle="light-content" backgroundColor={BG_SECONDARY} />
 
       {/* ── Custom Header ── */}
-      <View style={styles.header}>
+      <View style={[styles.header, {paddingTop: insets.top + 6}]}>
         <TouchableOpacity
-          style={styles.headerBackBtn}
-          onPress={() => {
-            Vibration.vibrate(10);
-            navigation.goBack();
-          }}>
-          <Text style={styles.headerBackIcon}>←</Text>
+          style={styles.iconBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          onPress={() => navigation.goBack()}>
+          <Icon name="back" size={24} color={ACCENT} />
         </TouchableOpacity>
 
-        <PeerAvatar name={peerName} size={38} online={peerOnline} typing={peerTyping} />
+        <PeerAvatar name={peerName} size={36} online={peerOnline} typing={peerTyping} />
 
-        <View style={styles.headerInfo}>
+        {/*
+          One status line, derived from the transport. The badge used to sit
+          apart as a pill: "E2EE" said nothing to most people, and "Not
+          connected" in the accent colour read as good news. getPeerSecurity()
+          reports what the transport can actually do for this peer now.
+        */}
+        <View
+          style={styles.headerInfo}
+          accessible
+          accessibilityRole="header"
+          accessibilityLabel={`${peerName}, ${peerStatusText}, ${
+            peerSecurity.encrypted ? 'end-to-end encrypted' : 'not encrypted end to end'
+          }`}>
           <Text style={styles.headerName} numberOfLines={1}>
             {peerName}
           </Text>
-          <Text
-            style={[
-              styles.headerStatus,
-              {
-                color: peerTyping
-                  ? ACCENT
-                  : peerOnline
-                  ? ACCENT
-                  : TEXT_MUTED,
-              },
-            ]}>
-            {peerStatusText}
-          </Text>
-        </View>
-
-        <View style={styles.headerEncBadge}>
-          {/*
-            Derived, not assumed. This said E2EE for every conversation
-            regardless of whether a session existed — the same unearned claim
-            as the empty-state padlock. getPeerSecurity() reports what the
-            transport can actually do for this peer right now.
-          */}
-          <Text style={styles.headerLockIcon}>{peerSecurity.encrypted ? '🔒' : '🔓'}</Text>
-          <Text style={styles.headerEncText}>
-            {peerSecurity.encrypted ? 'E2EE' : 'Not connected'}
-          </Text>
+          <View style={styles.headerStatusRow}>
+            <Icon
+              name={peerSecurity.encrypted ? 'lock' : 'lockOpen'}
+              size={12}
+              color={peerSecurity.encrypted ? ACCENT : WARNING}
+            />
+            <Text
+              style={[styles.headerStatus, {color: peerSecurity.encrypted ? TEXT_SECONDARY : WARNING}]}
+              numberOfLines={1}>
+              {peerSecurity.encrypted ? 'End-to-end encrypted' : 'Not encrypted end to end'}
+              {' · '}
+              {peerStatusText}
+            </Text>
+          </View>
         </View>
 
         {/*
@@ -1149,7 +940,7 @@ export default function ChatScreen({route, navigation}) {
           connected. See utils/capabilities.js.
         */}
         <TouchableOpacity
-          style={[styles.headerCallBtn, !CALLS_AVAILABLE && styles.headerCallBtnDisabled]}
+          style={[styles.iconBtn, !CALLS_AVAILABLE && styles.headerCallBtnDisabled]}
           disabled={!CALLS_AVAILABLE}
           accessibilityRole="button"
           accessibilityState={{disabled: !CALLS_AVAILABLE}}
@@ -1159,11 +950,11 @@ export default function ChatScreen({route, navigation}) {
             Vibration.vibrate(15);
             navigation.navigate('Call', {peer: peerId, video: false});
           }}>
-          <Text style={styles.headerCallIcon}>📞</Text>
+          <Icon name="phone" size={22} color={ACCENT} />
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.headerCallBtn, !CALLS_AVAILABLE && styles.headerCallBtnDisabled]}
+          style={[styles.iconBtn, !CALLS_AVAILABLE && styles.headerCallBtnDisabled]}
           disabled={!CALLS_AVAILABLE}
           accessibilityRole="button"
           accessibilityState={{disabled: !CALLS_AVAILABLE}}
@@ -1173,7 +964,7 @@ export default function ChatScreen({route, navigation}) {
             Vibration.vibrate(15);
             navigation.navigate('Call', {peer: peerId, video: true});
           }}>
-          <Text style={styles.headerVideoIcon}>📹</Text>
+          <Icon name="video" size={24} color={ACCENT} />
         </TouchableOpacity>
       </View>
 
@@ -1192,14 +983,11 @@ export default function ChatScreen({route, navigation}) {
           inverted={false}
           contentContainerStyle={styles.messageListContent}
           showsVerticalScrollIndicator={false}
-          onStartReached={handleLoadOlder}
-          onStartReachedThreshold={0.1}
           initialNumToRender={15}
           maxToRenderPerBatch={15}
           windowSize={11}
           // Android only; it has caused blank cells on iOS.
           removeClippedSubviews={Platform.OS === 'android'}
-          ListHeaderComponent={listHeader}
           ListFooterComponent={listFooter}
           ListEmptyComponent={listEmpty}
         />
@@ -1218,41 +1006,38 @@ export default function ChatScreen({route, navigation}) {
             </View>
             <TouchableOpacity
               onPress={() => setReplyTo(null)}
-              style={styles.replyBarClose}>
-              <Text style={styles.replyBarCloseIcon}>✕</Text>
+              style={styles.iconBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel reply">
+              <Icon name="close" size={18} color={TEXT_SECONDARY} />
             </TouchableOpacity>
           </Animated.View>
         )}
 
-        {/* ── Input Bar ── */}
-        <View style={styles.inputBar}>
+        {/* ── Input Bar ──
+            The attach button opened a menu whose every option said "picker
+            would open here", and the microphone recorded nothing yet added a
+            "Voice message" bubble marked sent. Both are gone until they work;
+            send is always present, and dimmed while there is nothing to send. */}
+        <View style={[styles.inputBar, {paddingBottom: showEmoji ? 8 : Math.max(8, insets.bottom)}]}>
           <TouchableOpacity
-            style={styles.inputActionBtn}
+            style={styles.iconBtn}
+            accessibilityRole="button"
+            accessibilityLabel={showEmoji ? 'Show keyboard' : 'Show emoji'}
             onPress={() => {
               Vibration.vibrate(10);
               setShowEmoji(e => !e);
-              if (showAttach) setShowAttach(false);
             }}>
-            <Text style={styles.inputActionIcon}>
-              {showEmoji ? '⌨️' : '😊'}
-            </Text>
+            <Icon name={showEmoji ? 'keyboard' : 'smile'} size={24} color={TEXT_SECONDARY} />
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.inputActionBtn}
-            onPress={() => {
-              Vibration.vibrate(10);
-              setShowAttach(true);
-            }}>
-            <Text style={styles.inputActionIcon}>📎</Text>
-          </TouchableOpacity>
-
-          <View style={[styles.inputField, {height: Math.max(40, inputHeight)}]}>
+          <View style={[styles.inputField, {minHeight: Math.max(40, inputHeight)}]}>
             <TextInput
               ref={inputRef}
-              style={[styles.textInput, {height: Math.max(36, inputHeight - 4)}]}
-              placeholder="Encrypted message..."
+              style={styles.textInput}
+              placeholder="Message"
               placeholderTextColor={TEXT_MUTED}
+              accessibilityLabel={`Message ${peerName}`}
               value={inputText}
               onChangeText={setInputText}
               onContentSizeChange={handleContentSizeChange}
@@ -1262,13 +1047,15 @@ export default function ChatScreen({route, navigation}) {
             />
           </View>
 
-          {inputText.trim().length > 0 ? (
-            <TouchableOpacity style={styles.sendBtn} onPress={handleSend}>
-              <Text style={styles.sendBtnIcon}>↑</Text>
-            </TouchableOpacity>
-          ) : (
-            <VoiceRecordButton onRecordComplete={handleVoiceRecord} />
-          )}
+          <TouchableOpacity
+            style={[styles.sendBtn, !inputText.trim() && styles.sendBtnIdle]}
+            onPress={handleSend}
+            disabled={!inputText.trim()}
+            accessibilityRole="button"
+            accessibilityLabel="Send"
+            accessibilityState={{disabled: !inputText.trim()}}>
+            <Icon name="send" size={20} color={inputText.trim() ? ON_ACCENT : TEXT_MUTED} strokeWidth={2.5} />
+          </TouchableOpacity>
         </View>
 
         {/* ── Emoji Overlay ── */}
@@ -1278,13 +1065,6 @@ export default function ChatScreen({route, navigation}) {
           onClose={() => setShowEmoji(false)}
         />
       </KeyboardAvoidingView>
-
-      {/* ── Attach Menu Modal ── */}
-      <AttachMenu
-        visible={showAttach}
-        onClose={() => setShowAttach(false)}
-        onSelect={handleAttach}
-      />
 
       {/* ── Context Menu Modal ── */}
       <ContextMenu
@@ -1304,6 +1084,7 @@ export default function ChatScreen({route, navigation}) {
       <ImageViewer
         visible={!!viewerImage}
         uri={viewerImage}
+        topInset={insets.top}
         onClose={() => setViewerImage(null)}
       />
     </View>
@@ -1323,25 +1104,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: BG_SECONDARY,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
+    paddingHorizontal: 4,
+    paddingBottom: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: BORDER_COLOR,
-    paddingTop: Platform.OS === 'ios' ? 50 : 10,
   },
-  headerBackBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: BG_TERTIARY,
+  iconBtn: {
+    width: 44,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 10,
-  },
-  headerBackIcon: {
-    color: TEXT_PRIMARY,
-    fontSize: 18,
-    fontWeight: '700',
   },
   headerInfo: {
     flex: 1,
@@ -1349,51 +1121,21 @@ const styles = StyleSheet.create({
   },
   headerName: {
     color: TEXT_PRIMARY,
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 0.3,
+    fontSize: 17,
+    fontWeight: '600',
+  },
+  headerStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 1,
   },
   headerStatus: {
     fontSize: 12,
-    marginTop: 1,
-    letterSpacing: 0.2,
-  },
-  headerEncBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: ACCENT + '12',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginRight: 6,
-  },
-  headerLockIcon: {
-    fontSize: 10,
-    marginRight: 3,
-  },
-  headerEncText: {
-    color: ACCENT,
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   headerCallBtnDisabled: {
     opacity: 0.35,
-  },
-  headerCallBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: BG_TERTIARY,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 4,
-  },
-  headerCallIcon: {
-    fontSize: 16,
-  },
-  headerVideoIcon: {
-    fontSize: 16,
   },
 
   // ── Keyboard Avoiding ──
@@ -1406,28 +1148,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     flexGrow: 1,
   },
-  loadingOlder: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 12,
-    gap: 8,
-  },
-  loadingOlderText: {
-    color: TEXT_MUTED,
-    fontSize: 12,
-  },
-
   // ── Empty State ──
   emptyState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 100,
-  },
-  emptyIcon: {
-    fontSize: 64,
-    marginBottom: 16,
   },
   emptyTitle: {
     color: TEXT_SECONDARY,
@@ -1436,25 +1162,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   emptyDesc: {
-    color: TEXT_MUTED,
-    fontSize: 14,
+    color: TEXT_SECONDARY,
+    fontSize: 15,
     textAlign: 'center',
     paddingHorizontal: 50,
     lineHeight: 20,
   },
-  emptyEncBadge: {
-    marginTop: 20,
-    backgroundColor: ACCENT + '10',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  emptyEncText: {
-    color: ACCENT + '80',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
   // ── Date Header ──
   dateHeaderWrap: {
     flexDirection: 'row',
@@ -1469,10 +1182,9 @@ const styles = StyleSheet.create({
   },
   dateHeaderText: {
     color: TEXT_MUTED,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     marginHorizontal: 12,
-    letterSpacing: 0.3,
   },
 
   // ── System Message ──
@@ -1491,13 +1203,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   systemMsgText: {
-    color: TEXT_MUTED,
+    color: TEXT_SECONDARY,
     fontSize: 12,
     fontStyle: 'italic',
   },
   systemMsgTime: {
-    color: TEXT_MUTED + '80',
-    fontSize: 10,
+    color: TEXT_MUTED,
+    fontSize: 11,
   },
 
   // ── Message Bubble ──
@@ -1507,10 +1219,18 @@ const styles = StyleSheet.create({
   },
   msgBubble: {
     borderRadius: 18,
+    borderWidth: 1,
     paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingVertical: 8,
     maxWidth: '82%',
     position: 'relative',
+  },
+  // A tighter corner on the sender's side says whose it is without colour.
+  msgBubbleMine: {
+    borderBottomRightRadius: 6,
+  },
+  msgBubbleTheirs: {
+    borderBottomLeftRadius: 6,
   },
   pinnedBadge: {
     flexDirection: 'row',
@@ -1518,14 +1238,10 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     gap: 3,
   },
-  pinnedIcon: {
-    fontSize: 10,
-  },
   pinnedLabel: {
-    color: '#ffaa00',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.3,
+    color: WARNING,
+    fontSize: 12,
+    fontWeight: '600',
   },
   replyQuote: {
     flexDirection: 'row',
@@ -1546,26 +1262,24 @@ const styles = StyleSheet.create({
   },
   replyQuoteSender: {
     color: ACCENT,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   replyQuoteText: {
     color: TEXT_SECONDARY,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 1,
   },
   senderLabel: {
-    color: ACCENT2,
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 3,
-    letterSpacing: 0.3,
+    color: TEXT_SECONDARY,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 2,
   },
   msgText: {
     color: TEXT_PRIMARY,
-    fontSize: 15,
+    fontSize: 16,
     lineHeight: 22,
-    letterSpacing: 0.1,
   },
   metaRow: {
     flexDirection: 'row',
@@ -1574,43 +1288,14 @@ const styles = StyleSheet.create({
     marginTop: 4,
     gap: 5,
   },
-  transportBadgeSecure: {
-    fontSize: 9,
-  },
   transportBadgePlain: {
     color: TEXT_MUTED,
-    fontSize: 9,
+    fontSize: 11,
     fontStyle: 'italic',
   },
   timestampText: {
     color: TEXT_MUTED,
-    fontSize: 10,
-  },
-
-  // ── Read Receipts ──
-  receiptSending: {
-    color: TEXT_MUTED,
-    fontSize: 12,
-  },
-  receiptSent: {
-    color: TEXT_MUTED,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  receiptDelivered: {
-    color: TEXT_MUTED,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  receiptRead: {
-    color: '#44aaff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  receiptFailed: {
-    color: DANGER,
-    fontSize: 12,
-    fontWeight: '800',
+    fontSize: 11,
   },
 
   // ── File Card ──
@@ -1626,17 +1311,14 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 10,
+    backgroundColor: BG_TERTIARY,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  fileIconEmoji: {
-    fontSize: 18,
-  },
   fileExtLabel: {
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    marginTop: 1,
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    fontWeight: '700',
   },
   fileDetails: {
     flex: 1,
@@ -1649,21 +1331,9 @@ const styles = StyleSheet.create({
   },
   fileSizeText: {
     color: TEXT_SECONDARY,
-    fontSize: 11,
+    fontSize: 12,
     marginTop: 2,
   },
-  fileDownloadBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: ACCENT + '15',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  fileDownloadIcon: {
-    fontSize: 16,
-  },
-
   // ── Image Message ──
   imageMessageContainer: {
     borderRadius: 12,
@@ -1682,38 +1352,6 @@ const styles = StyleSheet.create({
     width: 200,
     height: 150,
     borderRadius: 12,
-  },
-
-  // ── Voice Message ──
-  voiceMsgWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-    gap: 8,
-  },
-  voicePlayBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: ACCENT + '20',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  voiceWaveform: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    height: 24,
-    gap: 2,
-  },
-  voiceBar: {
-    width: 3,
-    borderRadius: 2,
-  },
-  voiceDurationText: {
-    color: TEXT_MUTED,
-    fontSize: 11,
-    fontWeight: '600',
   },
 
   // ── Typing Indicator ──
@@ -1768,40 +1406,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginTop: 1,
   },
-  replyBarClose: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: BG_TERTIARY,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 8,
-  },
-  replyBarCloseIcon: {
-    color: TEXT_MUTED,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-
   // ── Input Bar ──
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: BG_SECONDARY,
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: BORDER_COLOR,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
+    paddingHorizontal: 4,
+    paddingTop: 8,
     gap: 4,
-  },
-  inputActionBtn: {
-    width: 38,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  inputActionIcon: {
-    fontSize: 20,
   },
   inputField: {
     flex: 1,
@@ -1810,15 +1424,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: BORDER_COLOR,
     paddingHorizontal: 14,
+    paddingVertical: 8,
     justifyContent: 'center',
-    minHeight: 40,
-    maxHeight: 120,
+    maxHeight: 140,
+    marginBottom: 2,
   },
   textInput: {
     color: TEXT_PRIMARY,
-    fontSize: 15,
+    fontSize: 16,
     paddingVertical: 0,
-    maxHeight: 100,
+    maxHeight: 120,
   },
   sendBtn: {
     width: 40,
@@ -1827,57 +1442,10 @@ const styles = StyleSheet.create({
     backgroundColor: ACCENT,
     justifyContent: 'center',
     alignItems: 'center',
+    margin: 2,
   },
-  sendBtnIcon: {
-    color: BG,
-    fontSize: 18,
-    fontWeight: '800',
-  },
-
-  // ── Voice Record ──
-  voiceBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  sendBtnIdle: {
     backgroundColor: BG_TERTIARY,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  voiceRecordingBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    height: 40,
-    gap: 8,
-  },
-  voiceRecordDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: DANGER,
-  },
-  voiceRecordTime: {
-    color: TEXT_PRIMARY,
-    fontSize: 14,
-    fontWeight: '700',
-    fontVariant: ['tabular-nums'],
-  },
-  voiceRecordHint: {
-    color: TEXT_MUTED,
-    fontSize: 12,
-    flex: 1,
-    textAlign: 'center',
-  },
-  voiceRecordHandle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: DANGER + '30',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  voiceRecordIcon: {
-    fontSize: 18,
   },
 
   // ── Emoji Overlay ──
@@ -1891,20 +1459,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingLeft: 16,
+    paddingRight: 4,
     borderBottomWidth: 1,
     borderBottomColor: BORDER_COLOR,
   },
   emojiOverlayTitle: {
     color: TEXT_PRIMARY,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  emojiCloseBtn: {
-    color: TEXT_MUTED,
-    fontSize: 18,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '600',
   },
   emojiGrid: {
     flexDirection: 'row',
@@ -1922,50 +1485,10 @@ const styles = StyleSheet.create({
     fontSize: 24,
   },
 
-  // ── Attach Menu ──
-  attachOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
-  attachMenu: {
-    backgroundColor: BG_SECONDARY,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingVertical: 20,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    borderTopWidth: 1,
-    borderTopColor: BORDER_COLOR,
-  },
-  attachOption: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  attachIconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 16,
-    backgroundColor: BG_TERTIARY,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: BORDER_COLOR,
-  },
-  attachIcon: {
-    fontSize: 24,
-  },
-  attachLabel: {
-    color: TEXT_SECONDARY,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
   // ── Context Menu ──
   contextOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: PALETTE.scrim,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1992,19 +1515,15 @@ const styles = StyleSheet.create({
   contextItem: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: 0.5,
+    minHeight: 48,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: BORDER_COLOR,
-  },
-  contextItemIcon: {
-    fontSize: 18,
-    marginRight: 12,
   },
   contextItemLabel: {
     color: TEXT_PRIMARY,
-    fontSize: 15,
-    fontWeight: '500',
+    fontSize: 16,
   },
 
   // ── Image Viewer ──
@@ -2016,20 +1535,14 @@ const styles = StyleSheet.create({
   },
   imageViewerClose: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 50 : 20,
     right: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 10,
-  },
-  imageViewerCloseText: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
   },
   imageViewerImage: {
     width: SCREEN_WIDTH,

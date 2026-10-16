@@ -567,7 +567,7 @@ const styles = StyleSheet.create({
 
   /* Inputs */
   inputLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
     marginBottom: 6,
@@ -591,7 +591,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   helperText: {
-    fontSize: 10,
+    fontSize: 11,
     lineHeight: 15,
     marginBottom: 18,
   },
@@ -642,7 +642,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   keyLabel: {
-    fontSize: 9,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
     marginBottom: 4,
@@ -652,7 +652,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   keyValueSmall: {
-    fontSize: 10,
+    fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   keyRow: {

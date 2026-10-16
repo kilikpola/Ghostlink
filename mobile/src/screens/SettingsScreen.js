@@ -13,41 +13,32 @@ import {
 // Text and TextInput come from the scaled wrappers so the user's chosen
 // size reaches every literal in this file's StyleSheet. See ScaledText.js.
 import {Text} from '../components/ScaledText';
-import Slider from '@react-native-community/slider';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useTheme, FONT_SCALE} from '../context/ThemeContext';
+import ScreenHeader from '../components/ScreenHeader';
+import Icon from '../components/Icon';
+import {version as APP_VERSION} from '../../package.json';
 import {useApp} from '../context/AppContext';
 import GhostMeshSetupModal from '../components/GhostMeshSetupModal';
 import {MESH_SETUP_AVAILABLE, MESH_SETUP_UNAVAILABLE_REASON} from '../utils/capabilities';
 
+// What the code uses (utils/crypto.js, utils/session-crypto.js). "Connection
+// Type: P2P Direct" was dropped: a conversation can run over the mesh or a
+// direct link, and the chat header already reports which one, per peer.
 const SECURITY_INFO = [
-  {label: 'Encryption Level', value: 'AES-256-GCM'},
-  {label: 'Connection Type', value: 'P2P Direct'},
-  {label: 'Key Exchange', value: 'ECDH P-256'},
-  {label: 'Hash Algorithm', value: 'SHA-256'},
+  {label: 'Message encryption', value: 'AES-256-GCM'},
+  {label: 'Key exchange', value: 'ECDH P-256'},
+  {label: 'Hashing', value: 'SHA-256'},
 ];
 
 export default function SettingsScreen({navigation}) {
-  const {theme, fontSize, scale, setFontSize} = useTheme();
-  const {identity, settings, messages, updateSettings, wipeAll, ghostMesh, setGhostMesh} = useApp();
+  const {theme, fontSize, setFontSize} = useTheme();
+  const insets = useSafeAreaInsets();
+  const {identity, messages, wipeAll, ghostMesh, setGhostMesh} = useApp();
   const [pubKeyCopied, setPubKeyCopied] = useState(false);
   const [showMeshSetup, setShowMeshSetup] = useState(false);
 
   // ── Handlers ──
-
-  const handleToggle = useCallback(
-    (key, value) => {
-      Vibration.vibrate(10);
-      updateSettings({[key]: value});
-    },
-    [updateSettings],
-  );
-
-  const handleFontSizeChange = useCallback(
-    (value) => {
-      updateSettings({fontSize: Math.round(value)});
-    },
-    [updateSettings],
-  );
 
   const handleCopyPublicKey = useCallback(() => {
     if (identity?.publicKeyHex) {
@@ -58,7 +49,7 @@ export default function SettingsScreen({navigation}) {
     }
   }, [identity]);
 
-  const handleExport = useCallback(() => {
+  const doExport = useCallback(() => {
     Vibration.vibrate(20);
     const allMessages = {};
     if (messages && typeof messages.forEach === 'function') {
@@ -72,8 +63,21 @@ export default function SettingsScreen({navigation}) {
       exportedAt: new Date().toISOString(),
     };
     Clipboard.setString(JSON.stringify(exportData));
-    Alert.alert('Exported', 'Chat history copied to clipboard.');
+    Alert.alert('Copied', 'Your chat history is on the clipboard. Paste it somewhere safe, then copy something else over it.');
   }, [identity, messages]);
+
+  // The export is plain text on the shared clipboard, where other apps and
+  // keyboards can read it. Say so before doing it.
+  const handleExport = useCallback(() => {
+    Alert.alert(
+      'Copy Chat History?',
+      'Every message is copied as unencrypted text to the clipboard, which other apps on this phone can read.',
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {text: 'Copy', onPress: doExport},
+      ],
+    );
+  }, [doExport]);
 
   const handleWipeAll = useCallback(() => {
     Alert.alert(
@@ -103,7 +107,9 @@ export default function SettingsScreen({navigation}) {
                       Alert.alert(
                         'Wipe incomplete',
                         `Could not remove: ${result.failed.join(', ')}. ` +
-                          'Clear the app data from Android settings to finish.',
+                          (Platform.OS === 'ios'
+                            ? 'Delete the app and install it again to finish.'
+                            : 'Clear the app data from Android settings to finish.'),
                       );
                     }
                   },
@@ -132,24 +138,10 @@ export default function SettingsScreen({navigation}) {
 
   return (
     <View style={[styles.container, {backgroundColor: theme.bg}]}>
-      {/* ── Header ── */}
-      <View
-        style={[
-          styles.header,
-          {backgroundColor: theme.bgSecondary, borderBottomColor: theme.border},
-        ]}>
-        <TouchableOpacity
-          style={styles.backBtn}
-          onPress={() => navigation.goBack()}
-          hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
-          <Text style={[styles.backArrow, {color: theme.accent}]}>{'\u2190'}</Text>
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, {color: theme.text}]}>Settings</Text>
-        <View style={styles.headerSpacer} />
-      </View>
+      <ScreenHeader title="Settings" onBack={() => navigation.goBack()} />
 
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={[styles.scroll, {paddingBottom: insets.bottom + 32}]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled">
 
@@ -175,22 +167,30 @@ export default function SettingsScreen({navigation}) {
             <TouchableOpacity
               style={[styles.pubKeyBox, {backgroundColor: theme.bgTertiary}]}
               onPress={handleCopyPublicKey}
+              accessibilityRole="button"
+              accessibilityLabel="Public key"
+              accessibilityHint="Copies the full key"
               activeOpacity={0.7}>
-              <Text style={[styles.pubKeyLabel, {color: theme.textMuted}]}>PUBLIC KEY</Text>
+              <Text style={[styles.pubKeyLabel, {color: theme.textSecondary}]}>Public key</Text>
               <Text style={[styles.pubKeyValue, {color: theme.textSecondary}]}>
                 {truncatedPubKey}
               </Text>
-              <Text style={[styles.pubKeyCopyHint, {color: theme.accent}]}>
-                {pubKeyCopied ? 'Copied!' : 'Tap to copy full key'}
-              </Text>
+              <View style={styles.copyHintRow}>
+                <Icon name={pubKeyCopied ? 'check' : 'copy'} size={14} color={theme.accent} />
+                <Text style={[styles.pubKeyCopyHint, {color: theme.accent}]}>
+                  {pubKeyCopied ? 'Copied' : 'Copy full key'}
+                </Text>
+              </View>
             </TouchableOpacity>
           </View>
         )}
 
         {/* ── Text size ── */}
         <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>TEXT SIZE</Text>
-          <Text style={{color: theme.textSecondary, fontSize: scale(12), lineHeight: scale(17), marginBottom: 12}}>
+          <Text style={[styles.sectionLabel, {color: theme.textSecondary}]} accessibilityRole="header">Text Size</Text>
+          {/* Plain sizes: Text already applies the scale, so scale() here sized
+              this line twice. */}
+          <Text style={{color: theme.textSecondary, fontSize: 13, lineHeight: 18, marginBottom: 12}}>
             Applies everywhere, including your conversations.
           </Text>
           <View style={styles.fontRow}>
@@ -210,15 +210,17 @@ export default function SettingsScreen({navigation}) {
                   onPress={() => setFontSize(size)}
                   accessibilityRole="radio"
                   accessibilityState={{selected: isSelected}}
-                  accessibilityLabel={`Text size ${label}${isSelected ? ', selected' : ''}`}
+                  accessibilityLabel={`Text size ${label}`}
                   activeOpacity={0.7}>
                   <Text style={{color: isSelected ? theme.accent : theme.textSecondary, fontSize: size}}>
                     Aa
                   </Text>
                   <Text
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
                     style={{
-                      color: isSelected ? theme.accent : theme.textMuted,
-                      fontSize: 11,
+                      color: isSelected ? theme.accent : theme.textSecondary,
+                      fontSize: 12,
                       marginTop: 4,
                     }}>
                     {label}
@@ -230,7 +232,7 @@ export default function SettingsScreen({navigation}) {
         </View>
 
         <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>SECURITY</Text>
+          <Text style={[styles.sectionLabel, {color: theme.textSecondary}]} accessibilityRole="header">Security</Text>
           {SECURITY_INFO.map((item, idx) => (
             <View
               key={item.label}
@@ -242,131 +244,71 @@ export default function SettingsScreen({navigation}) {
                 },
               ]}>
               <Text style={[styles.secLabel, {color: theme.textSecondary}]}>{item.label}</Text>
-              <Text style={[styles.secValue, {color: theme.accent}]}>{item.value}</Text>
+              <Text style={[styles.secValue, {color: theme.text}]}>{item.value}</Text>
             </View>
           ))}
         </View>
 
-        {/* ── Preferences (toggles) ── */}
-        <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>PREFERENCES</Text>
-
-          <View style={[styles.toggleRow, {borderBottomWidth: 1, borderBottomColor: theme.border}]}>
-            <Text style={[styles.toggleLabel, {color: theme.text}]}>Notifications</Text>
-            <Switch
-              value={!!settings.notifications}
-              onValueChange={(v) => handleToggle('notifications', v)}
-              trackColor={{false: theme.bgTertiary, true: theme.accent + '50'}}
-              thumbColor={settings.notifications ? theme.accent : theme.textMuted}
-            />
-          </View>
-
-          <View style={[styles.toggleRow, {borderBottomWidth: 1, borderBottomColor: theme.border}]}>
-            <Text style={[styles.toggleLabel, {color: theme.text}]}>Sounds</Text>
-            <Switch
-              value={!!settings.sounds}
-              onValueChange={(v) => handleToggle('sounds', v)}
-              trackColor={{false: theme.bgTertiary, true: theme.accent + '50'}}
-              thumbColor={settings.sounds ? theme.accent : theme.textMuted}
-            />
-          </View>
-
-          <View style={styles.toggleRow}>
-            <Text style={[styles.toggleLabel, {color: theme.text}]}>Read Receipts</Text>
-            <Switch
-              value={!!settings.readReceipts}
-              onValueChange={(v) => handleToggle('readReceipts', v)}
-              trackColor={{false: theme.bgTertiary, true: theme.accent + '50'}}
-              thumbColor={settings.readReceipts ? theme.accent : theme.textMuted}
-            />
-          </View>
-        </View>
-
-        {/* ── Font Size Slider ── */}
-        <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>FONT SIZE</Text>
-          <View style={styles.sliderRow}>
-            <Text style={[styles.sliderEdge, {color: theme.textMuted}]}>11</Text>
-            <Slider
-              style={styles.slider}
-              minimumValue={11}
-              maximumValue={18}
-              step={1}
-              value={fontSize}
-              onValueChange={handleFontSizeChange}
-              minimumTrackTintColor={theme.accent}
-              maximumTrackTintColor={theme.bgTertiary}
-              thumbTintColor={theme.accent}
-            />
-            <Text style={[styles.sliderEdge, {color: theme.textMuted}]}>18</Text>
-          </View>
-          <Text style={[styles.sliderPreview, {color: theme.text, fontSize}]}>
-            Preview text at {fontSize}px
-          </Text>
-        </View>
+        {/* The Preferences card (Notifications, Sounds, Read Receipts) is gone:
+            settings v3 dropped those keys because nothing implemented them, so
+            the switches flipped and changed nothing. The second text-size
+            control, a 11–18 slider, is gone too: it fought the chips above and
+            could not show their Large and Extra large sizes. */}
 
         {/* ── Action Buttons ── */}
         <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>ACTIONS</Text>
+          <Text style={[styles.sectionLabel, {color: theme.textSecondary}]} accessibilityRole="header">Your Data</Text>
 
           <TouchableOpacity
             style={[styles.actionRow, {borderBottomWidth: 1, borderBottomColor: theme.border}]}
             onPress={handleExport}
+            accessibilityRole="button"
             activeOpacity={0.7}>
-            <Text style={[styles.actionText, {color: theme.accent}]}>Export Data</Text>
-            <Text style={[styles.actionArrow, {color: theme.textMuted}]}>{'\u203A'}</Text>
+            <Text style={[styles.actionText, {color: theme.text}]}>Copy Chat History</Text>
+            <Icon name="copy" size={20} color={theme.textMuted} />
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.actionRow, {borderBottomWidth: 1, borderBottomColor: theme.border}]}
+            style={styles.actionRow}
             onPress={() => {
               Vibration.vibrate(15);
               navigation.navigate('Recovery');
             }}
+            accessibilityRole="button"
             activeOpacity={0.7}>
-            <Text style={[styles.actionText, {color: theme.accent}]}>Backup Identity</Text>
-            <Text style={[styles.actionArrow, {color: theme.textMuted}]}>{'\u203A'}</Text>
+            <Text style={[styles.actionText, {color: theme.text}]}>Back Up Identity</Text>
+            <Icon name="chevronRight" size={20} color={theme.textMuted} />
           </TouchableOpacity>
         </View>
 
         {/* ── Ghost Mesh (Advanced) ── */}
         <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.sectionLabel, {color: theme.textMuted}]}>GHOST MESH (ADVANCED)</Text>
+          <Text style={[styles.sectionLabel, {color: theme.textSecondary}]} accessibilityRole="header">Ghost Mesh (Advanced)</Text>
 
           <View style={styles.toggleRow}>
             <View style={{flex: 1}}>
               <Text style={[styles.toggleLabel, {color: theme.text}]}>Ghost Mesh (Yggdrasil)</Text>
-              <Text style={{fontSize: 10, color: theme.textMuted, marginTop: 2}}>
+              <Text style={{fontSize: 13, color: theme.textSecondary, marginTop: 2}}>
                 {ghostMesh.address
                   ? `Address: ${ghostMesh.address}`
                   : 'Direct peer-to-peer transport over Yggdrasil mesh network.'}
               </Text>
             </View>
             <View style={{alignItems: 'flex-end', gap: 6}}>
-              {/* Status Tag */}
-              <View style={[
-                styles.meshStatusTag,
-                {
-                  backgroundColor:
-                    ghostMesh.status === 'active' ? '#00cc6620' :
-                    ghostMesh.status === 'configured' ? '#d69e2e20' : '#3a3a4a',
-                  borderColor:
-                    ghostMesh.status === 'active' ? '#00cc6640' :
-                    ghostMesh.status === 'configured' ? '#d69e2e40' : '#4a4a5a',
-                },
-              ]}>
-                <Text style={[
-                  styles.meshStatusText,
-                  {
-                    color:
-                      ghostMesh.status === 'active' ? '#00cc66' :
-                      ghostMesh.status === 'configured' ? '#d69e2e' : '#6a6a7a',
-                  },
-                ]}>
-                  {ghostMesh.status === 'active' ? 'ACTIVE' :
-                   ghostMesh.status === 'configured' ? 'CONFIGURED' : 'NOT CONFIGURED'}
-                </Text>
-              </View>
+              {/* Status tag: palette colours, and the word carries the state. */}
+              {(() => {
+                const tone =
+                  ghostMesh.status === 'active' ? theme.success :
+                  ghostMesh.status === 'configured' ? theme.warning : theme.textSecondary;
+                return (
+                  <View style={[styles.meshStatusTag, {borderColor: tone}]}>
+                    <Text style={[styles.meshStatusText, {color: tone}]}>
+                      {ghostMesh.status === 'active' ? 'Active' :
+                       ghostMesh.status === 'configured' ? 'Configured' : 'Not configured'}
+                    </Text>
+                  </View>
+                );
+              })()}
               {ghostMesh.address ? (
                 <Switch
                   value={ghostMesh.enabled}
@@ -379,6 +321,7 @@ export default function SettingsScreen({navigation}) {
                   }}
                   trackColor={{false: theme.bgTertiary, true: theme.accent + '50'}}
                   thumbColor={ghostMesh.enabled ? theme.accent : theme.textMuted}
+                  accessibilityLabel="Ghost Mesh"
                 />
               ) : null}
             </View>
@@ -411,21 +354,21 @@ export default function SettingsScreen({navigation}) {
               setShowMeshSetup(true);
             }}
             activeOpacity={0.7}>
-            <Text style={[styles.actionText, {color: theme.accent}]}>
+            <Text style={[styles.actionText, {color: theme.text}]}>
               {ghostMesh.address ? 'Reconfigure' : 'Configure'}
             </Text>
-            <Text style={[styles.actionArrow, {color: theme.textMuted}]}>{'\u203A'}</Text>
+            <Icon name="chevronRight" size={20} color={theme.textMuted} />
           </TouchableOpacity>
 
           {!MESH_SETUP_AVAILABLE ? (
             <Text
-              style={{fontSize: 11, color: theme.textMuted, marginTop: 6, lineHeight: 15}}
+              style={{fontSize: 13, color: theme.textSecondary, marginTop: 6, lineHeight: 18}}
               accessibilityRole="text">
               {MESH_SETUP_UNAVAILABLE_REASON}.
             </Text>
           ) : null}
 
-          <Text style={{fontSize: 9, color: theme.textMuted, marginTop: 8, lineHeight: 14}}>
+          <Text style={{fontSize: 13, color: theme.textSecondary, marginTop: 8, lineHeight: 18}}>
             On mobile, Ghost Mesh operates in Web Client mode {String.fromCharCode(8212)} it derives
             your Yggdrasil identity for peer discovery but uses WebRTC for transport. Full direct
             TCP mesh connections require the desktop Electron app.
@@ -436,14 +379,16 @@ export default function SettingsScreen({navigation}) {
         <TouchableOpacity
           style={[styles.dangerBtn, {backgroundColor: theme.danger + '15', borderColor: theme.danger + '40'}]}
           onPress={handleWipeAll}
+          accessibilityRole="button"
           activeOpacity={0.7}>
           <Text style={[styles.dangerBtnLabel, {color: theme.danger}]}>Wipe All Data</Text>
         </TouchableOpacity>
 
         {/* ── Footer ── */}
         <View style={styles.footer}>
+          {/* Read from package.json; this said v2.0 on a 0.0.x build. */}
           <Text style={[styles.footerText, {color: theme.textMuted}]}>
-            GhostLink v2.0 {'\u00B7'} Zero Trust {'\u00B7'} Zero Trace
+            GhostLink {APP_VERSION}
           </Text>
         </View>
       </ScrollView>
@@ -473,37 +418,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  /* Header */
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    paddingTop: Platform.OS === 'ios' ? 54 : 48,
-    borderBottomWidth: 1,
-  },
-  backBtn: {
-    width: 40,
-    alignItems: 'flex-start',
-  },
-  backArrow: {
-    fontSize: 22,
-    fontWeight: '600',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  headerSpacer: {
-    width: 40,
-  },
-
   /* Scroll */
   scroll: {
     padding: 16,
-    paddingBottom: 50,
   },
 
   /* Card */
@@ -514,10 +431,9 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   sectionLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 2,
-    marginBottom: 14,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 10,
   },
 
   /* Identity */
@@ -561,45 +477,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   pubKeyLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.5,
+    fontSize: 12,
+    fontWeight: '600',
     marginBottom: 4,
   },
   pubKeyValue: {
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     letterSpacing: 0.5,
     marginBottom: 4,
   },
+  copyHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: 24,
+  },
   pubKeyCopyHint: {
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '600',
   },
 
-  /* Theme Grid */
-  themeGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  themeCard: {
-    width: '47%',
-    borderRadius: 12,
-    padding: 12,
-    position: 'relative',
-  },
-  swatchRow: {
-    flexDirection: 'row',
-    marginBottom: 8,
-    gap: 6,
-  },
-  swatch: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-  },
   fontRow: {
     flexDirection: 'row',
     gap: 8,
@@ -613,32 +511,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 8,
   },
-  themeName: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  selectedDot: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-
   /* Security */
   secRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
+    flexWrap: 'wrap',
+    gap: 8,
+    minHeight: 44,
+    paddingVertical: 8,
   },
   secLabel: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: 15,
   },
   secValue: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
@@ -651,31 +538,8 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   toggleLabel: {
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: 16,
     flex: 1,
-  },
-
-  /* Font Size */
-  sliderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  slider: {
-    flex: 1,
-    height: 40,
-    marginHorizontal: 8,
-  },
-  sliderEdge: {
-    fontSize: 12,
-    fontWeight: '600',
-    width: 22,
-    textAlign: 'center',
-  },
-  sliderPreview: {
-    textAlign: 'center',
-    fontWeight: '500',
   },
 
   /* Action Rows */
@@ -683,28 +547,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 14,
+    minHeight: 48,
   },
   actionText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  actionArrow: {
-    fontSize: 22,
-    fontWeight: '300',
+    fontSize: 16,
   },
 
   /* Danger */
   dangerBtn: {
     borderRadius: 12,
     borderWidth: 1,
-    padding: 16,
+    minHeight: 50,
+    justifyContent: 'center',
+    padding: 14,
     alignItems: 'center',
     marginBottom: 20,
   },
   dangerBtnLabel: {
-    fontSize: 15,
-    fontWeight: '700',
+    fontSize: 16,
+    fontWeight: '600',
   },
 
   /* Ghost Mesh */
@@ -715,9 +576,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   meshStatusText: {
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 1,
+    fontSize: 12,
+    fontWeight: '600',
   },
 
   /* Footer */
@@ -726,7 +586,6 @@ const styles = StyleSheet.create({
     paddingVertical: 24,
   },
   footerText: {
-    fontSize: 12,
-    letterSpacing: 0.5,
+    fontSize: 13,
   },
 });

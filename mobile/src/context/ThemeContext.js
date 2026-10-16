@@ -25,9 +25,13 @@ const PALETTE = {
   bgTertiary: '#1F2733',    // graphite  — elevated surfaces, inputs
   border: '#2B3543',        // divider   — borders, separators
 
+  // Contrast against bgTertiary, the lightest surface text sits on (WCAG AA
+  // needs 4.5:1 below 18pt): text 12.8, textSecondary 6.6, textMuted 4.7.
+  // textMuted was #5A6577 (2.6:1 there, 3.3:1 on bg) and failed everywhere.
   text: '#E8EDF4',          // frost
-  textSecondary: '#8B95A5', // mist
-  textMuted: '#5A6577',     // fade
+  textSecondary: '#A3ADBC', // mist
+  textMuted: '#8791A3',     // fade
+  onAccent: '#0B0F17',      // text and icons on a filled accent/danger/warning
 
   accent: '#4FE3B0',        // spectral  — secure, verified, connected, send
   accent2: '#8CFFD4',       // signal    — links, info, encryption tags
@@ -37,7 +41,13 @@ const PALETTE = {
   success: '#4FE3B0',       // spectral
   warning: '#FFB84D',       // amber     — warning, Pro tier, locked
   danger: '#FF5F6D',        // crimson   — danger, errors, end call
+
+  bubbleMine: '#152D2C',    // accent at 14% over bg; textMuted is 4.6:1 on it
+  scrim: 'rgba(0,0,0,0.6)', // behind sheets and dialogs
 };
+
+/** Apple's and Android's floor for legible text; nothing renders smaller. */
+const MIN_FONT_SIZE = 11;
 
 /** Text scale: `fontSize` is the base size in points; everything derives from it. */
 const FONT_SCALE = {
@@ -105,5 +115,5 @@ function useTheme() {
   return ctx;
 }
 
-export {ThemeProvider, useTheme, PALETTE, FONT_SCALE};
+export {ThemeProvider, useTheme, PALETTE, FONT_SCALE, MIN_FONT_SIZE};
 export default ThemeContext;

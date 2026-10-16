@@ -23,9 +23,11 @@ function getGradientColors(name, accent) {
   const h = hashCode(name || 'ghost');
   const hue1 = h % 360;
   const hue2 = (hue1 + 40) % 360;
+  // Dark enough that the white initial clears 3:1 at every hue; at 70%/50%
+  // a yellow or cyan avatar put white text at 1.4:1.
   return {
-    color1: `hsl(${hue1}, 70%, 50%)`,
-    color2: `hsl(${hue2}, 60%, 40%)`,
+    color1: `hsl(${hue1}, 55%, 34%)`,
+    color2: `hsl(${hue2}, 50%, 28%)`,
     accent,
   };
 }
@@ -58,7 +60,10 @@ export default function PeerAvatar({name, size = 44, online = false, typing = fa
   const fontSize = size * 0.42;
 
   return (
-    <Animated.View style={[styles.container, {width: size, height: size}, animatedStyle]}>
+    <Animated.View
+      style={[styles.container, {width: size, height: size}, animatedStyle]}
+      accessible={false}
+      importantForAccessibility="no-hide-descendants">
       <View
         style={[
           styles.avatar,

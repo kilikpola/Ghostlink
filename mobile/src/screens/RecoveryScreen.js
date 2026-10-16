@@ -13,6 +13,7 @@ import {
 // Text and TextInput come from the scaled wrappers so the user's chosen
 // size reaches every literal in this file's StyleSheet. See ScaledText.js.
 import {Text, TextInput} from '../components/ScaledText';
+import ScreenHeader from '../components/ScreenHeader';
 import {useTheme} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
 import {
@@ -41,11 +42,9 @@ import {
 // ─── Constants ──────────────────────────────────────────────────
 const TABS = ['Backup', 'Verify', 'Restore'];
 
-const LAYER_BADGES = [
-  {label: 'L1 Seed Phrase', color: '#00ffa3'},
-  {label: 'L2 Shamir Shares', color: '#44ddff'},
-  {label: 'L3 P2P Recovery', color: '#ff00ff'},
-];
+// Labels, not statuses, so they share one neutral style. They were three
+// off-palette neons (#00ffa3, #44ddff, #ff00ff) that read as three states.
+const LAYER_BADGES = ['Recovery phrase', 'Shamir shares', 'Peer recovery'];
 
 // Lightweight BIP39-style word list (same as AppContext uses)
 
@@ -537,24 +536,12 @@ export default function RecoveryScreen({navigation}) {
   // ────────────────────────────────────────────────────────────────
   return (
     <View style={[styles.container, {backgroundColor: theme.bg}]}>
-      {/* ── Header ── */}
-      <View
-        style={[
-          styles.header,
-          {backgroundColor: theme.bgSecondary, borderBottomColor: theme.border},
-        ]}>
-        <TouchableOpacity
-          style={styles.backBtn}
-          onPress={() => navigation.goBack()}
-          hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
-          <Text style={[styles.backArrow, {color: theme.accent}]}>{'\u2190'}</Text>
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, {color: theme.text}]}>Recovery System</Text>
-        <View style={styles.headerSpacer} />
-      </View>
+      <ScreenHeader title="Recovery" onBack={() => navigation.goBack()} />
 
       {/* ── Tab Bar ── */}
-      <View style={[styles.tabBar, {backgroundColor: theme.bgSecondary, borderBottomColor: theme.border}]}>
+      <View
+        style={[styles.tabBar, {backgroundColor: theme.bgSecondary, borderBottomColor: theme.border}]}
+        accessibilityRole="tablist">
         {TABS.map((tab, idx) => {
           const active = activeTab === idx;
           return (
@@ -564,6 +551,8 @@ export default function RecoveryScreen({navigation}) {
                 styles.tab,
                 active && {borderBottomWidth: 2, borderBottomColor: theme.accent},
               ]}
+              accessibilityRole="tab"
+              accessibilityState={{selected: active}}
               onPress={() => {
                 Vibration.vibrate(10);
                 setActiveTab(idx);
@@ -571,7 +560,7 @@ export default function RecoveryScreen({navigation}) {
               <Text
                 style={[
                   styles.tabText,
-                  {color: active ? theme.accent : theme.textMuted},
+                  {color: active ? theme.accent : theme.textSecondary},
                 ]}>
                 {tab}
               </Text>
@@ -623,11 +612,11 @@ export default function RecoveryScreen({navigation}) {
             <View>
               {/* Layer Badges */}
               <View style={styles.badgeRow}>
-                {LAYER_BADGES.map((b) => (
+                {LAYER_BADGES.map((label, i) => (
                   <View
-                    key={b.label}
-                    style={[styles.badge, {backgroundColor: b.color + '18', borderColor: b.color + '40'}]}>
-                    <Text style={[styles.badgeText, {color: b.color}]}>{b.label}</Text>
+                    key={label}
+                    style={[styles.badge, {backgroundColor: theme.bgTertiary, borderColor: theme.border}]}>
+                    <Text style={[styles.badgeText, {color: theme.textSecondary}]}>{`${i + 1}. ${label}`}</Text>
                   </View>
                 ))}
               </View>
@@ -1195,32 +1184,6 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  /* Header */
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    paddingTop: Platform.OS === 'ios' ? 54 : 48,
-    borderBottomWidth: 1,
-  },
-  backBtn: {
-    width: 40,
-    alignItems: 'flex-start',
-  },
-  backArrow: {
-    fontSize: 22,
-    fontWeight: '600',
-  },
-  headerTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-  },
-  headerSpacer: {
-    width: 40,
-  },
-
   /* Tab Bar */
   tabBar: {
     flexDirection: 'row',
@@ -1294,7 +1257,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   seedIndex: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     width: 18,
   },

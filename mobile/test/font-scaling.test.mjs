@@ -33,6 +33,11 @@ const arrayStyle = scaleStyle([{fontSize: 16}, {color: 'blue'}], 22 / 16);
 ok(arrayStyle.fontSize === 22 && arrayStyle.color === 'blue',
    'An array of styles is flattened and scaled');
 
+ok(scaleStyle({fontSize: 9}, 1).fontSize === 11,
+   'A design size below 11pt is raised to the platform minimum');
+ok(scaleStyle({fontSize: 12}, 14 / 16).fontSize === 11,
+   'The Small setting never takes text below 11pt');
+
 const identity = {fontSize: 16};
 ok(scaleStyle(identity, 1) === identity, 'At ratio 1 the original object is returned, so nothing re-renders needlessly');
 

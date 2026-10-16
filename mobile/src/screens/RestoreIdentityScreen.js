@@ -22,6 +22,7 @@ import {
   Alert,
 } from 'react-native';
 import {Text, TextInput} from '../components/ScaledText';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useTheme} from '../context/ThemeContext';
 import {useApp} from '../context/AppContext';
 import {CryptoEngine} from '../utils/crypto';
@@ -31,6 +32,10 @@ import {useSecureScreen} from '../utils/useSecureScreen';
 
 export default function RestoreIdentityScreen({navigation}) {
   const {theme, scale} = useTheme();
+  // No header on this screen, so the content itself clears the status bar
+  // and Dynamic Island; a flat padding of 20 put the title under them on iOS.
+  const insets = useSafeAreaInsets();
+  const contentInset = {paddingTop: insets.top + 16, paddingBottom: insets.bottom + 48};
   const {setIdentity, clearIdentityScopedData} = useApp();
 
   // Blocks screenshots and the recents thumbnail while a phrase is on screen.
@@ -142,7 +147,7 @@ export default function RestoreIdentityScreen({navigation}) {
 
   if (preview) {
     return (
-      <ScrollView style={s.screen} contentContainerStyle={s.content}>
+      <ScrollView style={s.screen} contentContainerStyle={[s.content, contentInset]}>
         <Text style={s.title}>Is this your identity?</Text>
         <Text style={s.body}>
           These words produce the address below. Check it against your other device
@@ -150,11 +155,11 @@ export default function RestoreIdentityScreen({navigation}) {
         </Text>
 
         <View style={s.addressCard} accessibilityRole="text">
-          <Text style={s.addressLabel}>GHOST ADDRESS</Text>
+          <Text style={s.addressLabel}>Ghost Address</Text>
           <Text style={s.address} selectable>
             {preview.ghost.ghostAddress}
           </Text>
-          <Text style={s.addressLabel}>FINGERPRINT</Text>
+          <Text style={s.addressLabel}>Fingerprint</Text>
           <Text style={s.fingerprint} selectable>
             {preview.fingerprint}
           </Text>
@@ -212,7 +217,7 @@ export default function RestoreIdentityScreen({navigation}) {
     <KeyboardAvoidingView
       style={s.screen}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={[s.content, contentInset]} keyboardShouldPersistTaps="handled">
         <Text style={s.title}>Enter your recovery phrase</Text>
         <Text style={s.body}>
           The {SEED_PHRASE_WORDS} words you wrote down, in order. You can paste the whole
@@ -318,7 +323,8 @@ const styles = (theme, scale) =>
     title: {color: theme.text, fontSize: 22, fontWeight: '700', marginBottom: 8},
     body: {color: theme.textSecondary, fontSize: 14, lineHeight: 20, marginBottom: 20},
     grid: {flexDirection: 'row', flexWrap: 'wrap', gap: 8},
-    cell: {width: '31%', flexDirection: 'row', alignItems: 'center'},
+    // Two columns from Large up: three 31% columns cut long words at 19pt+.
+    cell: {width: scale(16) > 17 ? '48%' : '31%', flexDirection: 'row', alignItems: 'center'},
     cellIndex: {color: theme.textMuted, fontSize: 11, width: 18},
     cellInput: {
       flex: 1,
@@ -354,11 +360,11 @@ const styles = (theme, scale) =>
       justifyContent: 'center',
     },
     btnBusy: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  primaryBtnText: {color: theme.bg, fontSize: 16, fontWeight: '700'},
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    primaryBtnText: {color: theme.onAccent, fontSize: 16, fontWeight: '600'},
     btnDisabled: {opacity: 0.4},
     secondaryBtn: {marginTop: 12, minHeight: 48, alignItems: 'center', justifyContent: 'center'},
     secondaryBtnText: {color: theme.textSecondary, fontSize: 14},
@@ -370,9 +376,9 @@ const styles = (theme, scale) =>
       padding: 16,
       marginBottom: 16,
     },
-    addressLabel: {color: theme.textMuted, fontSize: 10, letterSpacing: 1, marginBottom: 4},
+    addressLabel: {color: theme.textSecondary, fontSize: 12, fontWeight: '600', marginBottom: 4},
     address: {color: theme.accent, fontSize: 20, fontWeight: '700', marginBottom: 14},
-    fingerprint: {color: theme.textSecondary, fontSize: 13, fontFamily: 'monospace'},
+    fingerprint: {color: theme.textSecondary, fontSize: 13, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'},
     noticeCard: {
       backgroundColor: theme.bgSecondary,
       borderColor: theme.border,

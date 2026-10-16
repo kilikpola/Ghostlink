@@ -54,9 +54,9 @@ ok(suggestWords(REAL[0].slice(0, 2)).length <= 5, 'Suggestions are capped so the
 const setup = read('src/screens/SetupScreen.js');
 ok(setup.includes("navigation.navigate('RestoreIdentity')"),
    'Setup offers a way to restore an existing identity');
-ok(setup.includes('I already have an identity'),
+ok(/I already have an identity/i.test(setup),
    'The restore option is labelled in the words a returning user would look for');
-ok(setup.includes('Create new identity'),
+ok(/Create new identity/i.test(setup),
    'Creating a new identity is still offered alongside it');
 
 const nav = read('src/navigation/MainNavigator.js');

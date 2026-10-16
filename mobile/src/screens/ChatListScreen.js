@@ -8,9 +8,9 @@ import {
   Alert,
   Vibration,
   StatusBar,
-  RefreshControl,
   Platform,
 } from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 // Text and TextInput come from the scaled wrappers so the user's chosen
 // size reaches every literal in this file's StyleSheet. See ScaledText.js.
 import {Text, TextInput} from '../components/ScaledText';
@@ -26,33 +26,17 @@ import Animated, {
 } from 'react-native-reanimated';
 import {Gesture, GestureDetector, GestureHandlerRootView} from 'react-native-gesture-handler';
 import {useTheme} from '../context/ThemeContext';
+import Icon from '../components/Icon';
+import PeerAvatar from '../components/PeerAvatar';
 import {useApp} from '../context/AppContext';
 import {CryptoEngine} from '../utils/crypto';
 import Clipboard from '@react-native-clipboard/clipboard';
 import {normalizeGhostAddress} from '../utils/ghost-address';
 
 const SWIPE_THRESHOLD = 80;
-const CHAT_ITEM_HEIGHT = 76;
-
-// ==================== AVATAR GRADIENT COLORS ====================
-const AVATAR_GRADIENTS = [
-  ['#00ffa3', '#00cc82'],
-  ['#ff4466', '#cc3652'],
-  ['#44ddff', '#36b1cc'],
-  ['#8866ff', '#6d52cc'],
-  ['#ffaa00', '#cc8800'],
-  ['#ff66aa', '#cc5288'],
-  ['#66ffcc', '#52cca3'],
-  ['#aa66ff', '#8852cc'],
-];
-
-function getAvatarColor(name) {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return AVATAR_GRADIENTS[Math.abs(hash) % AVATAR_GRADIENTS.length];
-}
+const SWIPE_WIDTH = 216;
+/** Row height at the default text size; scaled with the user's setting. */
+const CHAT_ITEM_BASE_HEIGHT = 76;
 
 function formatTimestamp(ts) {
   if (!ts) return '';
@@ -79,13 +63,9 @@ function formatTimestamp(ts) {
  * One row, memoised. The comparator checks `item` field by field because chat
  * objects are rebuilt from state on every pass.
  */
-function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
+function ChatItemImpl({item, theme, rowHeight, onPress, onPin, onMute, onDelete}) {
   const translateX = useSharedValue(0);
-  const rowHeight = useSharedValue(CHAT_ITEM_HEIGHT);
   const isSwipeOpen = useRef(false);
-
-  const avatarColors = useMemo(() => getAvatarColor(item.name), [item.name]);
-  const firstLetter = item.name ? item.name[0].toUpperCase() : '?';
 
   const panGesture = Gesture.Pan()
     .activeOffsetX([-15, 15])
@@ -93,14 +73,14 @@ function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
     .onUpdate(e => {
       // Only allow left swipe (negative direction) to reveal actions
       if (e.translationX < 0) {
-        translateX.value = Math.max(e.translationX, -220);
+        translateX.value = Math.max(e.translationX, -SWIPE_WIDTH);
       } else if (isSwipeOpen.current) {
-        translateX.value = Math.min(-220 + e.translationX, 0);
+        translateX.value = Math.min(-SWIPE_WIDTH + e.translationX, 0);
       }
     })
     .onEnd(e => {
       if (translateX.value < -SWIPE_THRESHOLD) {
-        translateX.value = withSpring(-220, {damping: 20, stiffness: 200});
+        translateX.value = withSpring(-SWIPE_WIDTH, {damping: 20, stiffness: 200});
         isSwipeOpen.current = true;
       } else {
         translateX.value = withSpring(0, {damping: 20, stiffness: 200});
@@ -136,54 +116,84 @@ function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
     onDelete(item.id, item.name);
   }, [item.id, item.name, onDelete, closeSwipe]);
 
+  // The swipe is a shortcut; screen-reader and switch users get the same
+  // three actions from the row itself.
+  const accessibilityActions = [
+    {name: 'pin', label: item.pinned ? 'Unpin' : 'Pin'},
+    {name: 'mute', label: item.muted ? 'Unmute' : 'Mute'},
+    {name: 'delete', label: 'Delete conversation'},
+  ];
+  const onAccessibilityAction = e => {
+    if (e.nativeEvent.actionName === 'pin') handlePin();
+    if (e.nativeEvent.actionName === 'mute') handleMute();
+    if (e.nativeEvent.actionName === 'delete') handleDelete();
+  };
+
+  const rowLabel = [
+    item.name,
+    item.pinned && 'pinned',
+    item.muted && 'muted',
+    item.unread > 0 && `${item.unread} unread`,
+    item.lastMessage || 'No messages yet',
+    formatTimestamp(item.lastMessageTime),
+  ]
+    .filter(Boolean)
+    .join(', ');
+
   return (
-    <View style={styles.chatItemContainer}>
-      {/* Swipe actions behind the row */}
-      <Animated.View style={[styles.swipeActions, animatedActionsStyle]}>
+    <View style={[styles.chatItemContainer, {height: rowHeight}]}>
+      {/* Swipe actions behind the row. Neutral for the reversible two, red
+          only for the destructive one, so colour means one thing. */}
+      <Animated.View
+        style={[styles.swipeActions, animatedActionsStyle]}
+        importantForAccessibility="no-hide-descendants">
         <TouchableOpacity
-          style={[styles.swipeAction, {backgroundColor: '#3366ff'}]}
+          style={[styles.swipeAction, {backgroundColor: theme.bgTertiary}]}
           onPress={handlePin}
           activeOpacity={0.7}>
-          <Text style={styles.swipeActionIcon}>{item.pinned ? 'U' : 'P'}</Text>
-          <Text style={styles.swipeActionLabel}>{item.pinned ? 'Unpin' : 'Pin'}</Text>
+          <Icon name="pin" size={20} color={theme.text} />
+          <Text style={[styles.swipeActionLabel, {color: theme.text}]}>
+            {item.pinned ? 'Unpin' : 'Pin'}
+          </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.swipeAction, {backgroundColor: '#ff9900'}]}
+          style={[styles.swipeAction, {backgroundColor: theme.border}]}
           onPress={handleMute}
           activeOpacity={0.7}>
-          <Text style={styles.swipeActionIcon}>{item.muted ? 'V' : 'M'}</Text>
-          <Text style={styles.swipeActionLabel}>{item.muted ? 'Unmute' : 'Mute'}</Text>
+          <Icon name={item.muted ? 'bell' : 'bellOff'} size={20} color={theme.text} />
+          <Text style={[styles.swipeActionLabel, {color: theme.text}]}>
+            {item.muted ? 'Unmute' : 'Mute'}
+          </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.swipeAction, {backgroundColor: '#ff4466'}]}
+          style={[styles.swipeAction, {backgroundColor: theme.danger}]}
           onPress={handleDelete}
           activeOpacity={0.7}>
-          <Text style={styles.swipeActionIcon}>X</Text>
-          <Text style={styles.swipeActionLabel}>Delete</Text>
+          <Icon name="trash" size={20} color={theme.onAccent} />
+          <Text style={[styles.swipeActionLabel, {color: theme.onAccent}]}>Delete</Text>
         </TouchableOpacity>
       </Animated.View>
 
       {/* Main chat row */}
       <GestureDetector gesture={panGesture}>
-        <Animated.View style={[styles.chatItemRow, animatedRowStyle]}>
+        <Animated.View style={[{height: rowHeight}, animatedRowStyle]}>
           <TouchableOpacity
-            style={[styles.chatItem, {backgroundColor: theme.bg}]}
+            style={[styles.chatItem, {height: rowHeight, backgroundColor: theme.bg}]}
             onPress={() => onPress(item)}
+            accessibilityRole="button"
+            accessibilityLabel={rowLabel}
+            accessibilityHint="Opens the conversation"
+            accessibilityActions={accessibilityActions}
+            onAccessibilityAction={onAccessibilityAction}
             activeOpacity={0.7}>
-            {/* Avatar */}
-            <View style={[styles.avatar, {backgroundColor: avatarColors[0]}]}>
-              <Text style={styles.avatarText}>{firstLetter}</Text>
-              {item.online && (
-                <View style={[styles.onlineDot, {borderColor: theme.bg}]} />
-              )}
-            </View>
+            <PeerAvatar name={item.name} size={48} online={item.online} />
 
             {/* Content */}
             <View style={styles.chatContent}>
               <View style={styles.chatTopRow}>
                 <View style={styles.chatNameRow}>
                   {item.pinned && (
-                    <Text style={[styles.pinIcon, {color: theme.textMuted}]}>*</Text>
+                    <Icon name="pin" size={14} color={theme.textMuted} style={styles.rowGlyph} />
                   )}
                   <Text
                     style={[styles.chatName, {color: theme.text}]}
@@ -191,10 +201,10 @@ function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
                     {item.name}
                   </Text>
                   {item.muted && (
-                    <Text style={[styles.mutedIcon, {color: theme.textMuted}]}>M</Text>
+                    <Icon name="bellOff" size={14} color={theme.textMuted} style={styles.rowGlyphAfter} />
                   )}
                 </View>
-                <Text style={[styles.chatTime, {color: theme.textMuted}]}>
+                <Text style={[styles.chatTime, {color: item.unread > 0 ? theme.accent : theme.textMuted}]}>
                   {formatTimestamp(item.lastMessageTime)}
                 </Text>
               </View>
@@ -202,15 +212,15 @@ function ChatItemImpl({item, theme, onPress, onPin, onMute, onDelete}) {
                 <Text
                   style={[
                     styles.chatPreview,
-                    {color: item.unread > 0 ? theme.textSecondary : theme.textMuted},
+                    {color: item.unread > 0 ? theme.text : theme.textSecondary},
                     item.unread > 0 && {fontWeight: '600'},
                   ]}
                   numberOfLines={1}>
                   {item.lastMessage || 'No messages yet'}
                 </Text>
                 {item.unread > 0 && (
-                  <View style={[styles.unreadBadge, {backgroundColor: theme.accent}]}>
-                    <Text style={[styles.unreadText, {color: theme.bg}]}>
+                  <View style={[styles.unreadBadge, {backgroundColor: item.muted ? theme.textMuted : theme.accent}]}>
+                    <Text style={[styles.unreadText, {color: theme.onAccent}]}>
                       {item.unread > 99 ? '99+' : item.unread}
                     </Text>
                   </View>
@@ -229,6 +239,7 @@ const ChatItem = React.memo(ChatItemImpl, (prev, next) => {
   const b = next.item;
   return (
     prev.theme === next.theme &&
+    prev.rowHeight === next.rowHeight &&
     prev.onPress === next.onPress &&
     prev.onPin === next.onPin &&
     prev.onMute === next.onMute &&
@@ -248,13 +259,16 @@ const ChatItem = React.memo(ChatItemImpl, (prev, next) => {
 
 // ==================== MAIN CHAT LIST SCREEN ====================
 export default function ChatListScreen({navigation}) {
-  const {theme} = useTheme();
+  const {theme, scale} = useTheme();
+  const insets = useSafeAreaInsets();
   const {state, dispatch, identity, legacyRecovery} = useApp();
   const [searchQuery, setSearchQuery] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
   const [addPeerModalVisible, setAddPeerModalVisible] = useState(false);
   const [inviteCodeInput, setInviteCodeInput] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState('connected'); // 'connected' | 'connecting' | 'offline'
+  const [addressCopied, setAddressCopied] = useState(false);
+  // Rows grow with the text size; a fixed 76pt row clipped two lines of
+  // Extra large text under overflow:hidden.
+  const rowHeight = Math.max(CHAT_ITEM_BASE_HEIGHT, scale(CHAT_ITEM_BASE_HEIGHT));
 
   // FAB animation
   const fabScale = useSharedValue(1);
@@ -314,14 +328,6 @@ export default function ChatListScreen({navigation}) {
         (c.lastMessage && c.lastMessage.toLowerCase().includes(q)),
     );
   }, [chatList, searchQuery]);
-
-  // Pull to refresh
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    Vibration.vibrate(10);
-    // Simulate refresh — in production this would re-check peer connections
-    setTimeout(() => setRefreshing(false), 1200);
-  }, []);
 
   // Chat item press
   const handleChatPress = useCallback(
@@ -388,7 +394,9 @@ export default function ChatListScreen({navigation}) {
     if (!identity?.ghostAddress) return;
     Clipboard.setString(identity.ghostAddress);
     Vibration.vibrate(15);
-    Alert.alert('Copied', `${identity.ghostAddress}\n\nShare this with a peer so they can add you.`);
+    // Confirmed in place, not with a dialog that has to be dismissed.
+    setAddressCopied(true);
+    setTimeout(() => setAddressCopied(false), 2000);
   }, [identity]);
 
   // Add peer via Ghost Address or invite code
@@ -472,31 +480,17 @@ export default function ChatListScreen({navigation}) {
     navigation.navigate('Settings');
   }, [navigation]);
 
-  // Connection status color
-  const statusColor = useMemo(() => {
-    switch (connectionStatus) {
-      case 'connected':
-        return theme.success;
-      case 'connecting':
-        return theme.warning;
-      case 'offline':
-        return theme.danger;
-      default:
-        return theme.textMuted;
-    }
-  }, [connectionStatus, theme]);
-
   // FlatList key extractor
   const keyExtractor = useCallback(item => item.id, []);
 
   // FlatList getItemLayout for fixed-height rows
   const getItemLayout = useCallback(
     (_data, index) => ({
-      length: CHAT_ITEM_HEIGHT,
-      offset: CHAT_ITEM_HEIGHT * index,
+      length: rowHeight,
+      offset: rowHeight * index,
       index,
     }),
-    [],
+    [rowHeight],
   );
 
   // Render chat item
@@ -505,13 +499,14 @@ export default function ChatListScreen({navigation}) {
       <ChatItem
         item={item}
         theme={theme}
+        rowHeight={rowHeight}
         onPress={handleChatPress}
         onPin={handlePin}
         onMute={handleMute}
         onDelete={handleDelete}
       />
     ),
-    [theme, handleChatPress, handlePin, handleMute, handleDelete],
+    [theme, rowHeight, handleChatPress, handlePin, handleMute, handleDelete],
   );
 
   // ==================== RENDER ====================
@@ -520,31 +515,22 @@ export default function ChatListScreen({navigation}) {
       <View style={[styles.container, {backgroundColor: theme.bg}]}>
         <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
 
-        {/* ===== HEADER ===== */}
-        <View style={[styles.header, {borderBottomColor: theme.border}]}>
-          <View style={styles.headerLeft}>
-            <View style={[styles.headerGhost, {backgroundColor: theme.accent + '18'}]}>
-              <Text style={[styles.headerGhostText, {color: theme.accent}]}>G</Text>
-            </View>
-            <View>
-              <Text style={[styles.headerTitle, {color: theme.text}]}>GhostLink</Text>
-              <View style={styles.statusRow}>
-                <View style={[styles.statusDot, {backgroundColor: statusColor}]} />
-                <Text style={[styles.statusText, {color: theme.textMuted}]}>
-                  {connectionStatus === 'connected'
-                    ? 'Connected'
-                    : connectionStatus === 'connecting'
-                    ? 'Connecting...'
-                    : 'Offline'}
-                </Text>
-              </View>
-            </View>
-          </View>
+        {/* ===== HEADER =====
+            There was a green "Connected" line here, driven by local state
+            that started at 'connected' and that nothing ever changed. There
+            is no app-wide connection to report; each conversation shows its
+            own transport in its header instead. */}
+        <View style={[styles.header, {paddingTop: insets.top + 8, borderBottomColor: theme.border}]}>
+          <Text style={[styles.headerTitle, {color: theme.text}]} accessibilityRole="header">
+            Chats
+          </Text>
           <TouchableOpacity
-            style={[styles.settingsBtn, {backgroundColor: theme.bgSecondary}]}
+            style={styles.headerBtn}
             onPress={handleSettingsPress}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
             activeOpacity={0.6}>
-            <Text style={[styles.settingsIcon, {color: theme.textSecondary}]}>S</Text>
+            <Icon name="settings" size={24} color={theme.textSecondary} />
           </TouchableOpacity>
         </View>
 
@@ -564,11 +550,12 @@ export default function ChatListScreen({navigation}) {
 
         {/* ===== SEARCH BAR ===== */}
         <View style={[styles.searchContainer, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-          <Text style={[styles.searchIcon, {color: theme.textMuted}]}>?</Text>
+          <Icon name="search" size={18} color={theme.textMuted} style={styles.searchIcon} />
           <TextInput
             style={[styles.searchInput, {color: theme.text}]}
-            placeholder="Search conversations..."
+            placeholder="Search"
             placeholderTextColor={theme.textMuted}
+            accessibilityLabel="Search conversations"
             value={searchQuery}
             onChangeText={setSearchQuery}
             autoCapitalize="none"
@@ -576,8 +563,13 @@ export default function ChatListScreen({navigation}) {
             returnKeyType="search"
           />
           {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')} activeOpacity={0.6}>
-              <Text style={[styles.clearIcon, {color: theme.textMuted}]}>X</Text>
+            <TouchableOpacity
+              onPress={() => setSearchQuery('')}
+              style={styles.clearBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+              activeOpacity={0.6}>
+              <Icon name="close" size={16} color={theme.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -592,33 +584,29 @@ export default function ChatListScreen({navigation}) {
             style={styles.chatList}
             contentContainerStyle={styles.chatListContent}
             showsVerticalScrollIndicator={false}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor={theme.accent}
-                colors={[theme.accent]}
-                progressBackgroundColor={theme.bgSecondary}
-              />
-            }
+            keyboardShouldPersistTaps="handled"
             initialNumToRender={15}
             maxToRenderPerBatch={10}
             windowSize={11}
             removeClippedSubviews={Platform.OS === 'android'}
           />
         ) : (
-          /* ===== EMPTY STATE ===== */
+          /* ===== EMPTY STATE =====
+              A search with no hits is not "no conversations". */
+          searchQuery.trim() && chatList.length > 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={[styles.emptyTitle, {color: theme.textSecondary}]}>
+                No results for “{searchQuery.trim()}”
+              </Text>
+            </View>
+          ) : (
           <View style={styles.emptyContainer}>
             <Animated.View entering={FadeInDown.duration(500)} style={styles.emptyContent}>
-              {/* Ghost illustration */}
-              <View style={[styles.emptyGhost, {borderColor: theme.accent + '20', backgroundColor: theme.accent + '06'}]}>
-                <Text style={[styles.emptyGhostText, {color: theme.accent + '40'}]}>G</Text>
-              </View>
-              <Text style={[styles.emptyTitle, {color: theme.textSecondary}]}>
+              <Text style={[styles.emptyTitle, {color: theme.text}]} accessibilityRole="header">
                 No conversations yet
               </Text>
-              <Text style={[styles.emptyDesc, {color: theme.textMuted}]}>
-                Tap the + button and enter a peer's{'\n'}Ghost Address to start one.
+              <Text style={[styles.emptyDesc, {color: theme.textSecondary}]}>
+                Add a peer with their Ghost Address, or share yours so they can add you.
               </Text>
 
               {/* Your Ghost Address. This replaced `state.inviteCode`, which was
@@ -629,44 +617,57 @@ export default function ChatListScreen({navigation}) {
                 <TouchableOpacity
                   onPress={handleCopyAddress}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Your Ghost Address, ${identity.ghostAddress}`}
+                  accessibilityHint="Copies it so you can share it"
                   style={[styles.myCodeBox, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
-                  <Text style={[styles.myCodeLabel, {color: theme.textMuted}]}>
+                  <Text style={[styles.myCodeLabel, {color: theme.textSecondary}]}>
                     Your Ghost Address
                   </Text>
                   <Text style={[styles.myCodeValue, {color: theme.accent}]} selectable>
                     {identity.ghostAddress}
                   </Text>
-                  <Text style={[styles.myCodeHint, {color: theme.textMuted}]}>
-                    Tap to copy · share this so peers can reach you
-                  </Text>
+                  <View style={styles.myCodeHintRow}>
+                    <Icon
+                      name={addressCopied ? 'check' : 'copy'}
+                      size={14}
+                      color={addressCopied ? theme.accent : theme.textMuted}
+                    />
+                    <Text style={[styles.myCodeHint, {color: addressCopied ? theme.accent : theme.textMuted}]}>
+                      {addressCopied ? 'Copied' : 'Tap to copy'}
+                    </Text>
+                  </View>
                 </TouchableOpacity>
               ) : null}
+
+              <TouchableOpacity
+                style={[styles.emptyAction, {backgroundColor: theme.accent}]}
+                onPress={handleFABPress}
+                accessibilityRole="button"
+                activeOpacity={0.8}>
+                <Icon name="plus" size={18} color={theme.onAccent} />
+                <Text style={[styles.emptyActionText, {color: theme.onAccent}]}>Add Peer</Text>
+              </TouchableOpacity>
             </Animated.View>
           </View>
-        )}
-
-        {/* ===== OFFLINE STATUS BAR ===== */}
-        {connectionStatus === 'offline' && (
-          <Animated.View
-            entering={SlideInDown.duration(300)}
-            exiting={SlideOutDown.duration(200)}
-            style={[styles.offlineBar, {backgroundColor: theme.danger + '20', borderTopColor: theme.danger + '40'}]}>
-            <View style={[styles.offlineDot, {backgroundColor: theme.danger}]} />
-            <Text style={[styles.offlineText, {color: theme.danger}]}>
-              No connection. Messages will queue and send when back online.
-            </Text>
-          </Animated.View>
+          )
         )}
 
         {/* ===== FAB (Add Peer) ===== */}
-        <Animated.View style={[styles.fabContainer, fabStyle]}>
-          <TouchableOpacity
-            style={[styles.fab, {backgroundColor: theme.accent}]}
-            onPress={handleFABPress}
-            activeOpacity={0.8}>
-            <Text style={[styles.fabIcon, {color: theme.bg}]}>+</Text>
-          </TouchableOpacity>
-        </Animated.View>
+        {/* Only once there is a list: the empty state has its own labelled
+            button, and two ways to do one thing on an empty screen is one too many. */}
+        {chatList.length > 0 && (
+          <Animated.View style={[styles.fabContainer, {bottom: insets.bottom + 20}, fabStyle]}>
+            <TouchableOpacity
+              style={[styles.fab, {backgroundColor: theme.accent}]}
+              onPress={handleFABPress}
+              accessibilityRole="button"
+              accessibilityLabel="Add peer"
+              activeOpacity={0.8}>
+              <Icon name="plus" size={26} color={theme.onAccent} strokeWidth={2.5} />
+            </TouchableOpacity>
+          </Animated.View>
+        )}
 
         {/* ===== ADD PEER MODAL ===== */}
         <Modal
@@ -675,17 +676,27 @@ export default function ChatListScreen({navigation}) {
           transparent
           onRequestClose={() => setAddPeerModalVisible(false)}>
           <TouchableOpacity
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, {backgroundColor: theme.scrim}]}
+            accessible={false}
             activeOpacity={1}
             onPress={() => setAddPeerModalVisible(false)}>
             <Animated.View entering={SlideInDown.springify().damping(18)} exiting={SlideOutDown.duration(200)}>
               <TouchableOpacity activeOpacity={1} onPress={() => {}}>
-                <View style={[styles.modalContent, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
+                <View
+                  style={[
+                    styles.modalContent,
+                    {
+                      backgroundColor: theme.bgSecondary,
+                      borderColor: theme.border,
+                      paddingBottom: insets.bottom + 20,
+                    },
+                  ]}
+                  accessibilityViewIsModal>
                   <View style={styles.modalHandle}>
-                    <View style={[styles.modalHandleBar, {backgroundColor: theme.textMuted + '40'}]} />
+                    <View style={[styles.modalHandleBar, {backgroundColor: theme.textMuted}]} />
                   </View>
 
-                  <Text style={[styles.modalTitle, {color: theme.text}]}>
+                  <Text style={[styles.modalTitle, {color: theme.text}]} accessibilityRole="header">
                     Add Peer
                   </Text>
                   <Text style={[styles.modalDesc, {color: theme.textSecondary}]}>
@@ -702,6 +713,7 @@ export default function ChatListScreen({navigation}) {
                       style={[styles.modalInput, {color: theme.text}]}
                       placeholder="GHOST-XXX-XXX-XXX"
                       placeholderTextColor={theme.textMuted}
+                      accessibilityLabel="Ghost Address or invite code"
                       value={inviteCodeInput}
                       onChangeText={setInviteCodeInput}
                       autoCapitalize="characters"
@@ -715,9 +727,10 @@ export default function ChatListScreen({navigation}) {
                   <TouchableOpacity
                     style={[styles.modalPrimaryBtn, {backgroundColor: theme.accent}]}
                     onPress={handleAddPeer}
+                    accessibilityRole="button"
                     activeOpacity={0.7}>
-                    <Text style={[styles.modalPrimaryBtnText, {color: theme.bg}]}>
-                      Connect
+                    <Text style={[styles.modalPrimaryBtnText, {color: theme.onAccent}]}>
+                      Add Peer
                     </Text>
                   </TouchableOpacity>
 
@@ -732,10 +745,11 @@ export default function ChatListScreen({navigation}) {
 
                   {/* QR Scan button */}
                   <TouchableOpacity
-                    style={[styles.modalQRBtn, {borderColor: theme.accent + '40', backgroundColor: theme.accent + '08'}]}
+                    style={[styles.modalQRBtn, {borderColor: theme.accent}]}
                     onPress={handleScanQR}
+                    accessibilityRole="button"
                     activeOpacity={0.7}>
-                    <Text style={[styles.modalQRIcon, {color: theme.accent}]}>[QR]</Text>
+                    <Icon name="qr" size={20} color={theme.accent} style={styles.modalQRIcon} />
                     <Text style={[styles.modalQRText, {color: theme.accent}]}>
                       Scan QR Code
                     </Text>
@@ -748,6 +762,7 @@ export default function ChatListScreen({navigation}) {
                       setInviteCodeInput('');
                       setAddPeerModalVisible(false);
                     }}
+                    accessibilityRole="button"
                     activeOpacity={0.6}>
                     <Text style={[styles.modalCancelText, {color: theme.textSecondary}]}>
                       Cancel
@@ -774,85 +789,47 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 56 : 16,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  headerGhost: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  headerGhostText: {
-    fontSize: 20,
-    fontWeight: '900',
+    paddingLeft: 20,
+    paddingRight: 8,
+    paddingBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+    fontSize: 30,
+    fontWeight: '700',
   },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 2,
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    marginRight: 5,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  settingsBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
+  headerBtn: {
+    width: 44,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  settingsIcon: {
-    fontSize: 18,
-    fontWeight: '700',
   },
 
   // Search
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginHorizontal: 20,
-    marginTop: 14,
+    marginHorizontal: 16,
+    marginTop: 12,
     marginBottom: 8,
     borderWidth: 1,
     borderRadius: 12,
-    paddingHorizontal: 14,
+    paddingLeft: 12,
+    minHeight: 44,
   },
   searchIcon: {
-    fontSize: 16,
-    fontWeight: '600',
     marginRight: 8,
   },
   searchInput: {
     flex: 1,
-    fontSize: 14,
-    paddingVertical: 11,
-    fontWeight: '500',
+    fontSize: 16,
+    paddingVertical: 10,
   },
-  clearIcon: {
-    fontSize: 14,
-    fontWeight: '700',
-    paddingLeft: 8,
+  clearBtn: {
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 
   // Chat list
@@ -865,7 +842,6 @@ const styles = StyleSheet.create({
 
   // Chat item
   chatItemContainer: {
-    height: CHAT_ITEM_HEIGHT,
     overflow: 'hidden',
   },
   swipeActions: {
@@ -873,58 +849,24 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     bottom: 0,
-    width: 220,
+    width: SWIPE_WIDTH,
     flexDirection: 'row',
   },
   swipeAction: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  swipeActionIcon: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '800',
-    marginBottom: 2,
+    gap: 4,
   },
   swipeActionLabel: {
-    color: '#fff',
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '600',
-  },
-  chatItemRow: {
-    height: CHAT_ITEM_HEIGHT,
   },
   chatItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    height: CHAT_ITEM_HEIGHT,
-  },
-
-  // Avatar
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 14,
-  },
-  avatarText: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '800',
-  },
-  onlineDot: {
-    position: 'absolute',
-    bottom: 1,
-    right: 1,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#00ffa3',
-    borderWidth: 2,
+    paddingHorizontal: 16,
+    gap: 12,
   },
 
   // Chat content
@@ -943,29 +885,19 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 8,
   },
-  pinIcon: {
-    fontSize: 12,
-    fontWeight: '700',
+  rowGlyph: {
     marginRight: 4,
   },
-  chatName: {
-    fontSize: 15,
-    fontWeight: '600',
-    flex: 1,
-  },
-  mutedIcon: {
-    fontSize: 10,
-    fontWeight: '700',
+  rowGlyphAfter: {
     marginLeft: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 3,
-    paddingHorizontal: 3,
-    paddingVertical: 1,
+  },
+  chatName: {
+    fontSize: 16,
+    fontWeight: '600',
+    flexShrink: 1,
   },
   chatTime: {
-    fontSize: 11,
-    fontWeight: '500',
+    fontSize: 13,
   },
   chatBottomRow: {
     flexDirection: 'row',
@@ -973,7 +905,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   chatPreview: {
-    fontSize: 13,
+    fontSize: 15,
     flex: 1,
     marginRight: 8,
   },
@@ -986,8 +918,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   unreadText: {
-    fontSize: 11,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '700',
   },
 
   // Empty state
@@ -1000,27 +932,15 @@ const styles = StyleSheet.create({
   emptyContent: {
     alignItems: 'center',
   },
-  emptyGhost: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    borderWidth: 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  emptyGhostText: {
-    fontSize: 48,
-    fontWeight: '900',
-  },
   emptyTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '700',
     marginBottom: 8,
+    textAlign: 'center',
   },
   emptyDesc: {
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 15,
+    lineHeight: 21,
     textAlign: 'center',
     marginBottom: 24,
   },
@@ -1032,49 +952,45 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   myCodeLabel: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   myCodeValue: {
-    fontSize: 13,
+    fontSize: 17,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     letterSpacing: 0.5,
     marginBottom: 8,
   },
-  myCodeHint: {
-    fontSize: 11,
-    fontWeight: '500',
-  },
-
-  // Offline bar
-  offlineBar: {
+  myCodeHintRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderTopWidth: 1,
+    gap: 6,
   },
-  offlineDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 8,
+  myCodeHint: {
+    fontSize: 13,
   },
-  offlineText: {
-    fontSize: 12,
-    fontWeight: '500',
-    flex: 1,
+  emptyAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 50,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    marginTop: 20,
+    alignSelf: 'stretch',
+  },
+  emptyActionText: {
+    fontSize: 16,
+    fontWeight: '600',
   },
 
   // FAB
   fabContainer: {
     position: 'absolute',
     right: 20,
-    bottom: Platform.OS === 'ios' ? 36 : 24,
   },
   fab: {
     width: 56,
@@ -1088,16 +1004,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 6,
   },
-  fabIcon: {
-    fontSize: 28,
-    fontWeight: '400',
-    marginTop: -1,
-  },
 
   // Modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
     justifyContent: 'flex-end',
   },
   modalContent: {
@@ -1106,7 +1016,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderBottomWidth: 0,
     paddingHorizontal: 24,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 28,
   },
   modalHandle: {
     alignItems: 'center',
@@ -1124,8 +1033,8 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   modalDesc: {
-    fontSize: 13,
-    lineHeight: 19,
+    fontSize: 15,
+    lineHeight: 21,
     marginBottom: 20,
   },
   modalInputWrap: {
@@ -1135,7 +1044,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   modalInput: {
-    fontSize: 14,
+    fontSize: 16,
     paddingVertical: 13,
     fontWeight: '500',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
@@ -1147,9 +1056,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   modalPrimaryBtnText: {
-    fontSize: 15,
-    fontWeight: '700',
-    letterSpacing: 0.5,
+    fontSize: 16,
+    fontWeight: '600',
   },
   modalDivider: {
     flexDirection: 'row',
@@ -1175,8 +1083,6 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   modalQRIcon: {
-    fontSize: 16,
-    fontWeight: '700',
     marginRight: 8,
   },
   modalQRText: {
@@ -1185,10 +1091,10 @@ const styles = StyleSheet.create({
   },
   modalCancelBtn: {
     alignItems: 'center',
-    paddingVertical: 10,
+    justifyContent: 'center',
+    minHeight: 44,
   },
   modalCancelText: {
-    fontSize: 14,
-    fontWeight: '500',
+    fontSize: 16,
   },
 });

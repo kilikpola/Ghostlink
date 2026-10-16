@@ -1,4 +1,4 @@
-import React, {useState, useCallback, useEffect, useRef} from 'react';
+import React, {useState, useCallback, useRef} from 'react';
 import {
   View,
   StyleSheet,
@@ -15,15 +15,12 @@ import {Text, TextInput} from '../components/ScaledText';
 import Animated, {
   FadeInDown,
   FadeInUp,
-  useSharedValue,
-  useAnimatedStyle,
-  withRepeat,
-  withSequence,
-  withTiming,
   SlideInRight,
   SlideOutLeft,
 } from 'react-native-reanimated';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useTheme} from '../context/ThemeContext';
+import Icon from '../components/Icon';
 import {useApp} from '../context/AppContext';
 import {useSecureScreenWhen} from '../utils/useSecureScreen';
 import {CryptoEngine, generateSeedPhrase} from '../utils/crypto';
@@ -50,7 +47,8 @@ const SETUP_STAGES = [
 const VERIFY_INDICES = [2, 6, 10];
 
 export default function SetupScreen({navigation}) {
-  const {theme} = useTheme();
+  const {theme, fontScale} = useTheme();
+  const insets = useSafeAreaInsets();
   const {setIdentity} = useApp();
   const [step, setStep] = useState(STEPS.NAME);
 
@@ -71,23 +69,8 @@ export default function SetupScreen({navigation}) {
   const confirmRef7 = useRef(null);
   const confirmRef11 = useRef(null);
 
-  // Ghost icon pulse animation
-  const ghostPulse = useSharedValue(1);
-
-  useEffect(() => {
-    ghostPulse.value = withRepeat(
-      withSequence(
-        withTiming(1.08, {duration: 1800}),
-        withTiming(1, {duration: 1800}),
-      ),
-      -1,
-      true,
-    );
-  }, [ghostPulse]);
-
-  const ghostStyle = useAnimatedStyle(() => ({
-    transform: [{scale: ghostPulse.value}],
-  }));
+  // The logo used to pulse forever. Motion with no meaning, on the screen
+  // where people are reading the most carefully, is decoration.
 
   // Step 1: Handle name submission — generate seed phrase
   const handleNameSubmit = useCallback(() => {
@@ -207,23 +190,31 @@ export default function SetupScreen({navigation}) {
     <View style={[styles.container, {backgroundColor: theme.bg}]}>
       <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={[
+          styles.scroll,
+          {paddingTop: insets.top + 32, paddingBottom: insets.bottom + 40},
+        ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}>
 
         {/* Ghost Icon Header */}
-        <Animated.View style={[styles.logoContainer, ghostStyle]}>
-          <View style={[styles.ghostIcon, {borderColor: theme.accent + '40', backgroundColor: theme.accent + '08'}]}>
+        <View style={styles.logoContainer}>
+          <View style={[styles.ghostIcon, {borderColor: theme.accent, backgroundColor: theme.accentDim}]}>
             <Text style={[styles.ghostGlyph, {color: theme.accent}]}>G</Text>
           </View>
-          <Text style={[styles.title, {color: theme.text}]}>GhostLink</Text>
+          <Text style={[styles.title, {color: theme.text}]} accessibilityRole="header">GhostLink</Text>
+          {/* "Zero Trust. Zero Trace." was a promise the app does not make:
+              messages and keys are stored on this phone. */}
           <Text style={[styles.subtitle, {color: theme.textSecondary}]}>
-            Zero Trust. Zero Trace.
+            Peer-to-peer messaging.
           </Text>
-        </Animated.View>
+        </View>
 
         {/* Step indicator */}
-        <View style={styles.stepIndicator}>
+        <View
+          style={styles.stepIndicator}
+          accessible
+          accessibilityLabel={`Step ${step + 1} of 3`}>
           {[0, 1, 2].map(i => (
             <View key={i} style={styles.stepDotRow}>
               <View
@@ -250,8 +241,8 @@ export default function SetupScreen({navigation}) {
         {/* ==================== STEP 1: DISPLAY NAME ==================== */}
         {step === STEPS.NAME && (
           <Animated.View entering={SlideInRight.duration(350)} exiting={SlideOutLeft.duration(250)} style={styles.stepContainer}>
-            <Text style={[styles.stepTitle, {color: theme.text}]}>
-              Choose Your Identity
+            <Text style={[styles.stepTitle, {color: theme.text}]} accessibilityRole="header">
+              Choose a Display Name
             </Text>
             <Text style={[styles.stepDesc, {color: theme.textSecondary}]}>
               This name is visible to peers in your encrypted conversations. It cannot be changed later without re-keying.
@@ -262,11 +253,12 @@ export default function SetupScreen({navigation}) {
                 styles.inputWrapper,
                 {backgroundColor: theme.bgSecondary, borderColor: theme.border},
               ]}>
-              <Text style={[styles.inputIcon, {color: theme.textMuted}]}>@</Text>
               <TextInput
                 style={[styles.input, {color: theme.text}]}
-                placeholder="Display name..."
+                placeholder="Display name"
                 placeholderTextColor={theme.textMuted}
+                accessibilityLabel="Display name"
+                textContentType="nickname"
                 value={displayName}
                 onChangeText={setDisplayName}
                 maxLength={24}
@@ -292,8 +284,8 @@ export default function SetupScreen({navigation}) {
               onPress={handleNameSubmit}
               disabled={!displayName.trim()}
               activeOpacity={0.7}>
-              <Text style={[styles.primaryBtnText, {color: theme.bg}]}>
-                Create new identity
+              <Text style={[styles.primaryBtnText, {color: theme.onAccent}]}>
+                Create New Identity
               </Text>
             </TouchableOpacity>
 
@@ -317,7 +309,7 @@ export default function SetupScreen({navigation}) {
               accessibilityRole="button"
               accessibilityLabel="I already have an identity. Restore it from your recovery phrase.">
               <Text style={[styles.secondaryBtnText, {color: theme.accent}]}>
-                I already have an identity
+                I Already Have an Identity
               </Text>
             </TouchableOpacity>
           </Animated.View>
@@ -326,8 +318,8 @@ export default function SetupScreen({navigation}) {
         {/* ==================== STEP 2: SEED PHRASE ==================== */}
         {step === STEPS.SEED && (
           <Animated.View entering={SlideInRight.duration(350)} exiting={SlideOutLeft.duration(250)} style={styles.stepContainer}>
-            <Text style={[styles.stepTitle, {color: theme.text}]}>
-              Your Recovery Seed
+            <Text style={[styles.stepTitle, {color: theme.text}]} accessibilityRole="header">
+              Your Recovery Phrase
             </Text>
             <Text style={[styles.stepDesc, {color: theme.textSecondary}]}>
               Write down these 12 words in order. They are your only way to recover your identity.
@@ -339,8 +331,12 @@ export default function SetupScreen({navigation}) {
                 <Animated.View
                   key={idx}
                   entering={FadeInUp.delay(idx * 60).duration(300)}
+                  accessible
+                  accessibilityLabel={`Word ${idx + 1}, ${word}`}
                   style={[
                     styles.seedWord,
+                    // Two columns from Large up, so long words are not cut.
+                    {width: fontScale > 1.1 ? '48%' : '31%'},
                     {backgroundColor: theme.bgTertiary, borderColor: theme.border},
                   ]}>
                   <Text style={[styles.seedIndex, {color: theme.textMuted}]}>
@@ -360,12 +356,12 @@ export default function SetupScreen({navigation}) {
                 styles.warningBox,
                 {backgroundColor: theme.warning + '12', borderColor: theme.warning + '30'},
               ]}>
-              <Text style={[styles.warningIcon]}>!</Text>
+              <Icon name="warning" size={20} color={theme.warning} style={styles.warningIcon} />
               <View style={styles.warningContent}>
                 <Text style={[styles.warningTitle, {color: theme.warning}]}>
                   Write these down. Never share digitally.
                 </Text>
-                <Text style={[styles.warningText, {color: theme.warning + 'CC'}]}>
+                <Text style={[styles.warningText, {color: theme.text}]}>
                   Store these words on paper in a secure location. Anyone with these words controls your identity. Screenshots and digital copies are vulnerable.
                 </Text>
               </View>
@@ -375,7 +371,7 @@ export default function SetupScreen({navigation}) {
               style={[styles.primaryBtn, {backgroundColor: theme.accent}]}
               onPress={handleSeedWrittenDown}
               activeOpacity={0.7}>
-              <Text style={[styles.primaryBtnText, {color: theme.bg}]}>
+              <Text style={[styles.primaryBtnText, {color: theme.onAccent}]}>
                 I've Written It Down
               </Text>
             </TouchableOpacity>
@@ -385,18 +381,18 @@ export default function SetupScreen({navigation}) {
         {/* ==================== STEP 3: VERIFY WORDS 3, 7, 11 ==================== */}
         {step === STEPS.CONFIRM && (
           <Animated.View entering={SlideInRight.duration(350)} style={styles.stepContainer}>
-            <Text style={[styles.stepTitle, {color: theme.text}]}>
-              Verify Your Backup
+            <Text style={[styles.stepTitle, {color: theme.text}]} accessibilityRole="header">
+              Check Your Copy
             </Text>
             <Text style={[styles.stepDesc, {color: theme.textSecondary}]}>
-              Enter words #3, #7, and #11 from your seed phrase to confirm you saved it correctly.
+              Enter words 3, 7 and 11 from your recovery phrase.
             </Text>
 
             {/* Word #3 */}
             <View style={styles.confirmRow}>
               <View style={[styles.confirmLabel, {backgroundColor: theme.accent + '18'}]}>
                 <Text style={[styles.confirmLabelText, {color: theme.accent}]}>
-                  Word #3
+                  3
                 </Text>
               </View>
               <View
@@ -406,8 +402,9 @@ export default function SetupScreen({navigation}) {
                 ]}>
                 <TextInput
                   style={[styles.confirmInput, {color: theme.text}]}
-                  placeholder="Enter word #3..."
+                  placeholder="Word 3"
                   placeholderTextColor={theme.textMuted}
+                  accessibilityLabel="Word 3"
                   value={confirmWords[2]}
                   onChangeText={text => setConfirmWords(prev => ({...prev, 2: text}))}
                   autoCapitalize="none"
@@ -423,7 +420,7 @@ export default function SetupScreen({navigation}) {
             <View style={styles.confirmRow}>
               <View style={[styles.confirmLabel, {backgroundColor: theme.accent + '18'}]}>
                 <Text style={[styles.confirmLabelText, {color: theme.accent}]}>
-                  Word #7
+                  7
                 </Text>
               </View>
               <View
@@ -434,8 +431,9 @@ export default function SetupScreen({navigation}) {
                 <TextInput
                   ref={confirmRef7}
                   style={[styles.confirmInput, {color: theme.text}]}
-                  placeholder="Enter word #7..."
+                  placeholder="Word 7"
                   placeholderTextColor={theme.textMuted}
+                  accessibilityLabel="Word 7"
                   value={confirmWords[6]}
                   onChangeText={text => setConfirmWords(prev => ({...prev, 6: text}))}
                   autoCapitalize="none"
@@ -450,7 +448,7 @@ export default function SetupScreen({navigation}) {
             <View style={styles.confirmRow}>
               <View style={[styles.confirmLabel, {backgroundColor: theme.accent + '18'}]}>
                 <Text style={[styles.confirmLabelText, {color: theme.accent}]}>
-                  Word #11
+                  11
                 </Text>
               </View>
               <View
@@ -461,8 +459,9 @@ export default function SetupScreen({navigation}) {
                 <TextInput
                   ref={confirmRef11}
                   style={[styles.confirmInput, {color: theme.text}]}
-                  placeholder="Enter word #11..."
+                  placeholder="Word 11"
                   placeholderTextColor={theme.textMuted}
+                  accessibilityLabel="Word 11"
                   value={confirmWords[10]}
                   onChangeText={text => setConfirmWords(prev => ({...prev, 10: text}))}
                   autoCapitalize="none"
@@ -517,10 +516,10 @@ export default function SetupScreen({navigation}) {
               onPress={handleVerifyAndFinish}
               disabled={loading}
               activeOpacity={0.7}>
-              <Text style={[styles.primaryBtnText, {color: theme.bg}]}>
+              <Text style={[styles.primaryBtnText, {color: theme.onAccent}]}>
                 {loading
                   ? SETUP_STAGES[Math.max(0, stage - 1)] || 'Creating your identity…'
-                  : 'Verify & Create Identity'}
+                  : 'Create Identity'}
               </Text>
             </TouchableOpacity>
 
@@ -529,9 +528,10 @@ export default function SetupScreen({navigation}) {
               <TouchableOpacity
                 style={styles.backLink}
                 onPress={() => setStep(STEPS.SEED)}
+                accessibilityRole="button"
                 activeOpacity={0.6}>
-                <Text style={[styles.backLinkText, {color: theme.textSecondary}]}>
-                  Show seed phrase again
+                <Text style={[styles.backLinkText, {color: theme.accent}]}>
+                  Show the phrase again
                 </Text>
               </TouchableOpacity>
             )}
@@ -550,8 +550,6 @@ const styles = StyleSheet.create({
   scroll: {
     flexGrow: 1,
     paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 40,
   },
   logoContainer: {
     alignItems: 'center',
@@ -577,10 +575,9 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
   },
   subtitle: {
-    fontSize: 13,
-    letterSpacing: 2,
-    marginTop: 4,
-    textTransform: 'uppercase',
+    fontSize: 15,
+    marginTop: 6,
+    textAlign: 'center',
   },
 
   // Step indicator
@@ -617,8 +614,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   stepDesc: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 15,
+    lineHeight: 21,
     marginBottom: 24,
   },
 
@@ -630,11 +627,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  inputIcon: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginRight: 8,
   },
   input: {
     fontSize: 16,
@@ -656,7 +648,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   altRule: {flex: 1, height: 1},
-  altDividerText: {fontSize: 12},
+  altDividerText: {fontSize: 13},
   secondaryBtn: {
     minHeight: 52,
     borderRadius: 12,
@@ -667,14 +659,17 @@ const styles = StyleSheet.create({
   secondaryBtnText: {fontSize: 16, fontWeight: '600'},
   primaryBtn: {
     borderRadius: 12,
-    paddingVertical: 16,
+    minHeight: 52,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     alignItems: 'center',
+    justifyContent: 'center',
     marginTop: 8,
   },
   primaryBtnText: {
     fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 0.5,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 
   // Seed grid (3 columns x 4 rows)
@@ -685,7 +680,6 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   seedWord: {
-    width: '31%',
     borderWidth: 1,
     borderRadius: 10,
     paddingVertical: 10,
@@ -702,7 +696,7 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   seedText: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '600',
     flex: 1,
   },
@@ -717,26 +711,20 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   warningIcon: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#ffaa00',
     marginRight: 10,
     marginTop: 1,
-    width: 20,
-    textAlign: 'center',
   },
   warningContent: {
     flex: 1,
   },
   warningTitle: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '700',
     marginBottom: 4,
   },
   warningText: {
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '500',
+    fontSize: 14,
+    lineHeight: 20,
   },
 
   // Confirm step
@@ -746,14 +734,14 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   confirmLabel: {
-    paddingHorizontal: 12,
-    paddingVertical: 14,
-    borderRadius: 10,
-    minWidth: 80,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   confirmLabelText: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '700',
   },
   confirmInputWrap: {
@@ -764,7 +752,7 @@ const styles = StyleSheet.create({
     marginLeft: 10,
   },
   confirmInput: {
-    fontSize: 15,
+    fontSize: 16,
     paddingVertical: 13,
     fontWeight: '500',
   },
@@ -793,7 +781,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   progressText: {
-    fontSize: 12,
+    fontSize: 14,
     lineHeight: 20,
     fontWeight: '500',
   },
@@ -801,12 +789,11 @@ const styles = StyleSheet.create({
   // Back link
   backLink: {
     alignItems: 'center',
-    marginTop: 16,
-    paddingVertical: 8,
+    justifyContent: 'center',
+    marginTop: 12,
+    minHeight: 44,
   },
   backLinkText: {
-    fontSize: 13,
-    fontWeight: '500',
-    textDecorationLine: 'underline',
+    fontSize: 15,
   },
 });

@@ -59,7 +59,13 @@ const ok = (c, m) => { c ? (pass++, console.log('  ✓ ' + m)) : (fail++, consol
   ok(!/data\.text|data\.id|data\.timestamp|data\.replyTo/.test(handler),
      'no raw peer field reaches the stored message');
   ok(handler.includes('outgoing: false'), 'received messages are marked as not ours');
-  ok((chat.match(/outgoing: true/g) || []).length === 2, 'both kinds of sent message are marked as ours');
+  {
+    // One per message this side authors (text; voice notes were removed
+    // because nothing recorded or sent them).
+    const authored = (chat.match(/sender: identity\?\.name \|\| 'You'/g) || []).length;
+    const ours = (chat.match(/outgoing: true/g) || []).length;
+    ok(authored > 0 && ours === authored, 'every sent message is marked as ours');
+  }
   ok(/typeof item\.outgoing === 'boolean'\s*\?\s*item\.outgoing/.test(chat),
      "which side a bubble is drawn on comes from the flag, not the sender's name");
 

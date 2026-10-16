@@ -95,3 +95,13 @@ mobile/.roundtrip-*.mjs
 
 # AI agent skill files — kept locally, not published.
 .agents/
+
+# iOS (mobile/ios is committed; these are generated)
+mobile/ios/Pods/
+mobile/ios/build/
+mobile/ios/*.xcworkspace/xcuserdata/
+mobile/ios/*.xcodeproj/xcuserdata/
+mobile/ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+mobile/ios/.xcode.env.local
+mobile/ios/main.jsbundle
+mobile/ios/*.ipa

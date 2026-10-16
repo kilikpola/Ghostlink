@@ -1,0 +1,117 @@
+# Unsigned iOS device build (.ipa) of the React Native app in mobile/.
+#
+# Manual only (Actions → "iOS .ipa (unsigned)" → Run workflow). No secrets and
+# no signing here: the .ipa is signed on the installing machine, e.g. on Linux
+#
+#   xtool install GhostLink-unsigned.ipa
+#
+# which signs it with your Apple ID (free accounts: the install expires after
+# 7 days). An unsigned .ipa cannot be installed as is.
+#
+# Toolchain notes:
+# - macos-15 with Xcode 16.2. RN 0.73's fmt pod stops compiling at Xcode
+#   16.3, and macos-14 (Xcode 15) is unsupported from 2026-11-02.
+# - Flipper is disabled in the Podfile.
+# - mobile is an npm workspace: the root lockfile is the only one and
+#   react-native is hoisted to ../node_modules (the Podfile and the bundle
+#   phase both account for that).
+name: iOS .ipa (unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Unsigned device build
+    runs-on: macos-15
+    timeout-minutes: 75
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.2'
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      # Same bounds as react-native/template/Gemfile for 0.73.4.
+      - name: Install CocoaPods
+        run: |
+          gem install activesupport -v '>= 6.1.7.5, < 7.1.0' --no-document
+          gem install cocoapods -v '>= 1.13, < 1.15' --no-document
+          pod --version
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: Mobile tests
+        run: npm run test:mobile
+
+      - name: pod install
+        working-directory: mobile/ios
+        run: pod install
+
+      - name: Build for device (unsigned, Release)
+        working-directory: mobile/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace GhostLinkMobile.xcworkspace \
+            -scheme GhostLinkMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
+            build | tee xcodebuild.log
+
+      - name: Package .ipa
+        working-directory: mobile/ios
+        run: |
+          APP=build/Build/Products/Release-iphoneos/GhostLinkMobile.app
+          # The JS must be inside the app; without it the app opens to a red
+          # "No bundle URL present" screen.
+          test -s "$APP/main.jsbundle"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry GhostLink-unsigned.ipa Payload
+          ls -lh GhostLink-unsigned.ipa
+          shasum -a 256 GhostLink-unsigned.ipa | tee GhostLink-unsigned.ipa.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GhostLink-ios-unsigned-ipa
+          path: |
+            mobile/ios/GhostLink-unsigned.ipa
+            mobile/ios/GhostLink-unsigned.ipa.sha256
+          if-no-files-found: error
+
+      # Podfile.lock cannot be produced on Linux; commit this one so later
+      # runs install the same pod versions.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-build-logs-and-podfile-lock
+          path: |
+            mobile/ios/xcodebuild.log
+            mobile/ios/Podfile.lock
+          if-no-files-found: ignore

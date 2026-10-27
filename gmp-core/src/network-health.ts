@@ -81,7 +81,11 @@ export class NetworkHealthMonitor extends EventEmitter<NetworkHealthEvents> {
 
     const minPeers = this.node.bootstrap ? this.node.bootstrap.minPeers : DEFAULTS.GMP_MIN_PEERS;
 
-    if (this.metrics.currentPeerCount < minPeers && this.node.bootstrap && !this.node.bootstrap.isBootstrapping) {
+    // Connected but short of minPeers with nobody left to dial (a tiny
+    // network): re-running bootstrap would only repeat itself every check.
+    const nothingToDial = this.metrics.currentPeerCount > 0 && this.node.bootstrap
+      && typeof this.node.bootstrap.hasUntriedCandidates === 'function' && !this.node.bootstrap.hasUntriedCandidates();
+    if (this.metrics.currentPeerCount < minPeers && this.node.bootstrap && !this.node.bootstrap.isBootstrapping && !nothingToDial) {
       logger.info('health-monitor', 'check-trigger-bootstrap', `Low peer count (${this.metrics.currentPeerCount} < ${minPeers}). Initiating re-bootstrap.`);
       this.node.bootstrap.start().catch(() => {});
     }

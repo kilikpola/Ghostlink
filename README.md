@@ -1,8 +1,8 @@
 # 👻 GhostLink
 
-**Zero Trust · Zero Trace · Zero Servers**
+**No company server — network hosts are replaceable peers that see only ciphertext**
 
-A peer-to-peer encrypted communication platform where nothing is stored on any server — ever. Messages, files, calls, and meetings are end-to-end encrypted, blockchain-chained for tamper detection, and distributed exclusively across connected peers.
+A peer-to-peer encrypted communication platform with no company server: the hosts that help peers find each other, relay traffic or hold sealed messages for offline contacts are replaceable peers that see only ciphertext. Messages, files, calls, and meetings are end-to-end encrypted, blockchain-chained for tamper detection, and distributed exclusively across connected peers.
 
 > Your data lives on your device. Your backups live with your peers. No one else has access — not even us.
 
@@ -12,10 +12,10 @@ A peer-to-peer encrypted communication platform where nothing is stored on any s
 
 ## Why GhostLink?
 
-Every major messaging app — even the “secure” ones — stores metadata on central servers. Who you talked to, when, how often, from where. GhostLink eliminates this entirely.
+Every major messaging app — even the “secure” ones — stores metadata on central servers. Who you talked to, when, how often, from where. GhostLink keeps message content away from every host and needs no account.
 
-- **No servers.** Communication is peer-to-peer via WebRTC. There is no backend to hack, subpoena, or compromise.
-- **No metadata.** Connection timestamps, IP addresses, and contact graphs never leave your device.
+- **No company server.** The hosts that help peers connect — a bootstrap peer, relays and mailbox hosts — are replaceable peers that see only ciphertext.
+- **Metadata, stated plainly.** Those hosts see your IP address and when you connect. A mailbox host holds sealed messages for up to 7 days while a contact is offline.
 - **No trust required.** Cryptography enforces the rules, not policy.
 
 -----
@@ -56,7 +56,7 @@ Every major messaging app — even the “secure” ones — stores metadata on 
 |------------------|---------------------------------------|------------------------------------------------------|
 |Key Exchange      |ECDH P-256                             |Derive shared secrets between peers                   |
 |Message Encryption|AES-256-GCM                            |Encrypt every message with unique IV                  |
-|Forward Secrecy   |Signal Protocol (X3DH + Double Ratchet)|New keys per message — past messages safe if key leaks|
+|Link sessions     |X25519 ephemeral + static (GMP)        |Fresh session keys per mesh connection                |
 |Hashing           |SHA-256                                |Blockchain integrity, fingerprints                    |
 |Key Derivation    |PBKDF2 (100,000 iterations)            |Derive master key from seed phrase                    |
 |Identity Recovery |Shamir’s Secret Sharing GF(256)        |Split identity into 7 shares, any 3 recover it        |
@@ -73,7 +73,7 @@ Single HTML file with React 18 + Babel transpilation. No build step needed.
 **Screens:** 
 - **Splash**: Flying ghosts animation + dynamic logo loading.
 - **Onboarding (v0.0.1)**: 3-step interactive walkthrough explaining E2EE, P2P architecture, and blockchain integrity BEFORE account setup.
-- **Setup**: Zero-knowledge identity generation (name + BIP39 seed phrase).
+- **Setup**: No account — your identity is a key you hold (name + BIP-39 recovery phrase).
 - **Main Chat**: Full direct-communication interface with multi-theme support.
 
 **Features:**
@@ -86,7 +86,7 @@ Single HTML file with React 18 + Babel transpilation. No build step needed.
 - Reply threading and pinned messages
 - Blockchain explorer (view SHA-256 chain per conversation)
 - QR code invite generation (pure SVG, Reed-Solomon error correction)
-- **Manual Signaling (v0.0.1)**: Robust serverless handshake with Unicode-safe Base64 encoding.
+- **Manual Signaling (v0.0.1)**: QR/paste handshake with Unicode-safe Base64 encoding.
 - **Account Deletion (v0.0.1)**: 2-step secure wipe of private keys and local data.
 - Message search across encrypted conversations
 
@@ -336,20 +336,20 @@ Layer 3: P2P recovery
 
 |Threat               |Protection                                          |
 |---------------------|----------------------------------------------------|
-|Server breach        |No server exists to breach                          |
+|Server breach        |No company server; hosts see only ciphertext        |
 |Man-in-the-middle    |ECDH key exchange + message authentication          |
 |Message tampering    |SHA-256 blockchain chain verification               |
-|Key compromise       |Forward secrecy via Double Ratchet                  |
 |Data theft (device)  |AES-256-GCM encryption at rest with key wrapping    |
 |Backup compromise    |Shamir’s Secret Sharing — single fragment is useless|
-|Identity theft       |BIP39 seed phrase derives all keys deterministically|
+|Identity theft       |The phrase derives the mesh identity and the storage keys; the chat key is random, wrapped under a phrase-derived key|
 |Data destruction     |2-step secure Account Deletion (wipes hardware storage)|
-|Metadata surveillance|P2P direct — no central logs, no connection records |
+|Metadata surveillance|Partial: no accounts; hosts see IPs and timing      |
 |Replay attacks       |Unique IV per message + blockchain ordering         |
 
 ### What GhostLink does NOT protect against
 
 - Compromised device (keylogger, screen capture malware)
+- Network metadata: the bootstrap peer, relays and mailbox hosts see your IP address and when you connect
 - Peer collusion (3+ peers colluding could reconstruct your backup)
 - Seed phrase theft (if someone gets your 12 words, they own your identity)
 - Endpoint visibility (messages are readable once decrypted on-screen)
@@ -362,7 +362,6 @@ Layer 3: P2P recovery
 |Key agreement       |ECDH                 |P-256 (secp256r1)             |
 |Symmetric encryption|AES-GCM              |256-bit key, 96-bit IV        |
 |Key derivation      |PBKDF2               |SHA-256, 100K iterations      |
-|Forward secrecy     |X3DH + Double Ratchet|Signal Protocol               |
 |Message integrity   |SHA-256              |Chained hashes (blockchain)   |
 |Backup splitting    |Shamir SSS           |GF(256), 7 shares, threshold 3|
 |Identity seed       |BIP39                |128-bit entropy, 12 words     |

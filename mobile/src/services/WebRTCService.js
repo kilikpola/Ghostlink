@@ -22,14 +22,21 @@ import {
 
 // ─── ICE Configuration ──────────────────────────────────────────────────────
 
-const DEFAULT_ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-  iceCandidatePoolSize: 10,
-  iceTransportPolicy: 'all',
-};
+/**
+ * Third-party STUN is OFF unless the user opts in (settings.useGoogleStun),
+ * matching the web client's getIceServers(): a STUN server learns the user's
+ * public IP. With it off, WebRTC gathers host candidates only, so direct
+ * connections work on the same network.
+ */
+export function iceConfigFor(settings) {
+  const iceServers = settings && settings.useGoogleStun === true
+    ? [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ]
+    : [];
+  return { iceServers, iceCandidatePoolSize: 10, iceTransportPolicy: 'all' };
+}
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -143,10 +150,8 @@ class WebRTCService extends Emitter {
    */
   constructor(options = {}) {
     super();
-    /** @private */ this._iceConfig = {
-      ...DEFAULT_ICE_CONFIG,
-      ...(options.iceConfig || {}),
-    };
+    /** @private */ this._iceOverride = options.iceConfig || {};
+    /** @private */ this._iceConfig = { ...iceConfigFor({}), ...this._iceOverride };
     /** @private @type {Map<string, PeerSession>} */
     this._peers = new Map();
     this._gmpActive = false;
@@ -286,6 +291,16 @@ class WebRTCService extends Emitter {
   }
 
   // ── Connection Creation ─────────────────────────────────────────────────
+
+  /**
+   * Apply the user's ICE settings (useGoogleStun). Takes effect for
+   * connections created after the call; open connections keep their config.
+   *
+   * @param {object} settings App settings.
+   */
+  setIceSettings(settings) {
+    this._iceConfig = { ...iceConfigFor(settings), ...this._iceOverride };
+  }
 
   /**
    * Create a new RTCPeerConnection to a remote peer and initiate the

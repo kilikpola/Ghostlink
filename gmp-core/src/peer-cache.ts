@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { DEFAULTS } from './config-defaults.js';
 import { StateAuthenticationError } from './types.js';
-import { refuse } from './state-refusal.js';
+import { refuse, unauthenticatedFileSignature } from './state-refusal.js';
 import logger from './logger.js';
 import { PEER_CACHE_FILE } from './paths.js';
 import { writeFileAtomicSync, cleanStaleTempFiles } from './atomic-file.js';
@@ -13,6 +13,8 @@ import type { CachedPeer } from './types.js';
 const DEFAULT_CACHE_FILE = PEER_CACHE_FILE;
 
 export class PeerCache {
+  /** Signature of the last state file reported as unauthenticatable (log once). */
+  private _unauthenticatedSeen: string | null = null;
   private filePath: string;
   /** Read by key rotation (via PeerCacheLike) to find a rotated peer's entry. */
   cache: CachedPeer[];
@@ -85,7 +87,14 @@ export class PeerCache {
    * GMP_STRICT_STATE.
    */
   private _onUnauthenticatedState(error: Error): void {
-    logger.error(
+    // One file in one state under one key is reported once: the same bytes are
+    // re-read when the key is set again during identity load and by the merge
+    // in save(), and each read used to log this again. The read result (and
+    // the strict-mode refusal below) is unchanged.
+    const seen = unauthenticatedFileSignature(this.filePath, this.encryptionKey);
+    const repeat = seen !== null && seen === this._unauthenticatedSeen;
+    this._unauthenticatedSeen = seen;
+    if (!repeat) logger.error(
       'peer-cache',
       'state-authentication-failed',
       `Peer cache exists but could not be authenticated; discarding it: ${error.message}`,

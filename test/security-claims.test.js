@@ -8,7 +8,9 @@
  */
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 function extract(name) {
@@ -175,5 +177,130 @@ ok(!/Encrypted channel established/.test(rendered), 'the false empty-state "Encr
 ok(!/E2E encrypted · P2P`/.test(rendered), 'the unverifiable "· P2P" was dropped from the conversation-header subtitle');
 ok(/No messages yet/.test(rendered), 'the empty state now reads the honest "No messages yet" + capability line');
 
-console.log(`\nResults: ${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+(async () => {
+  const { absenceAsserter } = await import(pathToFileURL(path.join(__dirname, '..', 'gmp-core', 'test', 'helpers', 'assert-absent.mjs')).href);
+  const { assertAbsent } = absenceAsserter(ok);
+
+  console.log('\n=== B1: removed security claims are absent from every shipped surface ===');
+  // electron/dist is a stale packaged copy (rebuilt in Task C) and is not scanned.
+  const SCANNED = [
+    'README.md', 'landing.html', 'index.html', 'package.json',
+    'electron/package.json', 'electron/src/main.js', 'SECURITY.md',
+    'gmp-core/SECURITY.md', 'docs/GHOST_MESH.md',
+    'src/license/workspace-manager.js', 'src/license/workspace-components.js',
+  ];
+  // [what the control plants, the matcher the scan uses]
+  const REMOVED = [
+    ['Signal Protocol', /Signal Protocol/i],
+    ['X3DH', /X3DH/i],
+    ['Double Ratchet', /Double Ratchet/i],
+    ['Zero Servers', /zero[\s-]*servers?\b/i],
+    ['serverless', /serverless/i],
+    ['No server exists to breach', /No server exists to breach/i],
+    ['Perfect Forward Secrecy', /Perfect Forward Secrecy/i],
+    ['for forward secrecy', /for forward secrecy|forward secrecy key rotations?/i],
+    // B3: hosts see IP addresses and connection times; mailboxes hold sealed blobs.
+    ['Zero Trace', /zero[\s-]*trace/i],
+    ['leaves no trace', /\bno trace\b/i],
+    ['No metadata', /\bno metadata\b/i],
+    ['never leave your device', /never leave your device/i],
+    ['no central logs', /no central logs/i],
+    // B4: nothing here is a zero-knowledge proof; the identity is a key the user holds.
+    ['Zero-knowledge', /zero[\s-]*knowledge/i],
+    ['derives all keys', /derives all keys/i],
+  ];
+  const repoRoot = path.join(__dirname, '..');
+  // The one file-reading channel both the control and the absence go through.
+  const readScanned = (root, rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+  const hits = (text) => {
+    const found = [];
+    text.split('\n').forEach((line, i) => {
+      for (const [label, re] of REMOVED) if (re.test(line)) found.push(`${label}@${i + 1}`);
+    });
+    return found;
+  };
+  // landing.html is gitignored (.gitignore:75): scanned where it exists, and
+  // reported as skipped (never as passing) in a checkout that lacks it.
+  const LOCAL_ONLY = new Set(['landing.html']);
+  const plantRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gl-claims-'));
+  try {
+    for (const rel of SCANNED) {
+      if (LOCAL_ONLY.has(rel) && !fs.existsSync(path.join(repoRoot, rel))) {
+        console.log(`  - skipped: ${rel} is not in this checkout (gitignored) — not scanned`);
+        continue;
+      }
+      const real = hits(readScanned(repoRoot, rel));
+      fs.mkdirSync(path.dirname(path.join(plantRoot, rel)), { recursive: true });
+      fs.writeFileSync(path.join(plantRoot, rel),
+        readScanned(repoRoot, rel) + '\n' + REMOVED.map(([plant]) => plant).join('\n') + '\n');
+      assertAbsent({
+        channel: `scan of ${rel}`,
+        controlMessage: `every removed phrase planted in a temp copy of ${rel} is found`,
+        control: () => {
+          const labels = new Set(hits(readScanned(plantRoot, rel)).map((h) => h.split('@')[0]));
+          return REMOVED.every(([label]) => labels.has(label)) ? [...labels] : [];
+        },
+        absent: () => hits(readScanned(repoRoot, rel)).length === 0,
+        message: `${rel}: no removed security claim${real.length ? ` (found: ${real.join(', ')})` : ''}`,
+      });
+    }
+  } finally {
+    fs.rmSync(plantRoot, { recursive: true, force: true });
+  }
+
+  console.log('\n=== B1: roadmap COMPLETED lists only reachable, implemented features ===');
+  const completedList = () => {
+    const start = html.indexOf('/> COMPLETED');
+    const end = html.indexOf('IN PROGRESS', start);
+    return start < 0 || end < 0 ? '' : html.slice(start, end);
+  };
+  const NOT_COMPLETED = [
+    'Voice messages with waveform',      // startRecording is never called
+    'Group key agreement',               // createGroup agrees no key
+    'Offline message queue (IndexedDB',  // no IndexedDB queue exists
+    "Shamir's Secret Sharing backup",    // fragments cannot be sent (GUARDIAN_RECOVERY_AVAILABLE = false)
+    'Push notifications (web)',          // local Notification API only, no push service
+  ];
+  for (const item of NOT_COMPLETED) {
+    assertAbsent({
+      channel: 'roadmap COMPLETED list',
+      controlMessage: 'the slice holds a known completed item ("Hash-chain explorer")',
+      control: () => completedList().includes('"Hash-chain explorer"'),
+      absent: () => !completedList().includes(item),
+      message: `"${item}" is not listed as COMPLETED`,
+    });
+  }
+
+  console.log('\n=== B3: no biometric AVAILABLE indicator without a biometric unlock ===');
+  // A rendered "AVAILABLE"/"ENABLED"/"ON" within reach of "Biometric".
+  const biometricClaims = (src) =>
+    [...src.matchAll(/Biometric[\s\S]{0,600}?['"`>](AVAILABLE|ENABLED|ACTIVE|ON)['"`<]/g)].map((m) => m[1]);
+  // An unlock implementation would have to ask the platform authenticator for an assertion.
+  const hasBiometricUnlock = (src) => /navigator\.credentials\.get\(\s*\{[\s\S]{0,200}publicKey/.test(src);
+  assertAbsent({
+    channel: 'biometric indicator scan of index.html',
+    controlMessage: 'the scan finds the indicator as it was rendered before B3',
+    control: () => biometricClaims(
+      '<span>Biometric Unlock</span>\n<${Tag} color=${c}>\n${biometricStatus === \'available\' ? \'AVAILABLE\' : \'NOT SUPPORTED\'}'),
+    absent: () => biometricClaims(html).length === 0 || hasBiometricUnlock(html),
+    message: `index.html shows no biometric AVAILABLE indicator unless an unlock exists (found: ${JSON.stringify(biometricClaims(html))}, unlock implemented: ${hasBiometricUnlock(html)})`,
+  });
+
+  console.log('\n=== B3: a created group claims no presence and no E2E ===');
+  {
+    // Run the real createGroup (a component-scope const) with stubbed setters.
+    const start = html.indexOf('const createGroup = () => {');
+    const src = start < 0 ? '' : html.slice(start, html.indexOf('\n  };', start) + 5);
+    let added = [];
+    const run = new Function('groupName', 'selectedGroupPeers', 'setActiveGroups', 'setPeers', 'setShowGroupCreator',
+      'setGroupName', 'setSelectedGroupPeers', 'addToast', 'th', `${src}\n createGroup();`);
+    run('Team', ['p1', 'p2'], () => {}, (fn) => { added = fn([]); }, () => {}, () => {}, () => {}, () => {}, { accent3: '#0f0' });
+    const group = added.find((p) => p.type === 'group');
+    ok(!!group, 'createGroup ran and added a group entry to the peer list (channel is live)');
+    ok(group && group.status !== 'online', `the group entry does not claim to be online (status: ${JSON.stringify(group && group.status)})`);
+    ok(group && peerLiveSecurityTags(group).length === 0, 'the group entry gets no E2E ENCRYPTED tag (no group key agreement exists)');
+  }
+
+  console.log(`\nResults: ${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });

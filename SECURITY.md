@@ -17,10 +17,10 @@ is 40 bits. It follows that:
 - anyone who reads the client can mint valid license keys offline;
 - anyone can patch the check out of their own copy of the app.
 
-This is not fixable while GhostLink keeps its zero-server design: a check that
-runs only on the user's machine can always be bypassed by that user, and
-verifying licenses against a server would contradict the "zero servers"
-promise. We accept it deliberately.
+This is not fixable while GhostLink keeps its no-company-server design: a check
+that runs only on the user's machine can always be bypassed by that user, and
+verifying licenses against a company server would contradict that design. We
+accept it deliberately.
 
 What this means in practice:
 

@@ -153,6 +153,7 @@ class GMPNode extends EventEmitter {
     minPeers = null,
     bootstrapParallelCount = 5,
     disableBootstrap = false,
+    inboundOnly = false,
     lanDiscovery = null,
     lanDiscoveryPort = null,
     lanDiscoveryGroup = null,
@@ -178,6 +179,22 @@ class GMPNode extends EventEmitter {
     // Injectable transport; the TCP default is loaded lazily so platforms
     // without `net` can still construct a node with their own transport.
     this.transport = transport || new (requireLocal('./transport/tcp-transport.js').TcpTransport)();
+    // An inbound-only node (the storage peer) opens no outbound connection of
+    // any kind. Enforced on the transport itself, so every path — dial(),
+    // hole punching, relay hops — is refused at the one place they all meet.
+    this.inboundOnly = inboundOnly === true;
+    if (this.inboundOnly) {
+      const inner = this.transport;
+      this.transport = {
+        listen: (o, cb) => inner.listen(o, cb),
+        dial: (o) => {
+          logger.warn('node', 'outbound-refused', 'Inbound-only node: refusing an outbound connection', { address: o && o.host, port: o && o.port });
+          return Promise.reject(new Error('This node is inbound-only and opens no outbound connections'));
+        },
+        ...(inner.adopt ? { adopt: (s) => inner.adopt(s) } : {}),
+        close: () => inner.close(),
+      };
+    }
     this.listener = null;
     this.links = new Map();
     this.identity = null;

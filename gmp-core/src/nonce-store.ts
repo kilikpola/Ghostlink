@@ -9,7 +9,7 @@ import { writeFileAtomicSync, cleanStaleTempFiles } from './atomic-file.js';
 import { withFileLock } from './file-lock.js';
 import { ClaimLog, type ClaimRecord } from './claim-log.js';
 import { StateAuthenticationError } from './types.js';
-import { refuse } from './state-refusal.js';
+import { refuse, unauthenticatedFileSignature } from './state-refusal.js';
 
 // Resolved from the package root, not process.cwd(), so every launch location
 // shares one state file.
@@ -90,6 +90,8 @@ export function deriveNonceStoreKey(secret: string | Uint8Array): Buffer {
 }
 
 export class NonceStore extends EventEmitter<NoEvents> {
+  /** Signature of the last state file reported as unauthenticatable (log once). */
+  private _unauthenticatedSeen: string | null = null;
   private stateFile: string;
   private pruneAgeMs: number;
   private state: NonceState;
@@ -214,7 +216,14 @@ export class NonceStore extends EventEmitter<NoEvents> {
    * GMP_STRICT_STATE.
    */
   private _onUnauthenticatedState(error: Error): void {
-    logger.error(
+    // One file in one state under one key is reported once: the same bytes are
+    // re-read when the key is set again during identity load and by the merge
+    // in save(), and each read used to log this again. The read result (and
+    // the strict-mode refusal below) is unchanged.
+    const seen = unauthenticatedFileSignature(this.stateFile, this.encryptionKey);
+    const repeat = seen !== null && seen === this._unauthenticatedSeen;
+    this._unauthenticatedSeen = seen;
+    if (!repeat) logger.error(
       'nonce-store',
       'state-authentication-failed',
       `Nonce state file exists but could not be authenticated; replay protection is being reset: ${error.message}`,

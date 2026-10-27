@@ -49,7 +49,7 @@ const SOURCE = [
   'ghostAddressFromNodeId', 'normalizeGhostAddress', 'isGhostAddress', 'isNodeIdHex',
   'KNOWN_PEERS_KEY', 'BLOCKED_PEERS_KEY', 'KNOWN_PEERS_MAX',
   'loadBlockedPeers', 'setPeerBlocked', 'loadKnownPeers', 'rememberKnownPeer', 'forgetKnownPeer',
-  'getGmpPort', 'isTrustedBridgeTarget', 'getBridgeWsUrl',
+  'getGmpPort', 'isTrustedBridgeTarget', 'getBridgeWsUrl', 'openBridgeSocket',
   'MESH_TRANSPORT_LABELS', 'meshModeLabel',
   'GMPBridgeConnector'
 ].map(extract).join('\n\n');

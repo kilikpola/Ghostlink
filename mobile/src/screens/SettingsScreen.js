@@ -34,7 +34,7 @@ const SECURITY_INFO = [
 export default function SettingsScreen({navigation}) {
   const {theme, fontSize, setFontSize} = useTheme();
   const insets = useSafeAreaInsets();
-  const {identity, messages, wipeAll, ghostMesh, setGhostMesh} = useApp();
+  const {identity, messages, wipeAll, ghostMesh, setGhostMesh, settings, updateSettings} = useApp();
   const [pubKeyCopied, setPubKeyCopied] = useState(false);
   const [showMeshSetup, setShowMeshSetup] = useState(false);
 
@@ -279,6 +279,30 @@ export default function SettingsScreen({navigation}) {
             <Text style={[styles.actionText, {color: theme.text}]}>Back Up Identity</Text>
             <Icon name="chevronRight" size={20} color={theme.textMuted} />
           </TouchableOpacity>
+        </View>
+
+        {/* ── Network ── */}
+        <View style={[styles.card, {backgroundColor: theme.bgSecondary, borderColor: theme.border}]}>
+          <Text style={[styles.sectionLabel, {color: theme.textSecondary}]} accessibilityRole="header">Network</Text>
+          <View style={styles.toggleRow}>
+            <View style={{flex: 1}}>
+              <Text style={[styles.toggleLabel, {color: theme.text}]}>Use Google's STUN server</Text>
+              <Text style={{fontSize: 13, color: theme.textSecondary, marginTop: 2, lineHeight: 18}}>
+                Off by default. Google's STUN server helps calls and direct connections reach you across NAT — but
+                Google will see your IP address. With it off, direct connections work on the same network only.
+              </Text>
+            </View>
+            <Switch
+              value={settings?.useGoogleStun === true}
+              onValueChange={v => {
+                Vibration.vibrate(10);
+                updateSettings({useGoogleStun: v});
+              }}
+              trackColor={{false: theme.bgTertiary, true: theme.accent + '50'}}
+              thumbColor={settings?.useGoogleStun === true ? theme.accent : theme.textMuted}
+              accessibilityLabel="Use Google's STUN server"
+            />
+          </View>
         </View>
 
         {/* ── Ghost Mesh (Advanced) ── */}

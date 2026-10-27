@@ -41,6 +41,8 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
   /** How the last run ended: winning rung (or 'manual'), elapsed ms, dials cancelled. */
   lastRun: { rung: LadderRung | 'connected' | 'manual' | null; ms: number; cancelled: number; attempts: number } | null = null;
   private _run: LadderRun | null = null;
+  /** The connected set last reported as "every known host connected"; logged once per change. */
+  private _allKnownConnectedSig: string | null = null;
   private rebootstrapBackoffInitialMs: number;
   /** Moved only by the bootstrap flow; exposed for metrics. */
   private _stage: BootstrapStage;
@@ -171,6 +173,18 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
       run.rung = 'connected';
     }
 
+    // A tiny network: connected, below minPeers, and nothing left to dial —
+    // every known host is already linked (or role-blocked). Running the ladder
+    // would dial nobody and log a failure; the health monitor would repeat
+    // that every check, forever. Say it once per change and wait: a new
+    // candidate (peer exchange, cache) or a dropped link brings the ladder back.
+    if (!run.won && this.minPeers > 0 && this.getDirectConnectionCount() > 0 && !this.hasUntriedCandidates()) {
+      this._run = null;
+      this._reportAllKnownConnected(run);
+      return;
+    }
+    this._allKnownConnectedSig = null;
+
     for (const r of rungs) {
       if (run.won) break;
       this._stage = r.stage;
@@ -190,6 +204,9 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
       logger.info('bootstrap', 'complete', `Bootstrap reached the mesh via ${run.rung} in ${this.lastRun.ms} ms`, { ...this.lastRun, peersConnected: count });
       this.emit('bootstrap-complete', count);
       this.node.emit('bootstrap-complete', count);
+      // Short of minPeers with nobody left to try: say so once, here, rather
+      // than through a failing re-run later.
+      if (this.minPeers > 0 && count > 0 && count < this.minPeers && !this.hasUntriedCandidates()) this._noteAllKnownConnected(count);
       return;
     }
 
@@ -213,12 +230,23 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
     this.lastRun = { rung: 'manual', ms: Date.now() - run.t0, cancelled: run.cancelled, attempts: this.attemptLog.length };
 
     const diagnosis = this.diagnose();
-    logger.warn('bootstrap', 'failed', `Bootstrap reached no peer in ${this.lastRun.ms} ms (connected: ${count}) — ${diagnosis.reason}; manual entry (QR / paste) is the remaining way in`, {
-      peersConnected: count,
-      reason: diagnosis.reason,
-      publicPeersConfigured: diagnosis.publicPeersConfigured,
-      peersFile: diagnosis.peersFile
-    });
+    if (count === 0) {
+      logger.warn('bootstrap', 'failed', `Bootstrap reached no peer in ${this.lastRun.ms} ms — ${diagnosis.reason}; manual entry (QR / paste) is the remaining way in`, {
+        peersConnected: count,
+        reason: diagnosis.reason,
+        publicPeersConfigured: diagnosis.publicPeersConfigured,
+        peersFile: diagnosis.peersFile
+      });
+    } else {
+      // Connected, just short of the target: not "reached no peer".
+      logger.warn('bootstrap', 'below-target', `Bootstrap found no additional peer in ${this.lastRun.ms} ms (connected to ${count}, wanted ${this.minPeers}) — ${diagnosis.reason}`, {
+        peersConnected: count,
+        minPeers: this.minPeers,
+        reason: diagnosis.reason,
+        publicPeersConfigured: diagnosis.publicPeersConfigured,
+        peersFile: diagnosis.peersFile
+      });
+    }
     this.emit('bootstrap-failed', count, diagnosis);
     this.node.emit('bootstrap-failed', count, diagnosis);
 
@@ -245,6 +273,40 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
 
   private _linked(nodeId: string): boolean {
     return !!this.node.getLinkByNodeId(nodeId) || (!!this.node.identity && nodeId === this.node.identity.nodeIdHex);
+  }
+
+  /**
+   * Is there anyone the ladder could still dial? Every rung's candidates,
+   * minus linked peers and NodeIDs the list marks without the bootstrap role
+   * (the same rule as _roleBlockedFromBootstrap, without its dial-time WARN).
+   */
+  hasUntriedCandidates(): boolean {
+    const blocked = new Set(loadPublicPeers(this.publicPeersPath || undefined)
+      .filter((e) => e.nodeId && !(e.roles || []).includes('bootstrap'))
+      .map((e) => e.nodeId!.toLowerCase()));
+    const all = [...this._cacheCandidates(), ...this._lanCandidates(), ...this._publicCandidates(), ...this._exchangeCandidates()];
+    return all.some((c) => !blocked.has(c.nodeId.toLowerCase()));
+  }
+
+  private _reportAllKnownConnected(run: LadderRun): void {
+    this._stage = 'all-known-connected';
+    this.isBootstrapping = false;
+    this.failureCount = 0;
+    const count = this.getDirectConnectionCount();
+    this.lastRun = { rung: 'connected', ms: Date.now() - run.t0, cancelled: 0, attempts: 0 };
+    this._noteAllKnownConnected(count);
+  }
+
+  /** One INFO line per distinct connected set; see start(). */
+  private _noteAllKnownConnected(count: number): void {
+    const linked = Array.from(this.node.connections.values())
+      .filter((l: GMPLinkLike) => l.state === 'connected' && !l.isVirtual && l.remoteNodeId)
+      .map((l: GMPLinkLike) => Buffer.from(l.remoteNodeId as Uint8Array).toString('hex')).sort().join(',');
+    if (linked === this._allKnownConnectedSig) return;
+    this._allKnownConnectedSig = linked;
+    logger.info('bootstrap', 'all-known-connected',
+      `Connected to every known host (${count} of the ${this.minPeers} wanted); nothing else to dial — waiting for new peers`,
+      { peersConnected: count, minPeers: this.minPeers });
   }
 
   /** Rung 1: last known good first. */
@@ -535,6 +597,7 @@ export class BootstrapManager extends EventEmitter<BootstrapEvents> {
     if (this._disableBootstrap || this.isBootstrapping || this.rebootstrapTimer) return;
     const count = this.getDirectConnectionCount();
     if (count < this.minPeers / 2) {
+      if (count > 0 && !this.hasUntriedCandidates()) return; // nothing new to dial; see start()
       this.failureCount = 0;
       const delay = this.rebootstrapBackoffInitialMs;
       logger.info('bootstrap', 'trigger-rebootstrap', `Peers below critical threshold (${count} < ${this.minPeers / 2}). Scheduling re-bootstrap in ${delay}ms.`, { peersConnected: count });
@@ -606,7 +669,7 @@ export function classifyDialError(err: NodeJS.ErrnoException | null | undefined)
 }
 
 export type LadderRung = 'cache' | 'lan' | 'public' | 'peer-exchange';
-export type BootstrapStage = 'stage1' | 'lan' | 'stage2' | 'peer-exchange' | 'failed' | 'sufficient';
+export type BootstrapStage = 'stage1' | 'lan' | 'stage2' | 'peer-exchange' | 'failed' | 'sufficient' | 'all-known-connected';
 
 interface LadderRun {
   won: boolean;

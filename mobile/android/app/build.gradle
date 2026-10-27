@@ -63,6 +63,10 @@ android {
     if (keystorePropsFile.exists()) {
         keystoreProps.load(new FileInputStream(keystorePropsFile))
     }
+    // Defined only when every field is set: a partial file would otherwise
+    // fail configuration (debug builds included) with an unhelpful
+    // "path may not be null". The task-graph check below names what is missing.
+    def releaseSigningComplete = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].every { keystoreProps[it] }
 
     signingConfigs {
         debug {
@@ -71,7 +75,7 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
-        if (keystorePropsFile.exists()) {
+        if (releaseSigningComplete) {
             release {
                 storeFile file(keystoreProps['storeFile'])
                 storePassword keystoreProps['storePassword']
@@ -85,7 +89,7 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            if (keystorePropsFile.exists()) {
+            if (releaseSigningComplete) {
                 signingConfig signingConfigs.release
             }
             minifyEnabled enableProguardInReleaseBuilds

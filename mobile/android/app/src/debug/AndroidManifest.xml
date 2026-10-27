@@ -2,8 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Debug only: Metro serves the JS bundle over plain http. The main
+         manifest sets this false, so the debug value must replace it. -->
     <application
         android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic"
         tools:targetApi="28"
         tools:ignore="GoogleAppIndexingWarning"/>
 </manifest>

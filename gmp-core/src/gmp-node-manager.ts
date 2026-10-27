@@ -93,17 +93,27 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
   /**
    * Learn this node's external address from a public peer via BINDING_REQUEST.
    * Runs once per peer-connected until it succeeds.
+   *
+   * Asks only bootstrap-role entries, and never this node itself: each query
+   * is an outbound dial, and a dial makes the target a dialable direct peer in
+   * this node's cache — the set peer exchange offers for 24 h. Querying a
+   * storage-only host made it a peer-exchange offer from every public peer.
+   * An inbound-only node (the storage peer) asks nobody.
    */
   private async discoverExternalAddress(): Promise<void> {
     if (!this._node || this.externalAddress || this.discoveringExternal) return;
-    const peers = loadPublicPeers();
+    if (this.options.inboundOnly) return;
+    const self = this._node.identity ? this._node.identity.nodeIdHex.toLowerCase() : null;
+    const peers = loadPublicPeers().filter((p) =>
+      (p.roles || []).includes('bootstrap') && !(self && p.nodeId && p.nodeId.toLowerCase() === self));
     if (peers.length === 0) return;
 
     this.discoveringExternal = true;
     try {
       const found = await queryPublicAddress(this._node as never, peers, 5000);
       this.externalAddress = found;
-      logger.info('gmp-node-manager', 'external-address', `External address is ${found.address}:${found.port}`, found);
+      // The address stays out of msg: meta is redacted by the logger, msg is not.
+      logger.info('gmp-node-manager', 'external-address', 'External address learned from a public peer', found);
       this.emit('external-address', found);
     } catch (e) {
       const err = e as Error;
@@ -165,6 +175,7 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
       seedPhrase,
       transport: this.options.transport,
       ...(this.options.disableBootstrap ? { disableBootstrap: true } : {}),
+      ...(this.options.inboundOnly ? { inboundOnly: true } : {}),
     };
 
     this._node = createGMPNode(nodeOptions as CreateNodeOptions);

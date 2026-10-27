@@ -105,3 +105,7 @@ mobile/ios/*.xcodeproj/project.xcworkspace/xcuserdata/
 mobile/ios/.xcode.env.local
 mobile/ios/main.jsbundle
 mobile/ios/*.ipa
+
+# All Markdown is kept out of the tree (owner decision, 2026-10-28). Files
+# already tracked stay tracked; new .md files need `git add -f`.
+*.md

@@ -487,7 +487,7 @@
           )
         ),
         React.createElement("p", { style: { fontSize: 11, color: "#5a5a6a", marginBottom: 16, lineHeight: 1.5 } },
-          "Establish an independent collaborative environment with its own private blockchain ledger and forward secrecy key rotations."
+          "Establish an independent collaborative environment with its own private blockchain ledger and workspace key rotation."
         ),
         React.createElement("input", {
           type: "text",

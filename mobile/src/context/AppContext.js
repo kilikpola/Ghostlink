@@ -278,6 +278,11 @@ function AppProvider({children}) {
     WebRTCService.setMeshBridge(url || null, null);
   }, [state.settings?.meshBridgeUrl]);
 
+  // Third-party STUN only when the user opted in (Settings → Network).
+  useEffect(() => {
+    WebRTCService.setIceSettings(state.settings || {});
+  }, [state.settings?.useGoogleStun]);
+
   useEffect(() => {
     (async () => {
       // Upgrade first: seal plaintext secrets, delete the retired

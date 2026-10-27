@@ -645,7 +645,7 @@
         this._meshListeners = [un1, un2, un3];
         
         if (localStorage.getItem('gl_yggdrasil_enabled') === 'true') {
-          gm.startServer()
+          gm.startServer(localStorage.getItem('gl_yggdrasil_address') || '')
             .then((res) => {
               // A failed listen resolves as { success: false } rather than rejecting.
               if (res && res.success === false) console.warn('[GhostMesh] Auto-start server failed:', res.error);

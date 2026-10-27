@@ -1,6 +1,6 @@
 # Ghost Mesh Mode — Yggdrasil Integration
 
-Ghost Mesh is an advanced, decentralized transport layer for GhostLink built directly on top of the **Yggdrasil** network. It provides direct, serverless, metadata-minimizing P2P transport.
+Ghost Mesh is an advanced, decentralized transport layer for GhostLink built directly on top of the **Yggdrasil** network. It provides direct, metadata-minimizing P2P transport.
 
 ---
 

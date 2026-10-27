@@ -29,13 +29,18 @@ export function cliManagerOptions({ seedPhrase, isPublic, env, configuredPort }:
   return options;
 }
 
-/** `gmp storage-peer`: blobs only, no bootstrap, no LAN beacons, no mailbox. */
+/**
+ * `gmp storage-peer`: blobs only, no bootstrap, no LAN beacons, no mailbox,
+ * and no outbound connection of any kind (inboundOnly): it must never become
+ * some other node's dialable direct peer, so it never appears in peer exchange.
+ */
 export function storagePeerManagerOptions({ seedPhrase }: { seedPhrase: string }): Record<string, unknown> {
   return {
     seedPhrase,
     GMP_STORAGE_ENABLED: true,
     GMP_LAN_DISCOVERY: false,
     disableBootstrap: true,
+    inboundOnly: true,
     storeForward: false,
   };
 }

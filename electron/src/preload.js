@@ -30,6 +30,7 @@ const INVOKE_CHANNELS = [
   'ghostmesh-send',
   'ghostmesh-close',
   'gmp-start',
+  'gmp-restore',
   'contact-vault-key',
   'secure-storage-status',
   'bridge-token',
@@ -108,7 +109,7 @@ contextBridge.exposeInMainWorld('ghostlink', {
 
   /* ── Ghost Mesh ─────────────────────────────────────────────── */
   ghostMesh: {
-    startServer: () => secureInvoke('ghostmesh-start-server'),
+    startServer: (bindAddress) => secureInvoke('ghostmesh-start-server', bindAddress),
     stopServer: () => secureInvoke('ghostmesh-stop-server'),
     dial: (host, port) => secureInvoke('ghostmesh-dial', { host, port }),
     send: (connId, data) => secureInvoke('ghostmesh-send', { connId, data }),
@@ -120,6 +121,7 @@ contextBridge.exposeInMainWorld('ghostlink', {
 
   gmp: {
     start: (seed) => secureInvoke('gmp-start', seed),
+    restore: (phrase, confirmedNodeId, replaceConfirmation) => secureInvoke('gmp-restore', phrase, confirmedNodeId, replaceConfirmation),
   },
 
   /* ── Contact vault key (OS keyring, fail-closed) ────────────────

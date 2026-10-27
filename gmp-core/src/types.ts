@@ -320,6 +320,8 @@ export interface GMPNodeManagerOptions extends Partial<GMPConfig> {
   isPublicPeer?: boolean;
   /** Forwarded to GMPNode: no bootstrap dialling (a self-hosted storage peer needs none). */
   disableBootstrap?: boolean;
+  /** Forwarded to GMPNode: open no outbound connection at all (the storage peer). */
+  inboundOnly?: boolean;
   /** Run the store-and-forward client (default true; a storage peer has no mailbox of its own). */
   storeForward?: boolean;
 }
@@ -354,6 +356,8 @@ export interface GMPNodeConstructorOptions {
   lanDiscoveryPort?: number;
   lanDiscoveryGroup?: string;
   disableBootstrap?: boolean;
+  /** Refuse every outbound connection on the transport (the storage peer serves inbound only). */
+  inboundOnly?: boolean;
   bootstrapParallelCount?: number;
   isPublicPeer?: boolean;
   /**
@@ -509,6 +513,8 @@ export interface BootstrapLike {
   isBootstrapping: boolean;
   start(): Promise<void>;
   attemptCandidates(): void;
+  /** False when every known host is linked or role-blocked (nothing to dial). */
+  hasUntriedCandidates?(): boolean;
 }
 
 // ── Health ──────────────────────────────────────────

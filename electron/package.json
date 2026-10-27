@@ -1,7 +1,7 @@
 {
   "name": "ghostlink-desktop",
   "version": "0.0.3",
-  "description": "GhostLink — Zero Trust, Zero Trace, Zero Servers",
+  "description": "GhostLink — no company server; network hosts are replaceable peers that see only ciphertext",
   "author": {
     "name": "GhostLink",
     "email": "ghostlink@proton.me"
@@ -10,7 +10,9 @@
   "license": "GPL-3.0",
   "main": "src/main.js",
   "scripts": {
+    "prestart": "node scripts/build-inputs.cjs",
     "start": "electron .",
+    "predev": "node scripts/build-inputs.cjs",
     "dev": "electron . --dev",
     "prebuild:dir": "node scripts/prepare-packaging.cjs",
     "build:dir": "electron-builder --dir",

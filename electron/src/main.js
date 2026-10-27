@@ -1,6 +1,6 @@
 /**
  * GhostLink Desktop — Main Process
- * Zero Trust · Zero Trace · Zero Servers
+ * No company server; network hosts are replaceable peers that see only ciphertext.
  *
  * Electron main process handling window management, tray, IPC,
  * native integrations, security policies, and auto-updates.
@@ -35,6 +35,14 @@ const { createTray, updateBadge, flashTray, destroyTray } = require('./tray');
 const { initUpdater, updateReady, quitAndInstall } = require('./updater');
 const { getContactVaultKey, secureStorageStatus } = require('./contact-key');
 const { createSeedStore } = require('./seed-store');
+const { createRestoreGuard } = require('./restore-guard');
+const { selectKeyringBackend } = require('./keyring-backend');
+
+// Before app 'ready': on Hyprland/Sway/i3 and other desktops Chromium does not
+// recognise, use a running Secret Service instead of basic_text. Fail-closed is
+// unchanged when none is found (seed-store.js). See keyring-backend.js.
+const keyringChoice = selectKeyringBackend({ app });
+console.log(`[GhostLink] secure storage: ${keyringChoice.action} (desktop ${keyringChoice.desktop || 'unset'})`);
 let gmpManager = null;
 let gmpBridge = null;
 let gmpStarting = null;
@@ -134,12 +142,54 @@ const seedStore = createSeedStore({ safeStorage, store });
 const setStoredSeed = (seed) => seedStore.setSeed(seed);
 const getStoredSeed = () => seedStore.getSeed();
 
+/**
+ * Restore from a recovery phrase: derive and compare the NodeID before any
+ * write or node start (restore-guard.js). Derivation imports gmp-core lazily,
+ * like startGMPNode, and starts nothing.
+ */
+const restoreGuard = createRestoreGuard({
+  deriveIdentity: async (phrase) => {
+    const core = (name) => import(pathToFileURL(path.join(GMP_CORE_DIR, 'dist', name)).href);
+    const { deriveIdentityFromSeedPhrase } = await core('identity.js');
+    const { ghostAddressFromNodeId } = await core('ghost-address.js');
+    const { nodeIdHex } = await deriveIdentityFromSeedPhrase(phrase);
+    return { nodeIdHex, ghostAddress: ghostAddressFromNodeId(nodeIdHex) };
+  },
+  getStoredSeed,
+  setStoredSeed,
+  startNode: (phrase) => startGMPNode(phrase),
+  getStoredSeedState: () => seedStore.readState(),
+  moveSeedAside: () => seedStore.moveAside(),
+  restoreSeedAside: (asideKey) => seedStore.restoreAside(asideKey),
+});
+
 /* ─── Ghost Mesh TCP bridge state ───────────────────────────── */
-// Must differ from the GMP node's port (default 49500): both bind [::] in this
-// process. The renderer dials without a port and gets this.
+// Must differ from the GMP node's port (default 49500). The renderer dials
+// without a port and gets this.
 const GHOSTMESH_PORT = 49600;
 let ghostMeshServer = null;
 const activeMeshSockets = new Map(); // connId -> net.Socket
+
+// Ghost Mesh rides the Yggdrasil overlay (0200::/7), whose addresses are
+// reachable only between Yggdrasil peers over the tun interface — never from
+// the public internet. We bind the server and dial peers ONLY within that
+// space (plus loopback for local testing), so the mesh is never exposed on the
+// host's global IPv6 or LAN addresses the way the old `[::]` bind was (which,
+// on a host with a public IPv6 and no blocking firewall, was internet-reachable).
+function normalizeMeshHost(host) {
+  if (typeof host !== 'string') return '';
+  return host.trim().replace(/^\[/, '').replace(/\]$/, '');
+}
+function isMeshHost(host) {
+  const h = normalizeMeshHost(host);
+  if (!h) return false;
+  if (h === '::1' || h === '127.0.0.1') return true; // loopback (local testing)
+  if (!net.isIPv6(h)) return false;
+  // 0200::/7: the top 7 bits are 0000001, i.e. the first 16-bit group, masked
+  // with 0xfe00, equals 0x0200. Covers 0200:: through 03ff:ffff:…
+  const firstGroup = parseInt(h.split(':')[0] || '', 16);
+  return Number.isFinite(firstGroup) && (firstGroup & 0xfe00) === 0x0200;
+}
 
 /* ─── Window tracking ───────────────────────────────────────── */
 
@@ -233,6 +283,8 @@ function createMainWindow() {
           // origins and no 'unsafe-eval'.
           'Content-Security-Policy': [
             "default-src 'self' blob: data:; " +
+            // Local file:// bundle with vendored dependencies: no remote script
+            // origins and no 'unsafe-eval'.
             "script-src 'self' 'unsafe-inline'; " +
             "style-src 'self' 'unsafe-inline'; " +
             "img-src 'self' data: blob:; " +
@@ -448,7 +500,8 @@ function setupIPC() {
 
   // One source of truth for the fail-closed UI banner: is this device able to
   // protect secrets at rest at all? Used for both the seed and the contacts.
-  ipcMain.handle('secure-storage-status', () => secureStorageStatus(safeStorage));
+  // available/backend/reason, plus whether a sealed seed exists (no seed data).
+  ipcMain.handle('secure-storage-status', () => seedStore.status());
 
   ipcMain.handle('save-file', async (_e, data, filename) => {
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
@@ -488,6 +541,14 @@ function setupIPC() {
   });
 
   /* ── GMP Node/Bridge IPC Handlers ───────────────────────────── */
+  // Restore: nothing is saved and no node starts until the phrase is confirmed
+  // (restore-guard.js). gmp-start below stays for a newly created identity.
+  ipcMain.handle('gmp-restore', (_e, phrase, confirmedNodeId, replaceConfirmation) =>
+    restoreGuard.restore(phrase, {
+      confirmedNodeId: typeof confirmedNodeId === 'string' ? confirmedNodeId : null,
+      replaceConfirmation: typeof replaceConfirmation === 'string' ? replaceConfirmation : null,
+    }));
+
   ipcMain.handle('gmp-start', async (_e, seed) => {
     // Persisting the seed and running the node are independent: if secure
     // storage is unavailable we still start the session (identity works this
@@ -517,11 +578,16 @@ function setupIPC() {
   });
 
   /* ── Ghost Mesh (Yggdrasil TCP Socket Bridge) ───────────────── */
-  ipcMain.handle('ghostmesh-start-server', async () => {
+  ipcMain.handle('ghostmesh-start-server', async (_e, bindAddress) => {
     if (ghostMeshServer) {
       return { success: true, message: 'Server already running' };
     }
-    
+
+    // Bind to the renderer-supplied Yggdrasil overlay address when it is one,
+    // otherwise to loopback (feature stays local-only). NEVER [::]: that
+    // exposed the mesh on every interface, including a public IPv6.
+    const host = isMeshHost(bindAddress) ? normalizeMeshHost(bindAddress) : '::1';
+
     return new Promise((resolve) => {
       try {
         ghostMeshServer = net.createServer((socket) => {
@@ -542,9 +608,9 @@ function setupIPC() {
           resolve({ success: false, error: err.message });
         });
         
-        ghostMeshServer.listen({ host: '::', port: GHOSTMESH_PORT }, () => {
-          console.log(`[GhostMesh] Server listening on [::]:${GHOSTMESH_PORT}`);
-          resolve({ success: true });
+        ghostMeshServer.listen({ host, port: GHOSTMESH_PORT }, () => {
+          console.log(`[GhostMesh] Server listening on [${host}]:${GHOSTMESH_PORT}`);
+          resolve({ success: true, boundHost: host });
         });
       } catch (err) {
         resolve({ success: false, error: err.message });
@@ -572,6 +638,12 @@ function setupIPC() {
   });
 
   ipcMain.handle('ghostmesh-dial', async (_e, { host, port = GHOSTMESH_PORT }) => {
+    // Only dial within the Yggdrasil overlay (or loopback). This closes the
+    // arbitrary-host TCP primitive the renderer otherwise had.
+    if (!isMeshHost(host)) {
+      console.warn('[GhostMesh] Refusing dial to non-mesh host:', host);
+      return { success: false, error: 'Ghost Mesh only dials Yggdrasil overlay (0200::/7) or loopback addresses' };
+    }
     return new Promise((resolve) => {
       try {
         console.log(`[GhostMesh] Dialing ${host}:${port}...`);

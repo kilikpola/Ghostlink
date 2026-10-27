@@ -207,10 +207,15 @@ async function testDisconnectionTriggeredRebootstrap() {
   const mockLink = { state: 'connected', isVirtual: false };
   nodeClient.connections.set('mock-conn', mockLink);
 
-  // Emit close event on node (simulating link disconnect)
+  // Nothing anywhere to dial (a tiny network, every known host linked):
+  // re-running would dial nobody, so no timer — the health monitor re-checks.
   nodeClient.emit('close', { connId: 'mock-conn' });
+  assert(nodeClient.bootstrap.rebootstrapTimer === null, "No rebootstrap timer when there is nothing to dial");
 
-  // Re-bootstrap should be scheduled after 30s delay
+  // A dialable candidate exists: below threshold after a disconnect, so a
+  // re-bootstrap is scheduled (the original behaviour, unchanged).
+  nodeClient.peerCache.recordSuccess('cd'.repeat(64), '127.0.0.1', 1, null);
+  nodeClient.emit('close', { connId: 'mock-conn' });
   assert(nodeClient.bootstrap.rebootstrapTimer !== null, "Rebootstrap timer scheduled");
 
   nodeClient.close();

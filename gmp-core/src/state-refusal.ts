@@ -6,6 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { StateAuthenticationError } from './types.js';
 
 /**
@@ -80,4 +81,20 @@ export function refusalMessage(r: Refusal, now: Date = new Date()): string {
 
 export function refuse(r: Refusal): StateAuthenticationError {
   return new StateAuthenticationError(refusalMessage(r));
+}
+
+/**
+ * Identifies "this state file, as it is now, under this key" without exposing
+ * either: size, mtime and a short hash of the key. Used to report an
+ * unauthenticatable file once rather than on every re-read. null when the
+ * file cannot be stat'ed.
+ */
+export function unauthenticatedFileSignature(file: string, key: Buffer | null): string | null {
+  try {
+    const st = fs.statSync(file);
+    const keyTag = key ? createHash('sha256').update(key).digest('hex').slice(0, 16) : 'nokey';
+    return `${st.size}:${st.mtimeMs}:${keyTag}`;
+  } catch {
+    return null;
+  }
 }

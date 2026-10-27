@@ -1396,6 +1396,58 @@ const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", m
 const fmtDate = (ts) => new Date(ts).toLocaleDateString([], { month: "short", day: "numeric" });
 const fmtCallT = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
+// ==================== RECOVERY PHRASE CHECKS ====================
+// The word list, loaded on demand (the module generateSeedPhrase uses).
+async function loadRecoveryWordlist() {
+  return import('./src/utils/bip39.js');
+}
+
+// Up to `n` list words nearest to `word`: edit distance, with a bonus for a
+// shared four-letter prefix (BIP-39 words are unique in their first four).
+function closestWords(word, list, n = 3) {
+  const dist = (a, b) => {
+    const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      let diag = row[0];
+      row[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const up = row[j];
+        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+        diag = up;
+      }
+    }
+    return row[b.length];
+  };
+  return [...list].
+  map((w) => ({ w, d: dist(word, w) - (word.length >= 4 && w.startsWith(word.slice(0, 4)) ? 1 : 0) })).
+  sort((x, y) => x.d - y.d || (x.w < y.w ? -1 : 1)).
+  slice(0, n).
+  map((x) => x.w);
+}
+
+// Words not on the accepted list: 1-based position and the nearest list words.
+function unknownPhraseWords(words, wordlist) {
+  const issues = [];
+  words.forEach((w, i) => {
+    if (!wordlist.isAcceptedWord(w)) issues.push({ position: i + 1, suggestions: closestWords(w, wordlist.ACCEPTED_WORDS) });
+  });
+  return issues;
+}
+
+// BIP-39 checksum of a 12-word phrase. Phrases from older gmp-core builds
+// usually fail it, so callers warn and never reject.
+async function bip39ChecksumValid(words, bip39Words) {
+  if (words.length !== 12) return false;
+  const idx = words.map((w) => bip39Words.indexOf(w));
+  if (idx.some((i) => i < 0)) return false;
+  let bits = '';
+  for (const i of idx) bits += i.toString(2).padStart(11, '0');
+  const entropy = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) entropy[i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2);
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', entropy));
+  return bits.slice(128) === hash[0].toString(2).padStart(8, '0').slice(0, 4);
+}
+
 // ==================== RECOVERY HELPERS ====================
 
 // Build the full data blob that gets Shamir-split
@@ -1710,6 +1762,17 @@ function isTrustedBridgeTarget() {
   } catch (e) {
     return false;
   }
+}
+
+// Every WebSocket to the bridge goes through here. In Electron it presents the
+// per-launch bridge token as a subprotocol (the bridge refuses any socket
+// without it); the CLI/web build has no token and opens a plain socket.
+function openBridgeSocket() {
+  const token = typeof window !== 'undefined' ? window.__bridgeToken : undefined;
+  if (!token && typeof window !== 'undefined' && window.ghostlink && window.ghostlink.isElectron) {
+    console.error('[GMP Bridge] No bridge token in the desktop app — the bridge will refuse this connection.');
+  }
+  return new WebSocket(getBridgeWsUrl(), token ? [token] : undefined);
 }
 
 function getBridgeWsUrl() {
@@ -2322,7 +2385,7 @@ class GMPBridgeConnector {
         // Present the per-launch bridge token (Electron) as a WebSocket
         // subprotocol so the bridge accepts this renderer and rejects any other
         // local client. Absent in the CLI/web build (tokenless bridge).
-        this.ws = new WebSocket(getBridgeWsUrl(), (typeof window !== 'undefined' && window.__bridgeToken) ? [window.__bridgeToken] : undefined);
+        this.ws = openBridgeSocket();
         this.ws.onopen = () => {
           this.wsOpen = true;
           this.bridgeReachable = true;
@@ -3067,7 +3130,13 @@ function GhostLinkApp() {
   const [shamirFragments, setShamirFragments] = useState(null);
   const [setupStep, setSetupStep] = useState("name"); // "name" | "seed"
   const [pendingSeed, setPendingSeed] = useState(null);
-  const [restoreStatus, setRestoreStatus] = useState(null); // null|"loading"|"ok"|"error"|"wrongseed"|"noloc"
+  const [restoreStatus, setRestoreStatus] = useState(null); // null|"loading"|"ok"|"error"|"wrongseed"|"noloc"|"badword"|"confirm"|"mismatch"|"restorefailed"
+  const [restoreWordIssues, setRestoreWordIssues] = useState([]); // [{ position, suggestions }]
+  const [restoreChecksumWarning, setRestoreChecksumWarning] = useState(false);
+  const [restorePending, setRestorePending] = useState(null); // { nodeIdHex, ghostAddress } awaiting confirmation
+  const [restoreMismatch, setRestoreMismatch] = useState(null); // { ghostAddress, storedGhostAddress }
+  const [restoreError, setRestoreError] = useState('');
+  const [restoreReplaceWord, setRestoreReplaceWord] = useState(''); // typed to replace an identity this device can't read
   const [restoreStep, setRestoreStep] = useState("seed"); // "seed" | "fragments"
   const [masterKeyTemp, setMasterKeyTemp] = useState(null);
   const [fragmentInputs, setFragmentInputs] = useState(["", "", ""]);
@@ -3083,8 +3152,6 @@ function GhostLinkApp() {
   const [connectionStates, setConnectionStates] = useState({});
   const [remoteStreams, setRemoteStreams] = useState({});
   const [localStream, setLocalStream] = useState(null);
-
-  // Signal Protocol
 
   // File Transfer
   const [fileTransferManager, setFileTransferManager] = useState(null);
@@ -3119,9 +3186,6 @@ function GhostLinkApp() {
   const quickWsRef = useRef(null);
   const quickPcRef = useRef(null);
   const quickDcsRef = useRef(null);
-
-  // Signal Protocol Double Ratchet UI state
-  const [showCipherDetails, setShowCipherDetails] = useState(false);
 
   // Group Key Agreement
   const [groupChatMode, setGroupChatMode] = useState(false);
@@ -3197,9 +3261,6 @@ function GhostLinkApp() {
   // Push Notifications (web push where supported)
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushSupported, setPushSupported] = useState(false);
-
-  // Biometric unlock status
-  const [biometricStatus, setBiometricStatus] = useState('unsupported');
 
   // Onboarding
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -3718,7 +3779,7 @@ function GhostLinkApp() {
     const ns = window.GLLicenseRuntime;
     if (!ns || !ns.workspaceManager || !activeWorkspace) return;
 
-    if (confirm(`Are you sure you want to remove member ${memberId.slice(0, 8)}? This will rotate the workspace encryption key for forward secrecy.`)) {
+    if (confirm(`Are you sure you want to remove member ${memberId.slice(0, 8)}? This will rotate the workspace encryption key.`)) {
       const res = await ns.workspaceManager.removeMember(activeWorkspace.id, memberId);
       if (res.success) {
         setWorkspaces(ns.workspaceManager.getWorkspaces());
@@ -4640,7 +4701,8 @@ function GhostLinkApp() {
 
       let ws;
       try {
-        ws = new WebSocket(getBridgeWsUrl());
+        // Same token as the connector: the setup socket is refused without it.
+        ws = openBridgeSocket();
       } catch (e) {
         resolve(false);
         return;
@@ -4728,23 +4790,41 @@ function GhostLinkApp() {
   };
 
   // Step 1: validate seed + derive key, try localStorage first, else advance to fragments
-  const validateAndDeriveKey = async () => {
+  const validateAndDeriveKey = async (confirmedNodeId = null) => {
     // Lowercased before deriving: the phrase was generated and wrapped in
     // lowercase, so an autocapitalised or pasted-with-caps entry would derive a
     // different key and report a wrong seed for correct words.
     const words = verifyInput.trim().toLowerCase().split(/\s+/);
     if (words.length !== 12) {setRestoreStatus("error");return;}
+    // Every word must be on the list. A typo stops here, before anything is
+    // derived, saved or started.
+    const wordlist = await loadRecoveryWordlist();
+    const unknown = unknownPhraseWords(words, wordlist);
+    setRestoreWordIssues(unknown);
+    if (unknown.length) {setRestoreStatus("badword");return;}
+    // Older gmp-core phrases fail the BIP-39 checksum most of the time: warn only.
+    setRestoreChecksumWarning(!(await bip39ChecksumValid(words, wordlist.BIP39_WORDS)));
     setRestoreStatus("loading");
+    if (window.ghostlink?.isElectron) {
+      // identity-v2.md D11: nothing is saved and no node starts until the
+      // phrase's NodeID matches this device's, or the user confirms the derived
+      // Ghost Address on a fresh device (electron/src/restore-guard.js).
+      let res;
+      try {
+        res = await window.ghostlink.gmp.restore(words.join(" "), confirmedNodeId, restoreReplaceWord.trim() || null);
+      } catch (err) {
+        setRestoreError(err?.message || String(err));setRestoreStatus("restorefailed");return;
+      }
+      if (res.status === "mismatch") {setRestoreMismatch(res);setRestoreStatus("mismatch");return;}
+      if (res.status === "unreadable") {setRestoreStatus("unreadable");return;}
+      if (res.status === "confirm") {setRestorePending(res);setRestoreStatus("confirm");return;}
+      if (res.status !== "started") {setRestoreError(res.error || res.status);setRestoreStatus("restorefailed");return;}
+      setRestorePending(null);
+    }
     try {
       const masterKey = await CryptoEngine.deriveKeyFromSeed(words);
-      setSeedPhrase(words);
-      if (window.ghostlink?.isElectron) {
-        try {
-          await window.ghostlink.gmp.start(words.join(" "));
-        } catch (err) {
-          console.error('[GMP Setup] Failed to save seed to Electron store:', err);
-        }
-      }
+      // Not setSeedPhrase(words) yet: the connector hands window.seedPhrase to
+      // the bridge, which starts a node for any seed. Set only once proven below.
       const saved = localStorage.getItem("gl_identity");
       if (saved) {
         const d = JSON.parse(saved);
@@ -4769,6 +4849,9 @@ function GhostLinkApp() {
       setRestoreStatus(null);
     } catch {setRestoreStatus("wrongseed");}
   };
+
+  // "Not my address": drop the pending confirmation; nothing was saved or started.
+  const declineRestore = () => {setRestorePending(null);setRestoreStatus(null);};
 
   // Step 2: combine ≥3 fragments + finalize restore
   const combineAndRestoreIdentity = async () => {
@@ -6593,7 +6676,8 @@ function GhostLinkApp() {
     };
     setActiveGroups((prev) => [...prev, group]);
     setPeers((prev) => [...prev, {
-      id: group.id, name: group.name, status: 'online',
+      id: group.id, name: group.name, status: 'group',
+      lastSeen: `Group · ${selectedGroupPeers.length} members`,
       type: 'group', memberCount: selectedGroupPeers.length,
       avatar: 'G', color: th.accent3
     }]);
@@ -6633,15 +6717,6 @@ function GhostLinkApp() {
       } catch {}
     }
   }, [messages, activeConvo, pushEnabled]);
-
-  // ---- Biometric Unlock Check ----
-  useEffect(() => {
-    if (window.PublicKeyCredential && typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
-      window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().
-      then((available) => setBiometricStatus(available ? 'available' : 'unsupported')).
-      catch(() => setBiometricStatus('unsupported'));
-    }
-  }, []);
 
   // ---- Fragment Distribution via P2P ----
   const guardianRecoveryAvailable = window.GhostLink?.Capabilities?.GUARDIAN_RECOVERY_AVAILABLE === true;
@@ -7501,7 +7576,7 @@ function GhostLinkApp() {
     setActiveConvo(peer.id);
     setPeers((prev) => prev.map((p) => p.id === peer.id ? { ...p, unread: 0 } : p));
 
-    if (peer.status !== 'online') {
+    if (peer.status !== 'online' && peer.type !== 'group') {
       // Selecting an offline peer is an explicit reconnect request: clear any
       // block from a forced removal, and dial over the mesh when available.
       const meshEnabled = localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron;
@@ -8542,7 +8617,7 @@ inviteTab === "create" ? html`<>
         try {
           // The IPC handler reports a failed listen as a resolved
           // { success: false }, not a rejection.
-          const res = await window.ghostlink.ghostMesh.startServer();
+          const res = await window.ghostlink.ghostMesh.startServer(localStorage.getItem('gl_yggdrasil_address') || '');
           if (res && res.success === false) throw new Error(res.error || 'unknown error');
           addToast('Ghost Mesh server started', 'success');
         } catch (err) {
@@ -8586,21 +8661,6 @@ inviteTab === "create" ? html`<>
                   </div>
 
                   
-                  <div style=${
-  { marginBottom: 22 }}>
-                    <div style=${{ fontSize: 10, color: th.textSecondary, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Device Security</div>
-                    <div style=${{ background: th.bg3, borderRadius: 10, padding: 2 }}>
-                      <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px" }}>
-                        <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <${I} t="lock" s=${14} c=${biometricStatus === 'available' ? th.textSecondary : PALETTE.fade} />
-                          <span style=${{ fontSize: 12, color: biometricStatus === 'available' ? PALETTE.mist : PALETTE.fade }}>Biometric Unlock</span>
-                        </div>
-                        <${Tag} color=${biometricStatus === 'available' ? PALETTE.spectral : 'th.textSecondary'}>
-                          ${biometricStatus === 'available' ? 'AVAILABLE' : 'NOT SUPPORTED'}
-                        <//>
-                      </div>
-                    </div>
-                  </div>
 
                   
                   <div style=${{ marginBottom: 22 }}>
@@ -9096,13 +9156,34 @@ inviteTab === "create" ? html`<>
   { fontSize: 11, color: th.textSecondary, marginBottom: 14, lineHeight: 1.7 }}>
                             <strong style=${{ color: PALETTE.mist }}>Step 1 of 2</strong> — Enter your 12-word seed phrase. If this device has a saved identity, restore completes here. Otherwise you'll paste fragments.
                           </div>
-                          <textarea value=${verifyInput} onChange=${(e) => {setVerifyInput(e.target.value);setRestoreStatus(null);}} placeholder="word1 word2 word3 ... word12" rows=${
-  3} style=${{ width: "100%", background: th.bg2, border: `1px solid ${restoreStatus === "error" || restoreStatus === "wrongseed" ? PALETTE.crimson : restoreStatus === "ok" ? th.accent : PALETTE.divider}`, borderRadius: 10, padding: "12px 14px", color: th.text, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", resize: "none", marginBottom: 10 }} />
+                          <textarea value=${verifyInput} onChange=${(e) => {setVerifyInput(e.target.value);setRestoreStatus(null);setRestorePending(null);setRestoreMismatch(null);setRestoreChecksumWarning(false);}} placeholder="word1 word2 word3 ... word12" rows=${
+  3} style=${{ width: "100%", background: th.bg2, border: `1px solid ${restoreStatus === "error" || restoreStatus === "wrongseed" || restoreStatus === "badword" || restoreStatus === "mismatch" ? PALETTE.crimson : restoreStatus === "ok" ? th.accent : PALETTE.divider}`, borderRadius: 10, padding: "12px 14px", color: th.text, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", resize: "none", marginBottom: 10 }} />
                           ${restoreStatus === "loading" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: `${th.accent2}10`, border: `1px solid ${th.accent2}25`, fontSize: 10, color: th.accent2, marginBottom: 10 }}>Deriving key via PBKDF2 · 100,000 iterations…</div>`}
                           ${restoreStatus === "ok" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: `${th.accent}10`, border: `1px solid ${th.accent}25`, fontSize: 10, color: th.accent, marginBottom: 10 }}>Identity restored. Redirecting…</div>`}
                           ${restoreStatus === "error" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10 }}>Enter exactly 12 words.</div>`}
                           ${restoreStatus === "wrongseed" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10 }}>Wrong seed phrase — decryption failed.</div>`}
-                          <${Btn} accent style=${{ width: "100%" }} onClick=${validateAndDeriveKey} disabled=${restoreStatus === "loading" || restoreStatus === "ok"}>
+                          ${restoreStatus === "badword" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>
+                            ${restoreWordIssues.map((x) => html`<div key=${x.position}>Word ${x.position} is not on the recovery word list.${x.suggestions.length ? ` Did you mean: ${x.suggestions.join(", ")}?` : ""}</div>`)}
+                          </div>`}
+                          ${restoreChecksumWarning && restoreStatus !== "badword" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 10, color: PALETTE.amber, marginBottom: 10, lineHeight: 1.6 }}>This phrase does not pass the standard BIP-39 checksum. Phrases made by older GhostLink builds usually don't, and still work. If yours is newer, check each word.</div>`}
+                          ${restoreStatus === "mismatch" && restoreMismatch && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>This phrase belongs to a different identity (${restoreMismatch.ghostAddress}) than the one saved on this device (${restoreMismatch.storedGhostAddress}). Nothing was changed. Check each word: one wrong word gives a different identity.</div>`}
+                          ${restoreStatus === "unreadable" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>
+                            This device has a saved identity that it cannot read here (the system keyring changed, or the saved copy is damaged). Nothing was changed. If you sign in with the keyring it was saved under, it may open again.
+                            <div style=${{ marginTop: 8 }}>To replace it with the identity for this phrase, type <strong style=${{ fontFamily: "'JetBrains Mono', monospace" }}>REPLACE</strong> below. The old copy is kept aside, not deleted.</div>
+                            <div style=${{ display: "flex", gap: 8, marginTop: 10 }}>
+                              <input value=${restoreReplaceWord} onChange=${(e) => setRestoreReplaceWord(e.target.value)} placeholder="REPLACE" aria-label="Type REPLACE to replace the identity on this device" style=${{ flex: 1, background: th.bg2, border: `1px solid ${PALETTE.divider}`, borderRadius: 8, padding: "6px 10px", color: th.text, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
+                              <${Btn} small disabled=${restoreReplaceWord.trim() !== "REPLACE"} onClick=${() => validateAndDeriveKey()}>Replace the identity on this device<//>
+                            </div>
+                          </div>`}
+                          ${restoreStatus === "confirm" && restorePending && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 10, color: PALETTE.amber, marginBottom: 10, lineHeight: 1.6 }}>
+                            This phrase opens <strong style=${{ fontFamily: "'JetBrains Mono', monospace" }}>${restorePending.ghostAddress}</strong>. Is this your Ghost Address? One wrong word gives a different address that looks just as valid, so compare it with the one your contacts have. Nothing is saved until you confirm.
+                            <div style=${{ display: "flex", gap: 8, marginTop: 10 }}>
+                              <${Btn} accent small onClick=${() => validateAndDeriveKey(restorePending.nodeIdHex)}>This is my address<//>
+                              <${Btn} ghost small onClick=${declineRestore}>Not mine<//>
+                            </div>
+                          </div>`}
+                          ${restoreStatus === "restorefailed" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>Restore stopped: ${restoreError}. No node was started.</div>`}
+                          <${Btn} accent style=${{ width: "100%" }} onClick=${() => validateAndDeriveKey()} disabled=${restoreStatus === "loading" || restoreStatus === "ok" || restoreStatus === "confirm"}>
                             <${I} t="key" s=${15} c=PALETTE.obsidian /> DERIVE KEY & CHECK DEVICE
                           <//>
                         </>` : html`<>
@@ -9388,8 +9469,7 @@ inviteTab === "create" ? html`<>
                     </div>
                     ${[
   "E2E encrypted chat with hash-chain integrity",
-  "BIP39 seed phrase identity generation",
-  "Shamir's Secret Sharing backup GF(256) — 7 shares, threshold 3",
+  "BIP-39 recovery phrase (12 words, checksummed); the mesh identity is derived from it, the chat key is random and wrapped with it",
   "PBKDF2 key derivation from seed (100K iterations)",
   "AES-GCM private key wrapping",
   "Self-destructing messages",
@@ -9399,14 +9479,11 @@ inviteTab === "create" ? html`<>
   "Hash-chain explorer",
   "QR code invite generation with Reed-Solomon",
   "Responsive layouts (mobile / tablet / desktop)",
-  "Offline message queue (IndexedDB, 24h TTL)",
+  "Offline delivery through a sealed mailbox (7-day expiry)",
   "Message reactions",
-  "Voice messages with waveform",
   "Contact verification ceremony (safety numbers)",
-  "Group key agreement UI",
   "TURN relay server config",
-  "Push notifications (web)",
-  "Biometric unlock detection"].
+  "New-message notifications while the app is running (web)"].
   map((item, i) => html`<div key=${
   i} style=${{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 11, color: PALETTE.fade }}>
                         <span style=${{ color: PALETTE.spectral, fontSize: 10 }}>✓</span> ${item}
@@ -9423,7 +9500,8 @@ inviteTab === "create" ? html`<>
   "Hybrid signaling (QR/paste first connect + relay reconnect)",
   "Fragment distribution UI with peer-to-peer send",
   "Restore tab with full combineAndRestore() wiring",
-  "Signal Protocol Double Ratchet integration"].
+  "Shamir backup to guardian peers (7 shares, threshold 3; sending fragments is disabled)",
+  "Voice messages with waveform (receiving works; recording is not wired up)"].
   map((item, i) => html`<div key=${
   i} style=${{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 11, color: PALETTE.mist }}>
                         <span style=${{ color: th.accent2, fontSize: 10 }}>●</span> ${item}
@@ -9444,7 +9522,8 @@ inviteTab === "create" ? html`<>
   "Mobile app store release (App Store / Play Store)",
   "Advanced message search with filters",
   "Disappearing messages with custom timers",
-  "Multi-device sync via P2P"].
+  "Multi-device sync via P2P",
+  "Per-message key ratchet"].
   map((item, i) => html`<div key=${
   i} style=${{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 11, color: PALETTE.fade }}>
                         <span style=${{ color: th.accent3, fontSize: 10 }}>○</span> ${item}
@@ -9770,7 +9849,7 @@ inviteTab === "create" ? html`<>
 
     if (window.ghostlink?.isElectron) {
       try {
-        const res = await window.ghostlink.ghostMesh.startServer();
+        const res = await window.ghostlink.ghostMesh.startServer(localStorage.getItem('gl_yggdrasil_address') || '');
         if (res && res.success === false) throw new Error(res.error || 'unknown error');
         addToast('Ghost Mesh activated and server started', 'success');
       } catch (err) {

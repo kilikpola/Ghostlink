@@ -221,7 +221,7 @@
 
     /**
      * Removes a member from workspace
-     * Requires key rotation for forward secrecy
+     * Rotates the workspace key
      * @param {string} workspaceId - Workspace ID
      * @param {string} memberId - Member's peer ID
      * @returns {Promise<{success: boolean, newWorkspaceKey: ?string, error: ?string}>}
@@ -250,7 +250,7 @@
       this._memberRoles.delete(this._memberKey(workspaceId, memberId));
       workspace.updatedAt = Date.now();
 
-      // Rotate workspace key for forward secrecy
+      // Rotate the workspace key
       const newWorkspaceKey = await this._rotateWorkspaceKey(workspaceId, workspace);
 
       await this._saveWorkspaces();

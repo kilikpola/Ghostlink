@@ -577,6 +577,14 @@ function bytesFromHex(hex) {
   return bytes;
 }
 
+/** Signing an invite failed; there is deliberately no unsigned or HMAC fallback. */
+class InviteSigningError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'InviteSigningError';
+  }
+}
+
 class QRInvite {
   /**
    * @param {object} identity
@@ -618,12 +626,12 @@ class QRInvite {
   }
 
   async _sign(payload) {
+    // Invites are signed with ECDSA P-256 only. The identity's ECDH key is
+    // re-imported as ECDSA when no separate signing key is given. There is no
+    // fallback: a "signature" anyone can compute is worse than none.
+    let signingKey = this._identity.signingKey;
     try {
-      // Need ECDSA signing key. If identity has an ECDSA key pair, use it.
-      // Otherwise derive one from the ECDH key pair (for compatibility).
-      let signingKey = this._identity.signingKey;
       if (!signingKey && this._identity.keyPair && this._identity.keyPair.privateKey) {
-        // Export ECDH private key and re-import as ECDSA
         const exported = await crypto.subtle.exportKey('pkcs8', this._identity.keyPair.privateKey);
         signingKey = await crypto.subtle.importKey(
           'pkcs8', exported,
@@ -631,28 +639,17 @@ class QRInvite {
           false, ['sign']
         );
       }
-      if (!signingKey) return this._hmacSign(payload);
+      if (!signingKey) throw new Error('no private key available');
 
-      const data = new TextEncoder().encode(payload);
       const sig = await crypto.subtle.sign(
         { name: 'ECDSA', hash: 'SHA-256' },
         signingKey,
-        data
+        new TextEncoder().encode(payload)
       );
       return hexFromBytes(new Uint8Array(sig));
-    } catch (_) {
-      // Fallback: HMAC-based signature using public key as key material
-      return this._hmacSign(payload);
+    } catch (e) {
+      throw new InviteSigningError(`Cannot sign invite: ${e.message}`);
     }
-  }
-
-  async _hmacSign(payload) {
-    const keyData = new TextEncoder().encode(this._identity.publicKeyHex.slice(0, 64));
-    const key = await crypto.subtle.importKey(
-      'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-    );
-    const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
-    return hexFromBytes(new Uint8Array(sig));
   }
 
   // ── Encode for QR ────────────────────────────────────────────────
@@ -822,21 +819,7 @@ class QRInvite {
 
       if (valid) return { valid: true };
     } catch (_) {
-      // ECDSA verification failed or key format incompatible — try HMAC
-    }
-
-    // Fallback: HMAC verification
-    try {
-      const keyData = new TextEncoder().encode(invite.publicKey.slice(0, 64));
-      const key = await crypto.subtle.importKey(
-        'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-      );
-      const valid = await crypto.subtle.verify(
-        'HMAC', key, sigBytes, new TextEncoder().encode(payload)
-      );
-      if (valid) return { valid: true };
-    } catch (_) {
-      // HMAC also failed
+      // Not a P-256 public key or not a raw ECDSA signature: rejected below.
     }
 
     return { valid: false, reason: 'Signature verification failed' };
@@ -1527,6 +1510,7 @@ function decodeQRFromImageData(imageData) {
 // ═══════════════════════════════════════════════════════════════════════
 
 window.QRInvite = QRInvite;
+window.InviteSigningError = InviteSigningError;
 window.QRScanner = QRScanner;
 window.qrEncode = qrEncode;
 window.matrixToSVG = matrixToSVG;

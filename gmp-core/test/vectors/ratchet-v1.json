@@ -1,0 +1,33 @@
+{
+  "format": "gl-ratchet v1 (identity-v2.md §3.1/§4.3)",
+  "seed": "ratchet-v1-vectors",
+  "script": [
+    "A",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A",
+    "B",
+    "A",
+    "A",
+    "B"
+  ],
+  "plaintexts": "`${who} says ${i}`",
+  "messageSha256Prefix": [
+    "12b2fbb2ad87196b",
+    "31a81673f751b5cc",
+    "3ff56cd18e5500b6",
+    "6f5e7605c391a0c6",
+    "05d8bb6a19e1cec4",
+    "6429b47b2f6ff802",
+    "a086cd9b61b5453d",
+    "6ca8b87c6ce4d1fc",
+    "cd77e9e07d66007a",
+    "52dd2b483b1b0a77"
+  ],
+  "finalStateSha256Prefix": {
+    "alice": "0ee5617d38ebbb70",
+    "bob": "d08d5f49254088c5"
+  }
+}

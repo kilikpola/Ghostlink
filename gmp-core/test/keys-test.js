@@ -101,6 +101,32 @@ console.log('\n=== label uniqueness ===');
   });
   const elsewhere = files.filter((f) => labels.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
   ok(elsewhere.length === 0, `the new labels appear in src/ only in keys.ts (${JSON.stringify(elsewhere.map((f) => path.relative(pkg, f)))})`);
+
+  // R4: the ratchet's KDF and AD labels (§5) join the set; checked against everything
+  // in src/ outside src/ratchet/ratchet.ts, and against each other and the Purpose labels.
+  const RATCHET_LABELS = ['gl-ratchet-rk-v1', 'gl-ratchet-mk-v1', 'gl-ratchet-ad-v1'];
+  let ratchet = null;
+  try { ratchet = await import('../dist/ratchet/ratchet.js'); } catch { /* A: module absent */ }
+  ok(!!ratchet && JSON.stringify(Object.values(ratchet.LABELS).sort()) === JSON.stringify([...RATCHET_LABELS].sort()),
+    `dist/ratchet/ratchet.js LABELS are exactly ${JSON.stringify(RATCHET_LABELS)} (got ${ratchet ? JSON.stringify(ratchet.LABELS) : 'no module'})`);
+  const ratchetSrc = path.join(pkg, 'src', 'ratchet', 'ratchet.ts');
+  const outsideRatchet = new Set(DOC_UNCHANGED);
+  for (const f of files.filter((x) => x !== ratchetSrc)) for (const m of fs.readFileSync(f, 'utf8').matchAll(labelRe)) outsideRatchet.add(m[1]);
+  for (const l of labels) outsideRatchet.add(l);
+  const all = [...labels, ...RATCHET_LABELS];
+  ok(new Set(all).size === all.length && all.every((a) => all.every((b) => a === b || !a.startsWith(b))),
+    `the ${all.length} new labels (Purpose + ratchet) are pairwise distinct and none prefixes another`);
+  const ratchetClash = (against) => RATCHET_LABELS.filter((n) => [...against].some((e) => e === n || e.startsWith(n) || n.startsWith(e)));
+  assertAbsent({
+    channel: 'a ratchet label equal to, or a prefix of, an existing label',
+    controlMessage: 'a planted duplicate (gl-ratchet-mk-v1) and a planted prefix (gl-ratchet-rk) are both caught',
+    control: () => ratchetClash(new Set([...outsideRatchet, 'gl-ratchet-mk-v1', 'gl-ratchet-rk'])).length === 2,
+    absent: () => ratchetClash(outsideRatchet).length === 0,
+    message: `no ratchet label equals or prefixes any of the ${outsideRatchet.size} labels outside the ratchet`,
+  });
+  const ratchetElsewhere = files.filter((f) => f !== ratchetSrc && RATCHET_LABELS.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
+  ok(fs.existsSync(ratchetSrc) && ratchetElsewhere.length === 0,
+    `the ratchet labels appear in src/ only in ratchet/ratchet.ts (${JSON.stringify(ratchetElsewhere.map((f) => path.relative(pkg, f)))})`);
 }
 
 console.log('\n=== fixed vectors (FIXTURE_A), cross-checked against node:crypto hkdfSync ===');

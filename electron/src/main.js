@@ -33,7 +33,7 @@ const net = require('net');
 const bridgeAuthToken = crypto.randomBytes(32).toString('hex');
 const { createTray, updateBadge, flashTray, destroyTray } = require('./tray');
 const { initUpdater, updateReady, quitAndInstall } = require('./updater');
-const { getContactVaultKey, secureStorageStatus } = require('./contact-key');
+const { getContactVaultKey, replaceContactVaultKey, secureStorageStatus } = require('./contact-key');
 const { createSeedStore } = require('./seed-store');
 const { createRestoreGuard } = require('./restore-guard');
 const { selectKeyringBackend } = require('./keyring-backend');
@@ -490,9 +490,12 @@ function setupIPC() {
 
   /* ── File operations ────────────────────────────────────────── */
   // The desktop contact vault's 32-byte data key, from safeStorage (OS keyring).
-  // Fails closed on basic_text / no keyring: the renderer then keeps contacts in
-  // memory and shows a warning rather than sealing with a key that protects nothing.
+  // Fails closed when locked, basic_text, or the stored key won't decrypt: the
+  // renderer then keeps contacts in memory and shows why. A key that won't
+  // decrypt is never overwritten; only the explicit replace below moves it aside.
   ipcMain.handle('contact-vault-key', () => getContactVaultKey(safeStorage, store));
+  ipcMain.handle('contact-vault-replace', (_e, confirmation) =>
+    replaceContactVaultKey(safeStorage, store, typeof confirmation === 'string' ? confirmation : null));
 
   // The per-launch bridge token, for the renderer to present when it opens the
   // local bridge WebSocket. Only this renderer (via the preload bridge) can read it.

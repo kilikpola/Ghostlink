@@ -17,7 +17,7 @@
  * present. This mirrors the mobile migration rule: never destroy the user's only
  * copy until a good copy exists.
  */
-const { secureBackendOk, secureStorageStatus } = require('./contact-key');
+const { secureBackendOk, secureStorageStatus, backendState, moveStoredValueAside, restoreStoredValueAside } = require('./contact-key');
 
 const SEED_STORE_KEY = 'gmp_seed_phrase_enc';
 const LEGACY_SEED_STORE_KEY = 'gmp_seed_phrase';
@@ -36,12 +36,12 @@ function createSeedStore({ safeStorage, store }) {
     }
     if (!available()) {
       const { reason } = secureStorageStatus(safeStorage);
-      throw new Error(`${reason}. The recovery phrase will not be saved on this device.`);
+      throw new Error(`${reason} The recovery phrase will not be saved on this device.`);
     }
     // A stored identity this device can't read is never overwritten: it may
     // open again under the right keyring. Replacing it is an explicit step that
     // first moves it aside (moveAside).
-    if (store.get(SEED_STORE_KEY) && getSeed() === null) {
+    if (store.get(SEED_STORE_KEY) && readSeed().state === 'unreadable') {
       throw new Error('The identity saved on this device cannot be read here, so it will not be overwritten');
     }
     const sealed = safeStorage.encryptString(seed).toString('base64');
@@ -58,65 +58,56 @@ function createSeedStore({ safeStorage, store }) {
     return true;
   }
 
-  function getSeed() {
+  /**
+   * The stored seed and why it can or can't be used:
+   *   'readable' | 'none' | 'locked' | 'insecure' | 'unreadable' (contact-key.js).
+   * A blob is kept untouched in every state but 'readable'.
+   */
+  function readSeed() {
     const sealed = store.get(SEED_STORE_KEY);
+    const backend = backendState(safeStorage);
     if (sealed) {
-      // Backend no longer trustworthy: keep the blob, don't use it, ask for re-entry.
-      if (!available()) return null;
+      // Locked or basic_text: keep the blob, don't use it, and say which.
+      if (backend !== 'ok') return { state: backend, seed: null };
       try {
-        return safeStorage.decryptString(Buffer.from(sealed, 'base64'));
+        return { state: 'readable', seed: safeStorage.decryptString(Buffer.from(sealed, 'base64')) };
       } catch (err) {
-        // Keyring present but this blob won't open (wrong keyring / corruption):
-        // keep it, return nothing, let the user re-enter.
-        return null;
+        // Keyring open but this blob won't open (another keyring / corruption).
+        return { state: 'unreadable', seed: null };
       }
     }
     // Legacy plaintext from an older build.
     const legacy = store.get(LEGACY_SEED_STORE_KEY);
-    if (!legacy) return null;
+    if (!legacy) return { state: backend === 'ok' ? 'none' : backend, seed: null };
     // Migrate into secure storage only if we actually can; never re-seal weakly.
-    if (available()) {
+    if (backend === 'ok') {
       try { setSeed(legacy); } catch (_e) { /* keep legacy, user still gets in below */ }
     }
-    return legacy; // keep & return so the user is not locked out
+    return { state: 'readable', seed: legacy }; // keep & return so the user is not locked out
   }
 
-  /** 'none', 'readable', or 'unreadable' (a sealed blob that getSeed cannot open). */
+  function getSeed() {
+    return readSeed().seed;
+  }
+
+  /** See readSeed. Nothing stored and the keyring locked/insecure reports that state. */
   function readState() {
-    if (store.get(SEED_STORE_KEY)) return getSeed() === null ? 'unreadable' : 'readable';
-    return store.get(LEGACY_SEED_STORE_KEY) ? 'readable' : 'none';
+    return readSeed().state;
   }
 
-  /**
-   * Move the sealed blob to SEED_STORE_KEY + '_unreadable_<UTC timestamp>' and
-   * return that key. Never deletes it: the copy must read back before the
-   * original key is cleared, and any failure throws with the blob in place.
-   * No '.' in the key: electron-store treats dots as nested paths.
-   */
+  /** Move the sealed blob aside (contact-key.js moveStoredValueAside); returns its new key. */
   function moveAside(now = new Date()) {
-    const sealed = store.get(SEED_STORE_KEY);
-    if (!sealed) throw new Error('No stored identity to move aside');
-    const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-    const asideKey = `${SEED_STORE_KEY}_unreadable_${stamp}`;
-    if (store.get(asideKey) !== undefined) throw new Error(`${asideKey} already exists`);
-    store.set(asideKey, sealed);
-    if (store.get(asideKey) !== sealed) throw new Error('The stored identity could not be copied aside');
-    store.delete(SEED_STORE_KEY);
-    return asideKey;
+    return moveStoredValueAside(store, SEED_STORE_KEY, now);
   }
 
   /** Undo moveAside (when the replacement could not be stored). */
   function restoreAside(asideKey) {
-    const sealed = store.get(asideKey);
-    if (!sealed) throw new Error(`${asideKey} is missing`);
-    store.set(SEED_STORE_KEY, sealed);
-    if (store.get(SEED_STORE_KEY) !== sealed) throw new Error('The stored identity could not be moved back');
-    store.delete(asideKey);
+    restoreStoredValueAside(store, SEED_STORE_KEY, asideKey);
   }
 
   function status() {
     const s = secureStorageStatus(safeStorage);
-    return { ...s, hasStoredSeed: !!store.get(SEED_STORE_KEY) || !!store.get(LEGACY_SEED_STORE_KEY) };
+    return { ...s, hasStoredSeed: !!store.get(SEED_STORE_KEY) || !!store.get(LEGACY_SEED_STORE_KEY), seedState: readState() };
   }
 
   return { available, setSeed, getSeed, readState, moveAside, restoreAside, status };

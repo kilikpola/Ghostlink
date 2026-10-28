@@ -32,6 +32,7 @@ const INVOKE_CHANNELS = [
   'gmp-start',
   'gmp-restore',
   'contact-vault-key',
+  'contact-vault-replace',
   'secure-storage-status',
   'bridge-token',
 ];
@@ -126,11 +127,14 @@ contextBridge.exposeInMainWorld('ghostlink', {
 
   /* ── Contact vault key (OS keyring, fail-closed) ────────────────
      Returns {available:true, keyHex} when the OS keyring really
-     protects the key, else {available:false, reason, backend}. The
-     renderer must treat available:false as "no secure storage": keep
-     contacts in memory and warn, never seal with a weak key. */
+     protects the key, else {available:false, state, reason, backend}
+     (state: locked | insecure | unreadable). The renderer must treat
+     available:false as "no secure storage": keep contacts in memory
+     and warn, never seal with a weak key. replace(word) replaces an
+     UNREADABLE key only, moving the old one aside. */
   contactVault: {
     getKey: () => secureInvoke('contact-vault-key'),
+    replace: (confirmation) => secureInvoke('contact-vault-replace', confirmation),
   },
 
   /* ── Secure storage status (drives the fail-closed banner) ────── */

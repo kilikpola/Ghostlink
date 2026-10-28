@@ -12,15 +12,15 @@
  * fresh device: restore is refused unless the user takes the explicit replace
  * step (typing REPLACE_WORD), and then the old blob is moved aside, never
  * deleted; if that move fails nothing is stored and no node starts.
+ * A LOCKED keyring or basic_text is neither: restore is refused outright with
+ * the fix to apply, and REPLACE is never offered or accepted (contact-key.js).
  * Only then is the phrase persisted, and the node starts only if persisting
  * succeeded. A typo therefore can neither overwrite the stored seed nor start
  * a different identity.
  *
  * Kept free of Electron so test/restore-guard.test.mjs runs this exact code.
  */
-
-/** The word the user types to replace an identity this device cannot read. */
-const REPLACE_WORD = 'REPLACE';
+const { REPLACE_WORD, LOCKED_REASON, INSECURE_REASON } = require('./contact-key');
 
 /**
  * @param {object} deps
@@ -28,7 +28,7 @@ const REPLACE_WORD = 'REPLACE';
  * @param {() => string|null} deps.getStoredSeed
  * @param {(phrase: string) => boolean} deps.setStoredSeed  true once sealed and read back; throws otherwise
  * @param {(phrase: string) => Promise<void>} deps.startNode
- * @param {() => 'none'|'readable'|'unreadable'} deps.getStoredSeedState
+ * @param {() => 'none'|'readable'|'locked'|'insecure'|'unreadable'} deps.getStoredSeedState
  * @param {() => string} deps.moveSeedAside  moves the unreadable blob aside, returns its new key; throws on failure
  * @param {(asideKey: string) => void} deps.restoreSeedAside  undoes moveSeedAside
  */
@@ -38,7 +38,7 @@ function createRestoreGuard({ deriveIdentity, getStoredSeed, setStoredSeed, star
    * @param {string} phrase
    * @param {{confirmedNodeId?: string|null, replaceConfirmation?: string|null}} [opts]
    *   the NodeID the user confirmed on a fresh device, and the typed word for replacing an unreadable identity
-   * @returns {Promise<{status: 'started'|'confirm'|'mismatch'|'unreadable'|'persist-failed'|'start-failed'|'invalid',
+   * @returns {Promise<{status: 'started'|'confirm'|'mismatch'|'unreadable'|'locked'|'insecure'|'persist-failed'|'start-failed'|'invalid',
    *   nodeIdHex?: string, ghostAddress?: string, storedGhostAddress?: string, error?: string}>}
    */
   async function restore(phrase, { confirmedNodeId = null, replaceConfirmation = null } = {}) {
@@ -47,6 +47,9 @@ function createRestoreGuard({ deriveIdentity, getStoredSeed, setStoredSeed, star
     }
     const entered = await deriveIdentity(phrase);
     const state = getStoredSeedState();
+    if (state === 'locked' || state === 'insecure') {
+      return { status: state, ghostAddress: entered.ghostAddress, error: state === 'locked' ? LOCKED_REASON : INSECURE_REASON };
+    }
     const replacing = state === 'unreadable';
     if (replacing && replaceConfirmation !== REPLACE_WORD) {
       return { status: 'unreadable', ghostAddress: entered.ghostAddress,

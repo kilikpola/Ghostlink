@@ -227,19 +227,24 @@ const keyring = (tag) => ({
 });
 const sealedBy = (tag, phrase) => keyring(tag).encryptString(phrase).toString('base64');
 /** A device wired as main.js wires it: real seed-store + real restore guard. */
-function makeKeyringDevice({ blob = null, failAside = false } = {}) {
+function makeKeyringDevice({ blob = null, failAside = false, failNewSeed = false, safeStorage = keyring('k2') } = {}) {
   const map = new Map(blob ? [[SEED_STORE_KEY, blob]] : []);
   const store = {
     get: (k) => map.get(k),
-    set: (k, v) => { if (failAside && k !== SEED_STORE_KEY) throw new Error('disk full (test)'); map.set(k, v); },
+    set: (k, v) => {
+      if (failAside && k !== SEED_STORE_KEY) throw new Error('disk full (test)');
+      // Storing the NEW seed fails; putting the old blob back still works.
+      if (failNewSeed && k === SEED_STORE_KEY && v !== blob) throw new Error('disk full (test)');
+      map.set(k, v);
+    },
     delete: (k) => map.delete(k),
   };
-  const seedStore = createSeedStore({ safeStorage: keyring('k2'), store });
+  const seedStore = createSeedStore({ safeStorage, store });
   const dev = { map, starts: [], legacyStarts: [], persists: 0 };
   const guard = createRestoreGuard ? createRestoreGuard({
     deriveIdentity,
     getStoredSeed: () => seedStore.getSeed(),
-    getStoredSeedState: seedStore.readState ? () => seedStore.readState() : undefined,
+    getStoredSeedState: () => seedStore.readState(),
     moveSeedAside: seedStore.moveAside ? () => seedStore.moveAside() : undefined,
     restoreSeedAside: seedStore.restoreAside ? (k) => seedStore.restoreAside(k) : undefined,
     setStoredSeed: (s) => { dev.persists++; return seedStore.setSeed(s); },
@@ -307,6 +312,59 @@ console.log('\n=== replace: moving aside fails -> nothing stored, no node starte
   ok(dev.map.get(SEED_STORE_KEY) === blob && asideKeys(dev).length === 0, 'the blob is byte-identical and nothing new was stored');
   ok(startCount(dev) === 0, `no node started (starts ${startCount(dev)})`);
   ok(lastStatus(ui) === 'restorefailed', `the user is told (status ${JSON.stringify(lastStatus(ui))})`);
+}
+
+console.log('\n=== replace: storing the new seed fails -> old blob moved back, no node started ===');
+{
+  const blob = sealedBy('k1', phraseOf(A_IDX));
+  const dev = makeKeyringDevice({ blob, failNewSeed: true });
+  const ui = await runRestore(dev, phraseOf(B_IDX), { confirm: true, overrides: { restoreReplaceWord: 'REPLACE' } });
+  ok(dev.map.get(SEED_STORE_KEY) === blob, 'the old blob is back under its own key, byte-identical');
+  ok(asideKeys(dev).length === 0, `no aside copy is left behind (${JSON.stringify(asideKeys(dev))})`);
+  ok(startCount(dev) === 0, `no node started (starts ${startCount(dev)})`);
+  ok(lastStatus(ui) === 'restorefailed', `the user is told (status ${JSON.stringify(lastStatus(ui))})`);
+}
+
+// Keyring states as measured in the built .deb (STEP 0).
+const lockedKeyring = () => ({ isEncryptionAvailable: () => false, getSelectedStorageBackend: () => 'gnome_libsecret',
+  encryptString: () => { throw new Error('locked'); }, decryptString: () => { throw new Error('locked'); } });
+const basicText = () => ({ isEncryptionAvailable: () => false, getSelectedStorageBackend: () => 'basic_text',
+  encryptString: (s) => Buffer.from(`HARDCODED:${s}`), decryptString: (b) => b.toString().replace(/^HARDCODED:/, '') });
+
+console.log('\n=== locked keyring: "locked", never "unreadable"; no REPLACE, nothing touched ===');
+{
+  const blob = sealedBy('k2', phraseOf(A_IDX));
+  const { nodeIdHex } = await deriveIdentity(phraseOf(A_IDX));
+  const dev = makeKeyringDevice({ blob, safeStorage: lockedKeyring() });
+  ok(dev.seedStore.readState() === 'locked', `seed-store readState() is "locked" (got ${JSON.stringify(dev.seedStore.readState())})`);
+  const ui = await runRestore(dev, phraseOf(A_IDX), { confirm: true, overrides: { restoreReplaceWord: 'REPLACE' } });
+  ok(lastStatus(ui) === 'locked', `the renderer shows "locked" (got ${JSON.stringify(lastStatus(ui))})`);
+  const direct = await dev.bridge.gmp.restore(phraseOf(A_IDX), nodeIdHex, 'REPLACE');
+  ok(direct.status === 'locked' && /Unlock it and restart GhostLink/.test(direct.error || ''),
+    `main refuses even a confirmed REPLACE while locked, and says to unlock (got ${JSON.stringify(direct.status)})`);
+  ok(dev.map.get(SEED_STORE_KEY) === blob && asideKeys(dev).length === 0, 'the seed blob is byte-identical, nothing moved aside');
+  // Positive control through the same path: the same blob, keyring unlocked.
+  const control = makeKeyringDevice({ blob });
+  await runRestore(control, phraseOf(A_IDX));
+  assertAbsent({
+    channel: 'node-start spy (locked keyring)',
+    controlMessage: 'the same blob with the keyring UNLOCKED starts the node',
+    control: () => control.starts.length,
+    absent: () => startCount(dev) === 0 && dev.persists === 0,
+    message: `locked: no node started, nothing persisted (starts ${startCount(dev)}, persists ${dev.persists})`,
+  });
+}
+
+console.log('\n=== basic_text: "insecure", names the fix; no REPLACE ===');
+{
+  const blob = sealedBy('k2', phraseOf(A_IDX));
+  const dev = makeKeyringDevice({ blob, safeStorage: basicText() });
+  ok(dev.seedStore.readState() === 'insecure', `seed-store readState() is "insecure" (got ${JSON.stringify(dev.seedStore.readState())})`);
+  const { nodeIdHex } = await deriveIdentity(phraseOf(A_IDX));
+  const res = await dev.bridge.gmp.restore(phraseOf(A_IDX), nodeIdHex, 'REPLACE');
+  ok(res.status === 'insecure', `restore status is "insecure" (got ${JSON.stringify(res.status)})`);
+  ok(/gnome-keyring/.test(res.error || '') && /KWallet/.test(res.error || ''), 'the message names gnome-keyring and KWallet');
+  ok(dev.map.get(SEED_STORE_KEY) === blob && asideKeys(dev).length === 0 && startCount(dev) === 0, 'blob byte-identical, nothing moved, no node started');
 }
 
 console.log('\n=== browser/CLI build: a typo is never handed to the bridge ===');

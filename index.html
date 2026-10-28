@@ -4817,6 +4817,8 @@ function GhostLinkApp() {
       }
       if (res.status === "mismatch") {setRestoreMismatch(res);setRestoreStatus("mismatch");return;}
       if (res.status === "unreadable") {setRestoreStatus("unreadable");return;}
+      // Locked keyring / basic_text: not an unreadable seed, so no REPLACE. Say what to fix.
+      if (res.status === "locked" || res.status === "insecure") {setRestoreError(res.error || "");setRestoreStatus(res.status);return;}
       if (res.status === "confirm") {setRestorePending(res);setRestoreStatus("confirm");return;}
       if (res.status !== "started") {setRestoreError(res.error || res.status);setRestoreStatus("restorefailed");return;}
       setRestorePending(null);
@@ -9167,6 +9169,7 @@ inviteTab === "create" ? html`<>
                           </div>`}
                           ${restoreChecksumWarning && restoreStatus !== "badword" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 10, color: PALETTE.amber, marginBottom: 10, lineHeight: 1.6 }}>This phrase does not pass the standard BIP-39 checksum. Phrases made by older GhostLink builds usually don't, and still work. If yours is newer, check each word.</div>`}
                           ${restoreStatus === "mismatch" && restoreMismatch && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>This phrase belongs to a different identity (${restoreMismatch.ghostAddress}) than the one saved on this device (${restoreMismatch.storedGhostAddress}). Nothing was changed. Check each word: one wrong word gives a different identity.</div>`}
+                          ${(restoreStatus === "locked" || restoreStatus === "insecure") && html`<div role="status" style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 10, color: PALETTE.amber, marginBottom: 10, lineHeight: 1.6 }}>${restoreError} Nothing was changed.</div>`}
                           ${restoreStatus === "unreadable" && html`<div style=${{ padding: "9px 12px", borderRadius: 8, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 10, color: PALETTE.crimson, marginBottom: 10, lineHeight: 1.6 }}>
                             This device has a saved identity that it cannot read here (the system keyring changed, or the saved copy is damaged). Nothing was changed. If you sign in with the keyring it was saved under, it may open again.
                             <div style=${{ marginTop: 8 }}>To replace it with the identity for this phrase, type <strong style=${{ fontFamily: "'JetBrains Mono', monospace" }}>REPLACE</strong> below. The old copy is kept aside, not deleted.</div>
@@ -10389,16 +10392,88 @@ function __glHexToU8(h) {
   for (let i = 0; i < u.length; i++) u[i] = parseInt(h.substr(i * 2, 2), 16);
   return u;
 }
-function __glShowSecureStorageBanner(reason) {
+// `reason` comes from main (contact-key.js) and already names the state and
+// the fix: locked, basic_text, or a contact key this keyring can't read. With
+// onReplace (unreadable contact key only) the banner offers the typed REPLACE.
+function __glShowSecureStorageBanner(reason, { onReplace } = {}) {
   try {
     if (document.getElementById('gl-secure-banner')) return;
     const bar = document.createElement('div');
     bar.id = 'gl-secure-banner';
     bar.setAttribute('role', 'status');
     bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#3a2e00;color:#ffd166;border-bottom:1px solid #ffd166;padding:10px 16px;font:13px system-ui,-apple-system,"Segoe UI",sans-serif;text-align:center;';
-    bar.textContent = 'No system keyring found — your identity and contacts aren’t saved on this device.' + (reason ? ' (' + reason + ')' : '');
+    const text = document.createElement('span');
+    text.textContent = reason || 'Secure storage is unavailable, so your identity and contacts aren’t saved on this device.';
+    bar.appendChild(text);
+    if (onReplace) {
+      const row = document.createElement('div');
+      row.style.cssText = 'margin-top:8px;display:flex;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap;';
+      const hint = document.createElement('span');
+      hint.textContent = 'To start a new contact list (the old one is kept aside), type REPLACE:';
+      const input = document.createElement('input');
+      input.setAttribute('aria-label', 'Type REPLACE to replace the contact key on this device');
+      input.placeholder = 'REPLACE';
+      input.style.cssText = 'background:#1a1400;color:#ffd166;border:1px solid #ffd166;border-radius:6px;padding:4px 8px;font:12px monospace;';
+      const btn = document.createElement('button');
+      btn.textContent = 'Replace the contact key on this device';
+      btn.disabled = true;
+      btn.style.cssText = 'background:#ffd166;color:#1a1400;border:0;border-radius:6px;padding:5px 10px;font:600 12px system-ui,sans-serif;cursor:pointer;';
+      input.addEventListener('input', () => { btn.disabled = input.value.trim() !== 'REPLACE'; });
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const res = await onReplace(input.value.trim());
+        if (res && !res.available) text.textContent = res.reason || 'The contact key was not replaced.';
+      });
+      row.append(hint, input, btn);
+      bar.appendChild(row);
+    }
     document.body.appendChild(bar);
   } catch (_e) { /* non-DOM/test context */ }
+}
+const __GL_CONTACT_SECRET_KEYS = ['gl_peer_cache', 'gl_gmp_known_peers', 'gl_gmp_blocked_peers', 'gl_verified_contacts', 'gl_fragment_meta'];
+// Before the contact key is replaced, entries sealed under the old key would be
+// unreadable and then overwritten by the next write. Copy each to
+// `<name>_unreadable_<stamp>` (value unchanged: it stays bound to its original
+// name, which recovery opens it with), verify, then clear the original.
+// Returns [[name, asideName]]; on any failure puts everything back and throws.
+function __glMoveSealedContactsAside(storage, names, stamp) {
+  const moved = [];
+  try {
+    for (const name of names) {
+      const value = storage.getItem(name);
+      if (value == null || !value.startsWith('gl-sealed:v1:')) continue;
+      const aside = `${name}_unreadable_${stamp}`;
+      if (storage.getItem(aside) != null) throw new Error(`${aside} already exists`);
+      storage.setItem(aside, value);
+      if (storage.getItem(aside) !== value) throw new Error(`${name} could not be copied aside`);
+      storage.removeItem(name);
+      moved.push([name, aside]);
+    }
+    return moved;
+  } catch (e) {
+    __glPutContactsBack(storage, moved);
+    throw e;
+  }
+}
+function __glPutContactsBack(storage, moved) {
+  for (const [name, aside] of moved) {
+    const value = storage.getItem(aside);
+    if (value != null) { storage.setItem(name, value); storage.removeItem(aside); }
+  }
+}
+// The explicit replace for an unreadable contact key: entries aside first, then
+// the key (main moves the old key aside); if the key is not replaced, the
+// entries go back. Reloads on success so the vault starts with the new key.
+async function __glReplaceContactKey(gl, storage, word, reload = () => location.reload()) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  let moved;
+  try { moved = __glMoveSealedContactsAside(storage, __GL_CONTACT_SECRET_KEYS, stamp); }
+  catch (e) { return { available: false, reason: `Your contacts could not be moved aside (${e.message}); nothing was changed.` }; }
+  let res;
+  try { res = await gl.contactVault.replace(word); } catch (e) { res = { available: false, reason: e.message }; }
+  if (!res || !res.available) { __glPutContactsBack(storage, moved); return res; }
+  reload();
+  return res;
 }
 // On an unavailable backend, pull any plaintext a prior build left on disk into
 // the in-memory session (so contacts still work this launch) and REMOVE it from
@@ -10417,7 +10492,7 @@ function __glHoistPlaintextToSession(keys) {
 async function installContactVaultBeforeMount() {
   const gl = (typeof window !== 'undefined' && window.ghostlink) || null;
   if (!gl || !gl.isElectron || !gl.contactVault) return; // non-Electron: plaintext path, unchanged
-  const SECRET_KEYS = ['gl_peer_cache', 'gl_gmp_known_peers', 'gl_gmp_blocked_peers', 'gl_verified_contacts', 'gl_fragment_meta'];
+  const SECRET_KEYS = __GL_CONTACT_SECRET_KEYS;
   try {
     const mod = await import('@ghostlink/contact-vault');
     const [keyRes, status] = await Promise.all([
@@ -10436,16 +10511,20 @@ async function installContactVaultBeforeMount() {
       });
     } else {
       window.__contactStorageUnavailable = true;      // SecretStore => session-only
-      window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner(status && status.reason);
-      __glHoistPlaintextToSession(SECRET_KEYS);        // clear any prior plaintext off disk
-      __glShowSecureStorageBanner(status && status.reason);
+      // keyRes names the state (locked / insecure / unreadable); status covers a failed call.
+      const reason = (keyRes && keyRes.reason) || (status && status.reason);
+      const unreadable = !!(keyRes && keyRes.state === 'unreadable');
+      const bannerOpts = unreadable ? { onReplace: (word) => __glReplaceContactKey(gl, localStorage, word) } : {};
+      window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner(reason, bannerOpts);
+      __glHoistPlaintextToSession(SECRET_KEYS);        // clear any prior plaintext off disk (sealed values are kept)
+      __glShowSecureStorageBanner(reason, bannerOpts);
     }
   } catch (e) {
     // Never fall through to plaintext in Electron: fail closed, session-only.
     window.__contactStorageUnavailable = true;
-    window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner('secure storage could not be initialised');
+    window.__onSecretStoreUnavailable = () => __glShowSecureStorageBanner('Secure storage could not be initialised, so contacts are kept for this session only.');
     try { __glHoistPlaintextToSession(['gl_peer_cache', 'gl_gmp_known_peers', 'gl_gmp_blocked_peers', 'gl_verified_contacts', 'gl_fragment_meta']); } catch (_e2) {}
-    __glShowSecureStorageBanner('secure storage could not be initialised');
+    __glShowSecureStorageBanner('Secure storage could not be initialised, so contacts are kept for this session only.');
     console.error('[contact-vault] boot failed; running session-only:', e && e.message);
   }
 }

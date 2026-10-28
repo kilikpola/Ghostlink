@@ -67,8 +67,15 @@ try {
   // calls learnContact, which writes store-forward.state sealed under the
   // seed. Without this the probe never had that file, and strict-role-test
   // missed that a seed change made it fail with no refusal.
+  // A handshake only ever yields a NodeID that matches its keys, and
+  // learnContact refuses any other pair, so the contact is a real (throwaway)
+  // identity rather than a synthetic id.
   out.storeForward = !!manager.storeForward;
-  if (manager.storeForward) manager.storeForward.learnContact('42'.repeat(64), new Uint8Array(32).fill(0x42));
+  if (manager.storeForward) {
+    const { generateEphemeralIdentity } = await core('identity.js');
+    const contact = generateEphemeralIdentity();
+    out.contactLearned = manager.storeForward.learnContact(contact.nodeIdHex, contact.staticPubKey, contact.signingPubKey);
+  }
 
   // Session-key set: a second insert of one key is reported as a repeat.
   out.sessionKeySet = !!node.sessionKeyLRUSet;

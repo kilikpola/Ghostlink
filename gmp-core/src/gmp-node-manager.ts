@@ -403,7 +403,7 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
   /** Every authenticated contact: remember its static key; tell app contacts where our mailbox is. */
   private _onSfPeer(nodeIdHex: string, link: GMPLinkLike): void {
     if (!this._sf || !link.remoteStaticPubkey) return;
-    this._sf.learnContact(nodeIdHex, link.remoteStaticPubkey);
+    this._sf.learnContact(nodeIdHex, link.remoteStaticPubkey, link.remoteSigningPubkey);
     const announce = this._sf.mailboxAnnouncement();
     if (announce && this._sf.isPollContact(nodeIdHex)) {
       link.send(JSON.stringify({ type: 'gmp-sf-mailbox', mailbox: announce })).catch(() => {});

@@ -28,6 +28,7 @@ import type { NodeIdentity } from '../types.js';
 import type { GMPTransport } from '../transport/transport.js';
 import type { EphemeralKeySource } from '../link/ephemeral-source.js';
 import { hostKey, type Separation } from '../relay/role-separation.js';
+import { nodeIdMatchesKeys } from '../link/handshake.js';
 import { StorageSession, type StorageAddress, type FetchEntry, type FetchResult } from './storage-client.js';
 import {
   Channel,
@@ -188,14 +189,30 @@ export class StoreForward extends EventEmitter<StoreForwardEvents> {
 
   // ── contacts ─────────────────────────────────────
 
-  /** Remember a peer's static key (from an authenticated handshake). */
-  learnContact(nodeIdHex: string, staticPub: Uint8Array): void {
+  /**
+   * Remember a peer's static key (from an authenticated handshake). The key
+   * must belong to the NodeID exactly as the link requires (nodeIdMatchesKeys:
+   * NodeID == SHA-512(static key), or == SHA-512(signing key) for a rotated
+   * identity): a mailbox sender is authenticated by a tag derived from this
+   * key, so a wrong key stored under a NodeID would let its holder speak as
+   * that NodeID. Anything else is refused and logged; nothing is stored.
+   */
+  learnContact(nodeIdHex: string, staticPub: Uint8Array, signingPub?: Uint8Array | null): boolean {
     const id = nodeIdHex.toLowerCase();
+    const nodeId = Buffer.from(id, 'hex');
+    if (nodeId.length !== 64 || !staticPub || staticPub.length !== 32 ||
+        !nodeIdMatchesKeys(nodeId, staticPub, signingPub && signingPub.length === 32 ? signingPub : new Uint8Array(32))) {
+      logger.warn('store-forward', 'contact-key-mismatch',
+        `Refused a static key for ${id.slice(0, 16)}…: it does not belong to that NodeID; not stored`,
+        { nodeIdPrefix: id.slice(0, 16), signingKeyGiven: !!signingPub });
+      return false;
+    }
     const pub = Buffer.from(staticPub).toString('hex');
     const c = this.state.contacts[id];
-    if (c && c.staticPub === pub) return;
+    if (c && c.staticPub === pub) return true;
     this.state.contacts[id] = { ...(c || {}), staticPub: pub };
     this._save();
+    return true;
   }
 
   /** Which contacts to poll for (the app's contact list). Null: every known contact. */

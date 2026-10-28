@@ -19,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { createRequire } from 'module';
-import { repo, electronBinary, portsBusy, shortTmp, privateBus, launchApp, firstRun, waitFor, sleep } from './helpers/electron-app.mjs';
+import { repo, electronBinary, portsBusy, shortTmp, privateBus, launchApp, firstRun, waitFor } from './helpers/electron-app.mjs';
 
 const require = createRequire(import.meta.url);
 const { selectKeyringBackend, desktopHandledByChromium } = require('../electron/src/keyring-backend.js');
@@ -98,7 +98,7 @@ if (!electronBinary() || missing.length) {
     try {
       const app1 = launchApp(opts);
       const cdp = await app1.attach();
-      r.decision = (app1.log().match(/secure storage: (\S+)/) || [])[1] || (await sleep(1000), (app1.log().match(/secure storage: (\S+)/) || [])[1]);
+      r.decision = await waitFor(() => (app1.log().match(/secure storage: (\S+)/) || [])[1], 5000);
       r.status = cdp && await waitFor(() => cdp.evaluate(`window.ghostlink.secureStorage.status()`), 10000);
       const s = cdp ? await firstRun(cdp) : {};
       r.reachedMain = s.reachedMain;
@@ -114,7 +114,12 @@ if (!electronBinary() || missing.length) {
       const cdp2 = await app2.attach();
       // The node auto-starts from a stored seed before any UI interaction.
       r.autoStarted = !!await waitFor(async () => /Node Manager started on port \d+/.test(app2.log()), present ? 20000 : 10000);
-      r.status2 = cdp2 && await cdp2.evaluate(`window.ghostlink.secureStorage.status()`);
+      // With a stored seed main starts the node BEFORE it creates the window,
+      // so the log line above can precede the page: the target attached to may
+      // still be about:blank. Wait for the renderer's own boot-done marker
+      // (set once the contact vault and bridge token are in place), then ask.
+      r.status2 = cdp2 && await waitFor(() => cdp2.evaluate(
+        `typeof window.__vaultBootDoneAt === 'number' && window.ghostlink.secureStorage.status()`), 15000);
       cdp2 && cdp2.close();
       await app2.stop();
     } catch (e) {

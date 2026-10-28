@@ -82,32 +82,26 @@ test('the PBKDF2 wrapper cannot silently change a PRF', () => {
     'the native call must pass the caller-requested hash through');
 });
 
-test('the SHA-256 derivation is confined to the legacy Yggdrasil function', () => {
+// The web app's legacy Yggdrasil function (and its only caller, the manual
+// mesh setup panel) were removed with the unused Ghost Mesh TCP listener (G0).
+// What these tests guarded, that no SHA-256 mesh-salt derivation can reach
+// identity code, now holds absolutely in index.html. Each absence check first
+// shows its matcher finds a planted copy of the removed code.
+
+test('index.html has no SHA-256 derivation with the mesh salt', () => {
   const html = read('index.html');
-  // Every PBKDF2 that uses SHA-256 with the mesh salt must be inside the
-  // legacy function. There is exactly one such site.
-  const meshSaltSha256 = [...html.matchAll(
-    /salt: enc\.encode\("ghostlink-yggdrasil-v1"\)[\s\S]{0,120}?hash: "(SHA-\d+)"/g)];
-  assert.strictEqual(meshSaltSha256.length, 1,
-    `expected exactly one mesh-salt PBKDF2 in index.html, found ${meshSaltSha256.length}`);
-  const idx = html.indexOf('async deriveLegacyYggdrasilIP(words) {');
-  assert.ok(idx !== -1, 'the legacy function must keep its explicit name');
-  const end = html.indexOf('\n  },', idx);
-  assert.ok(meshSaltSha256[0].index > idx && meshSaltSha256[0].index < end,
-    'the SHA-256 mesh derivation must live inside deriveLegacyYggdrasilIP');
+  const meshSaltPbkdf2 = /salt: enc\.encode\("ghostlink-yggdrasil-v1"\)[\s\S]{0,120}?hash: "(SHA-\d+)"/g;
+  const planted = 'deriveBits({ name: "PBKDF2", salt: enc.encode("ghostlink-yggdrasil-v1"), iterations: 100000, hash: "SHA-256" }';
+  assert.strictEqual([...planted.matchAll(meshSaltPbkdf2)].length, 1, 'control: the matcher must find a planted copy');
+  const found = [...html.matchAll(meshSaltPbkdf2)];
+  assert.strictEqual(found.length, 0, `expected no mesh-salt PBKDF2 in index.html, found ${found.length}`);
 });
 
-// ── The legacy function must stay confined to one call site ────────────────
-
-test('deriveLegacyYggdrasilIP is called from exactly one place in the web app', () => {
+test('deriveLegacyYggdrasilIP is gone from the web app', () => {
   const html = read('index.html');
-  const calls = [...html.matchAll(/CryptoEngine\.deriveLegacyYggdrasilIP\s*\(/g)];
-  assert.strictEqual(calls.length, 1,
-    `expected 1 call site, found ${calls.length} — this must not spread`);
-  // And that one call site is the manual mesh setup panel, not identity setup.
-  const around = html.slice(Math.max(0, calls[0].index - 1500), calls[0].index);
-  assert.ok(/meshAddressInput|meshSeedInput/.test(around),
-    'its only caller must be the Ghost Mesh setup panel');
+  const anyUse = /deriveLegacyYggdrasilIP|_legacyYggdrasilIPFromKey/;
+  assert.ok(anyUse.test('const derived = await CryptoEngine.deriveLegacyYggdrasilIP(words);'), 'control: the matcher must find a planted call');
+  assert.ok(!anyUse.test(html), 'index.html still defines or calls the legacy Yggdrasil derivation');
 });
 
 test('deriveLegacyYggdrasilIP is called from exactly one place in the mobile app', () => {
@@ -134,8 +128,7 @@ test('deriveLegacyYggdrasilIP is called from exactly one place in the mobile app
 });
 
 test('the legacy function carries its warning', () => {
-  for (const [file, name] of [['index.html', 'deriveLegacyYggdrasilIP'],
-                              ['mobile/src/services/CryptoService.js', 'deriveLegacyYggdrasilIP']]) {
+  for (const [file, name] of [['mobile/src/services/CryptoService.js', 'deriveLegacyYggdrasilIP']]) {
     const src = read(file);
     const idx = src.indexOf(`async ${name}(words)`);
     assert.ok(idx !== -1, `${file}: ${name} not found`);

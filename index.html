@@ -622,187 +622,6 @@ const CryptoEngine = {
     );
     return new TextDecoder().decode(decryptedBytes);
   },
-  /**
-   * Derive the legacy Yggdrasil IPv6 address for a seed phrase.
-   *
-   * ⚠ MUST NOT BE USED TO DERIVE A GHOST ADDRESS OR ANY IDENTITY. ⚠
-   *
-   * A routing address for a self-hosted Yggdrasil daemon, used only by the
-   * manual Ghost Mesh setup panel. Its KDF differs from identity derivation:
-   *
-   *   this function        PBKDF2-HMAC-SHA256, salt "ghostlink-yggdrasil-v1"
-   *   Ghost Address        PBKDF2-HMAC-SHA512, salt "ghostlink-yggdrasil-v1"
-   *                        (gmp-core/src/identity.ts, mobile/src/utils/crypto.js)
-   *
-   * test/ghost-address-kdf.test.mjs fails if a Ghost Address path uses SHA-256.
-   *
-   * @param {string[]} words the recovery phrase
-   * @returns {Promise<{publicKeyHex: string, address: string, privateKeyHex: string}>}
-   */
-  async deriveLegacyYggdrasilIP(words) {
-    const enc = new TextEncoder();
-    const baseKey = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(words.join(" ")),
-      "PBKDF2",
-      false,
-      ["deriveBits"]
-    );
-    const derivedBits = await crypto.subtle.deriveBits(
-      {
-        name: "PBKDF2",
-        salt: enc.encode("ghostlink-yggdrasil-v1"),
-        iterations: 100000,
-        hash: "SHA-256"
-      },
-      baseKey,
-      256
-    );
-    const rawKeyBytes = new Uint8Array(derivedBits);
-
-    const publicKeyBytes = await this.curve25519PublicKeyFromSeed(rawKeyBytes);
-    const address = await this._legacyYggdrasilIPFromKey(publicKeyBytes);
-    const publicKeyHex = Array.from(publicKeyBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const privateKeyHex = Array.from(rawKeyBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-    return { publicKeyHex, address, privateKeyHex };
-  },
-  async curve25519PublicKeyFromSeed(seedBytes) {
-    // Primary path: use tweetnacl (nacl-fast.min.js exposes as window.nacl)
-    // nacl.box.keyPair.fromSecretKey performs X25519 (Curve25519) scalar
-    // multiplication of the private key against the standard base point (9),
-    // producing the correct 32-byte Curve25519 public key.
-    if (typeof nacl !== 'undefined' && nacl.box) {
-      try {
-        const keyPair = nacl.box.keyPair.fromSecretKey(seedBytes);
-        return new Uint8Array(keyPair.publicKey);
-      } catch (e) {
-        console.warn('[CryptoEngine] nacl X25519 failed:', e.message);
-      }
-    }
-    // Fallback: Web Crypto API X25519 (available in modern browsers)
-    // Import the 32-byte seed as a PKCS#8-wrapped X25519 private key,
-    // then re-export as JWK to extract the public key ("x" field).
-    // PKCS#8 header for X25519: OID 1.3.101.110 = 302e020100300506032b656e04220420
-    if (typeof crypto.subtle !== 'undefined') {
-      try {
-        const x25519Pkcs8Header = new Uint8Array([
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20]
-        );
-        const pkcs8Key = new Uint8Array(48);
-        pkcs8Key.set(x25519Pkcs8Header, 0);
-        pkcs8Key.set(seedBytes, 16);
-
-        // Import as X25519 private key (must be exportable to extract public key)
-        const privateKey = await crypto.subtle.importKey(
-          "pkcs8",
-          pkcs8Key,
-          { name: "X25519" },
-          true,
-          ["deriveBits"]
-        );
-
-        // Export as JWK to get the public key component ("x" field)
-        const jwk = await crypto.subtle.exportKey("jwk", privateKey);
-        if (jwk.x) {
-          // JWK "x" is base64url-encoded 32-byte Curve25519 public key
-          const b64url = jwk.x;
-          const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
-          const binStr = atob(b64);
-          const pubBytes = new Uint8Array(binStr.length);
-          for (let i = 0; i < binStr.length; i++) pubBytes[i] = binStr.charCodeAt(i);
-          return pubBytes;
-        }
-        throw new Error('JWK export did not contain public key (x field)');
-      } catch (e) {
-        console.warn('[CryptoEngine] Web Crypto X25519 failed:', e.message);
-      }
-    }
-    throw new Error('[CryptoEngine] No X25519 implementation available. ' +
-    'Ensure tweetnacl (nacl-fast.min.js) is loaded, or use a browser with Web Crypto X25519 support.');
-  },
-  /**
-   * The IPv6 address Yggdrasil's scheme assigns to a public key.
-   * Private helper of deriveLegacyYggdrasilIP — see the warning there.
-   * @private
-   */
-  async _legacyYggdrasilIPFromKey(publicKeyBytes) {
-    const hashBuffer = await crypto.subtle.digest("SHA-512", publicKeyBytes);
-    const hash = new Uint8Array(hashBuffer);
-
-    let leadingOnes = 0;
-    for (let i = 0; i < hash.length; i++) {
-      const byte = hash[i];
-      let mask = 0x80;
-      while (mask > 0) {
-        if ((byte & mask) !== 0) {
-          leadingOnes++;
-          mask >>= 1;
-        } else {
-          break;
-        }
-      }
-      if (mask > 0) {
-        break;
-      }
-    }
-
-    const addr = new Uint8Array(16);
-    addr[0] = 0x02;
-    addr[1] = leadingOnes;
-
-    let bitSrc = leadingOnes + 1;
-    for (let i = 0; i < 112; i++) {
-      const srcBitPos = bitSrc + i;
-      const srcByteIdx = Math.floor(srcBitPos / 8);
-      const srcBitIdx = 7 - srcBitPos % 8;
-      const bitVal = hash[srcByteIdx] >> srcBitIdx & 1;
-
-      const destBitPos = 16 + i;
-      const destByteIdx = Math.floor(destBitPos / 8);
-      const destBitIdx = 7 - destBitPos % 8;
-
-      if (bitVal) {
-        addr[destByteIdx] |= 1 << destBitIdx;
-      }
-    }
-
-    const segments = [];
-    for (let i = 0; i < 16; i += 2) {
-      const val = addr[i] << 8 | addr[i + 1];
-      segments.push(val.toString(16));
-    }
-
-    const rawIp = segments.join(':');
-    const segs = rawIp.split(':');
-    let bestStart = -1;
-    let bestLen = 0;
-    let curStart = -1;
-    let curLen = 0;
-    for (let i = 0; i < segs.length; i++) {
-      if (parseInt(segs[i], 16) === 0) {
-        if (curStart === -1) {
-          curStart = i;
-          curLen = 1;
-        } else {
-          curLen++;
-        }
-        if (curLen > bestLen) {
-          bestStart = curStart;
-          bestLen = curLen;
-        }
-      } else {
-        curStart = -1;
-        curLen = 0;
-      }
-    }
-    if (bestLen > 1) {
-      const before = segs.slice(0, bestStart).join(':');
-      const after = segs.slice(bestStart + bestLen).join(':');
-      return (before === '' ? '' : before) + '::' + (after === '' ? '' : after);
-    }
-    return rawIp;
-  }
 };
 window.CryptoEngine = CryptoEngine;
 
@@ -2987,32 +2806,6 @@ function GhostLinkApp() {
   const [expiryDismissed, setExpiryDismissed] = useState(false);
   const [licenseDaysLeft, setLicenseDaysLeft] = useState(null);
 
-  // Ghost Mesh (Yggdrasil) state
-  const [yggdrasilEnabled, setYggdrasilEnabled] = useState(localStorage.getItem('gl_yggdrasil_enabled') === 'true');
-  const [yggdrasilAddress, setYggdrasilAddress] = useState(localStorage.getItem('gl_yggdrasil_address') || '');
-  const [meshPeers, setMeshPeers] = useState(loadPersisted('gl_mesh_peers', {}));
-  // Disabled in this build — see src/utils/capabilities.js for why. Read
-  // through a default so a bundle that somehow lacks the module fails closed.
-  const meshSetupAvailable = window.GhostLink?.Capabilities?.MESH_SETUP_AVAILABLE === true;
-  const meshSetupReason = window.GhostLink?.Capabilities?.MESH_SETUP_UNAVAILABLE_REASON
-    || 'Yggdrasil setup is unavailable in this build.';
-  const [showMeshSetup, setShowMeshSetup] = useState(false);
-  const [meshSetupStep, setMeshSetupStep] = useState('intro'); // intro, seed, result
-  const [meshSeedInput, setMeshSeedInput] = useState('');
-  const [meshAddressInput, setMeshAddressInput] = useState('');
-  const [meshPubKeyInput, setMeshPubKeyInput] = useState('');
-  const [derivedMeshAddress, setDerivedMeshAddress] = useState('');
-  const [derivedMeshPubKey, setDerivedMeshPubKey] = useState('');
-  const [derivedMeshPrivKey, setDerivedMeshPrivKey] = useState('');
-
-  useEffect(() => {
-    const handler = () => {
-      setMeshPeers(loadPersisted('gl_mesh_peers', {}));
-    };
-    window.addEventListener('gl-mesh-peers-updated', handler);
-    return () => window.removeEventListener('gl-mesh-peers-updated', handler);
-  }, []);
-
   // Buy License portal state
   const [showBuyModal, setShowBuyModal] = useState(false);
   const [buyStep, setBuyStep] = useState(1);
@@ -3386,31 +3179,14 @@ function GhostLinkApp() {
     return ok;
   }, []);
 
-  // Only P2PConnector supports Ghost Mesh (Yggdrasil) dialling; every mesh
-  // dial checks here first.
-  const meshDialSupported = useCallback((conn) =>
-  !!conn && typeof conn.connectToMeshPeer === 'function', []);
-
-  const dialMeshPeer = useCallback((conn, peerId, yggdrasilAddress) => {
-    if (!meshDialSupported(conn)) {
-      console.warn('[GhostMesh] Active connector has no mesh dialling support — skipping', peerId);
-      return false;
-    }
-    conn.connectToMeshPeer(peerId, yggdrasilAddress).catch((err) => {
-      console.warn('[GhostMesh] Dial failed:', err?.message || err);
-    });
-    return true;
-  }, [meshDialSupported]);
-
   // Deliberate, local request to reconnect to a peer. This is the only place a
   // block from a previous forced removal is lifted — an unsolicited remote
   // peer-connected must never clear it.
-  const reconnectPeer = useCallback((peerId, yggdrasilAddress) => {
+  const reconnectPeer = useCallback((peerId) => {
     const conn = p2pConnectorRef.current;
     if (!conn) return;
     conn.unblockPeer?.(peerId);
-    if (yggdrasilAddress) dialMeshPeer(conn, peerId, yggdrasilAddress);
-  }, [dialMeshPeer]);
+  }, []);
 
   // Seal history recovered from Shamir fragments and re-hydrate from it.
   const restoreHistoryVault = useCallback(async (words, recovered) => {
@@ -4455,7 +4231,6 @@ function GhostLinkApp() {
         // Restore cached peers as offline initially
         const cached = PeerCache.getAllPeers();
         const cachedIds = Object.keys(cached);
-        const meshPeersCache = loadPersisted('gl_mesh_peers', {});
         if (cachedIds.length > 0) {
           setAutoReconnectStatus('trying-relay');
           for (const pid of cachedIds) {
@@ -4469,21 +4244,12 @@ function GhostLinkApp() {
                 color: PALETTE.graphite, unread: 0, fingerprint: pid, isReal: true, isCached: true
               }];
             });
-            // Auto-dial Yggdrasil peers on start in Electron
-            if (localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron) {
-              const mp = meshPeersCache[pid];
-              if (mp && mp.yggdrasilAddress) {
-                console.debug(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress}`);
-                dialMeshPeer(conn, pid, mp.yggdrasilAddress);
-              }
-            }
           }
         }
       } catch (e) {
         console.warn('[GhostLink] Signaling connect failed (will auto-reconnect):', e.message);
         setSignalingAvailable(false);
         const cached = PeerCache.getAllPeers();
-        const meshPeersCache = loadPersisted('gl_mesh_peers', {});
         for (const pid of Object.keys(cached)) {
           const c = cached[pid];
           setPeers((prev) => {
@@ -4495,14 +4261,6 @@ function GhostLinkApp() {
               color: PALETTE.graphite, unread: 0, fingerprint: pid, isReal: true, isCached: true
             }];
           });
-          // Auto-dial Yggdrasil peers on start in Electron even if signaling is down
-          if (localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron) {
-            const mp = meshPeersCache[pid];
-            if (mp && mp.yggdrasilAddress) {
-              console.debug(`[GhostMesh] Auto-dialing cached mesh peer ${pid} at ${mp.yggdrasilAddress} (signaling down)`);
-              dialMeshPeer(conn, pid, mp.yggdrasilAddress);
-            }
-          }
         }
         setTimeout(() => setAutoReconnectStatus('waiting'), 5000);
       }
@@ -7580,10 +7338,8 @@ function GhostLinkApp() {
 
     if (peer.status !== 'online' && peer.type !== 'group') {
       // Selecting an offline peer is an explicit reconnect request: clear any
-      // block from a forced removal, and dial over the mesh when available.
-      const meshEnabled = localStorage.getItem('gl_yggdrasil_enabled') === 'true' && window.ghostlink?.isElectron;
-      const mp = meshEnabled ? meshPeers[peer.fingerprint || peer.id] : null;
-      reconnectPeer(peer.fingerprint || peer.id, mp?.yggdrasilAddress);
+      // block from a forced removal.
+      reconnectPeer(peer.fingerprint || peer.id);
     }
   }} style=${{
     padding: "11px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 11,
@@ -7599,10 +7355,6 @@ function GhostLinkApp() {
                         <div style=${{ fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
                           <span style=${{ display: "flex", alignItems: "center", gap: 6 }}>
                             ${peer.name}
-                            ${meshPeers[peer.fingerprint || peer.id] && html`<span title="Ghost Mesh Enabled" style=${
-  { display: "inline-flex", opacity: 0.85 }}>
-                                <${I} t="globe" s=${11} c=${p2pConnectorRef.current?.meshConns[peer.fingerprint || peer.id] ? th.accent : th.textSecondary} />
-                              </span>`}
                           </span>
                           ${
   peer.unread > 0 && html`<span style=${{ width: 18, height: 18, borderRadius: "50%", background: th.accent, color: PALETTE.obsidian, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>${peer.unread}</span>`}
@@ -8583,84 +8335,6 @@ inviteTab === "create" ? html`<>
                   </div>
 
                   
-                  <div style=${
-  { marginBottom: 22 }}>
-                    <div style=${{ fontSize: 10, color: th.textSecondary, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Ghost Mesh (Advanced)</div>
-                    <div style=${{ background: th.bg3, borderRadius: 10, padding: "10px 12px" }}>
-                      <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <${I} t="globe" s=${14} c=${yggdrasilEnabled ? th.accent : th.textSecondary} />
-                          <span style=${{ fontSize: 12, color: yggdrasilEnabled ? PALETTE.mist : PALETTE.fade }}>Ghost Mesh (Yggdrasil)</span>
-                        </div>
-                        <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
-                          ${!meshSetupAvailable ? html`<${Tag} color=th.textSecondary>UNAVAILABLE<//>` :
-  !yggdrasilAddress ? html`<${Tag} color=th.textSecondary>NOT CONFIGURED<//>` :
-
-  !yggdrasilEnabled ? html`<${Tag} color=PALETTE.amber>CONFIGURED<//>` : html`<${Tag} color=PALETTE.spectral>ACTIVE<//>`}
-                          <button onClick=${
-
-
-
-  async () => {
-    if (!meshSetupAvailable) {
-      addToast(meshSetupReason, 'info');
-      return;
-    }
-    if (!yggdrasilAddress) {
-      setShowMeshSetup(true);
-      setMeshSetupStep('intro');
-      return;
-    }
-    const newVal = !yggdrasilEnabled;
-    localStorage.setItem('gl_yggdrasil_enabled', String(newVal));
-    setYggdrasilEnabled(newVal);
-    if (window.ghostlink?.isElectron) {
-      if (newVal) {
-        try {
-          // The IPC handler reports a failed listen as a resolved
-          // { success: false }, not a rejection.
-          const res = await window.ghostlink.ghostMesh.startServer(localStorage.getItem('gl_yggdrasil_address') || '');
-          if (res && res.success === false) throw new Error(res.error || 'unknown error');
-          addToast('Ghost Mesh server started', 'success');
-        } catch (err) {
-          addToast('Failed to start Ghost Mesh server: ' + err.message, 'error');
-        }
-      } else {
-        try {
-          await window.ghostlink.ghostMesh.stopServer();
-          addToast('Ghost Mesh server stopped', 'info');
-        } catch (err) {}
-      }
-    } else {
-      addToast(newVal ? 'Mesh enabled (Web Client mode)' : 'Mesh disabled', 'info');
-    }
-  }} style=${{
-    width: 40, height: 22, borderRadius: 11, border: "none",
-    background: yggdrasilEnabled ? th.accent : PALETTE.divider,
-    cursor: "pointer", position: "relative", transition: "all 0.2s ease"
-  }}>
-                            <div style=${{ width: 16, height: 16, borderRadius: "50%", background: PALETTE.frost, position: "absolute", top: 3, left: yggdrasilEnabled ? 21 : 3, transition: "all 0.2s ease" }} />
-                          </button>
-                        </div>
-                      </div>
-                      <div style=${{ fontSize: 9.5, color: th.textSecondary, marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style=${{ wordBreak: "break-all", paddingRight: 8 }}>
-                          ${yggdrasilAddress ? `Address: ${yggdrasilAddress}` : "Direct peer-to-peer transport routing over Yggdrasil mesh network."}
-                        </span>
-                        ${meshSetupAvailable
-  ? html`<span onClick=${() => {setShowMeshSetup(true);setMeshSetupStep('intro');}} style=${{ color: th.accent, cursor: "pointer", textDecoration: "underline", flexShrink: 0 }}>
-                          ${yggdrasilAddress ? "Reconfigure" : "Configure"}
-                        </span>`
-  : html`<span title=${meshSetupReason} style=${{ color: th.textSecondary, opacity: 0.6, flexShrink: 0, cursor: "not-allowed" }}>
-                          Unavailable
-                        </span>`}
-                      </div>
-                      ${!window.ghostlink?.isElectron && html`<div style=${
-  { fontSize: 9, color: PALETTE.amber, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, borderRadius: 6, padding: "6px 8px", marginTop: 8 }}>
-                          <strong>Web Mode:</strong> Direct TCP server is disabled in web browsers. Handshakes will use WebRTC candidate matching over Yggdrasil.
-                        </div>`}
-                    </div>
-                  </div>
 
                   
 
@@ -9634,241 +9308,6 @@ inviteTab === "create" ? html`<>
   handleGenerateWorkspaceInvite} inviteCode=${
   workspaceInviteCode} th=${
   th} />
-
-            ${
-  showMeshSetup && meshSetupAvailable && html`<div style=${
-  { position: "fixed", inset: 0, background: PALETTE.scrim, WebkitBackdropFilter: "blur(10px)", backdropFilter: "blur(10px)", display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center", zIndex: 110, padding: isMobile ? 0 : 16 }} onClick=${() => {setShowMeshSetup(false);setMeshSeedInput('');setMeshPubKeyInput('');}}>
-                <div style=${{ background: PALETTE.obsidian, border: `1px solid ${th.accent}30`, borderRadius: 14, width: "100%", maxWidth: 500, padding: 24, boxSizing: "border-box", display: "flex", flexDirection: "column", maxHeight: isMobile ? "90vh" : "95vh", overflowY: "auto", position: "relative", animation: "fadeInScale 0.2s cubic-bezier(0.16, 1, 0.3, 1)" }} onClick=${(e) => e.stopPropagation()}>
-                  
-                  
-                  <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-                    <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <${I} t="globe" s=${18} c=${th.accent} />
-                      <span style=${{ fontSize: 13, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: th.text }}>
-                        [ GHOST MESH SETUP ]
-                      </span>
-                    </div>
-                    <button onClick=${() => {setShowMeshSetup(false);setMeshSeedInput('');}} style=${{ background: "none", border: "none", color: th.textSecondary, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <${I} t="x" s=${18} />
-                    </button>
-                  </div>
-
-                  
-                  ${meshSetupStep === 'intro' && html`<div>
-                      <p style=${
-  { fontSize: 12.5, color: PALETTE.mist, lineHeight: 1.6, marginBottom: 16 }}>
-                        Ghost Mesh integrates the decentralized, cryptographically-routed <strong>Yggdrasil</strong> IPv6 network directly into GhostLink as a transport layer.
-                      </p>
-                      <p style=${{ fontSize: 12.5, color: PALETTE.mist, lineHeight: 1.6, marginBottom: 16 }}>
-                        This allows you to establish direct IP-to-IP encrypted connections to peers without relying on any signaling servers.
-                      </p>
-                      <div style=${{ background: th.bg3, borderRadius: 10, padding: 12, marginBottom: 20, border: "1px solid " + th.border }}>
-                        <div style=${{ fontSize: 11, fontWeight: 600, color: th.text, marginBottom: 6 }}>Prerequisites:</div>
-                        <ul style=${{ fontSize: 11, color: PALETTE.mist, paddingLeft: 18, lineHeight: 1.6, margin: 0 }}>
-                          <li>A Yggdrasil daemon must be installed and running on your host system.</li>
-                          <li>Your local daemon must be configured with a Node identity derived from your GhostLink recovery phrase.</li>
-                        </ul>
-                      </div>
-                      <div style=${{ display: "flex", justifyContent: "flex-end" }}>
-                        <button onClick=${() => setMeshSetupStep('seed')} style=${{ padding: "10px 20px", borderRadius: 8, border: "none", background: th.accent, color: PALETTE.obsidian, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600 }}>
-                          Next: Cryptographic Setup
-                        </button>
-                      </div>
-                    </div>`}
-
-                  ${
-  meshSetupStep === 'seed' && html`<div>
-                      <p style=${
-  { fontSize: 12, color: PALETTE.mist, lineHeight: 1.5, marginBottom: 16 }}>
-                        Enter your 12-word seed phrase and your current local Yggdrasil address and public key. We will verify they match before saving.
-                      </p>
-                      
-                      <div style=${{ marginBottom: 14 }}>
-                        <label style=${{ fontSize: 10, color: th.textSecondary, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "block" }}>12-Word Recovery Phrase</label>
-                        <textarea value=${
-  meshSeedInput} onChange=${
-  (e) => setMeshSeedInput(e.target.value)} placeholder="word1 word2 word3..." rows=${
-
-  3} style=${
-  { width: "100%", background: th.bg2, border: "1px solid " + th.border, borderRadius: 8, padding: 10, color: th.text, fontFamily: "monospace", fontSize: 12, outline: "none", resize: "none" }} />
-                      </div>
-
-                      <div style=${
-  { marginBottom: 14 }}>
-                        <label style=${{ fontSize: 10, color: th.textSecondary, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "block" }}>Pasted Local Yggdrasil IP Address</label>
-                        <input type="text" value=${
-
-  meshAddressInput} onChange=${
-  (e) => setMeshAddressInput(e.target.value.trim())} placeholder="e.g. 201:97c4:..." style=${
-
-  { width: "100%", background: th.bg2, border: "1px solid " + th.border, borderRadius: 8, padding: "10px 12px", color: th.text, fontFamily: "monospace", fontSize: 12, outline: "none" }} />
-                      </div>
-
-                      <div style=${
-  { marginBottom: 20 }}>
-                        <label style=${{ fontSize: 10, color: th.textSecondary, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "block" }}>Pasted Local Yggdrasil Public Key (hex)</label>
-                        <input type="text" value=${
-
-  meshPubKeyInput} onChange=${
-  (e) => setMeshPubKeyInput(e.target.value.trim().toLowerCase())} placeholder="e.g. a1b2c3d4... (64 hex chars from yggdrasilctl getSelf)" style=${
-
-  { width: "100%", background: th.bg2, border: "1px solid " + th.border, borderRadius: 8, padding: "10px 12px", color: th.text, fontFamily: "monospace", fontSize: 12, outline: "none" }} />
-                        <div style=${
-  { fontSize: 9, color: th.textSecondary, marginTop: 4 }}>
-                          Run <code>yggdrasilctl getSelf</code> — paste both the <strong>address</strong> and <strong>public key hex</strong> for stronger verification.
-                        </div>
-                      </div>
-
-                      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <button onClick=${() => setMeshSetupStep('intro')} style=${{ background: "none", border: "none", color: th.textSecondary, cursor: "pointer", fontSize: 11 }}>
-                          Back
-                        </button>
-                        <button onClick=${async () => {
-    const words = meshSeedInput.trim().split(/\s+/);
-    if (words.length !== 12 && words.length !== 24) {
-      addToast('Seed phrase must be 12 or 24 words', 'error');
-      return;
-    }
-    if (!meshAddressInput.trim()) {
-      addToast('Please enter your local Yggdrasil IP address', 'error');
-      return;
-    }
-    try {
-      const derived = await CryptoEngine.deriveLegacyYggdrasilIP(words);
-
-      // Normalizer
-      const normalizeIPv6 = (ip) => {
-        if (!ip) return "";
-        let clean = ip.replace(/[\[\]]/g, "").trim().toLowerCase();
-        if (clean.includes("::")) {
-          const parts = clean.split("::");
-          const left = parts[0] ? parts[0].split(":") : [];
-          const right = parts[1] ? parts[1].split(":") : [];
-          const missing = 8 - (left.length + right.length);
-          const middle = Array(missing).fill("0");
-          clean = [...left, ...middle, ...right].join(":");
-        }
-        return clean.split(":").map((seg) => {
-          return parseInt(seg || "0", 16).toString(16).padStart(4, "0");
-        }).join(":");
-      };
-
-      const normPasted = normalizeIPv6(meshAddressInput);
-      const normDerived = normalizeIPv6(derived.address);
-
-      setDerivedMeshAddress(derived.address);
-      setDerivedMeshPubKey(derived.publicKeyHex);
-      setDerivedMeshPrivKey(derived.privateKeyHex);
-
-      if (normPasted !== normDerived) {
-        addToast('Verification failed: Seed phrase derived address (' + derived.address + ') does not match the entered address.', 'error');
-        return;
-      }
-
-      // Verify public key if provided (stronger check against hash collisions)
-      if (meshPubKeyInput.trim()) {
-        const normPubPasted = meshPubKeyInput.trim().toLowerCase().replace(/\s/g, '');
-        const normPubDerived = derived.publicKeyHex.toLowerCase();
-        if (normPubPasted !== normPubDerived) {
-          addToast('Verification failed: Derived X25519 public key (' + normPubDerived + ') does not match the pasted public key.', 'error');
-          return;
-        }
-        addToast('Yggdrasil address AND public key verified!', 'success');
-      } else {
-        addToast('Yggdrasil address verified! (Tip: also paste public key hex for stronger verification)', 'success');
-      }
-      setMeshSetupStep('result');
-    } catch (err) {
-      addToast('Crypto derivation error: ' + err.message, 'error');
-    }
-  }} style=${{ padding: "10px 20px", borderRadius: 8, border: "none", background: th.accent, color: PALETTE.obsidian, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600 }}>
-                          Verify & Continue
-                        </button>
-                      </div>
-                    </div>`}
-
-                  ${
-  meshSetupStep === 'result' && html`<div>
-                      <div style=${
-  { display: "flex", alignItems: "center", gap: 8, color: PALETTE.spectral, marginBottom: 16 }}>
-                        <${I} t="check" s=${20} c=PALETTE.spectral />
-                        <span style=${{ fontSize: 13, fontWeight: 600 }}>Cryptographic Matching Confirmed!</span>
-                      </div>
-                      
-                      <p style=${{ fontSize: 12, color: PALETTE.mist, lineHeight: 1.5, marginBottom: 16 }}>
-                        Your seed phrase matches your Yggdrasil IPv6 address. Here are the keys you need to configure in your local Yggdrasil configuration file (usually <code>/etc/yggdrasil.conf</code>):
-                      </p>
-
-                      <div style=${{ background: th.bg3, borderRadius: 10, padding: 12, marginBottom: 20 }}>
-                        <div style=${{ marginBottom: 10 }}>
-                          <div style=${{ fontSize: 9, color: th.textSecondary, textTransform: "uppercase", marginBottom: 2 }}>Node IPv6 Address</div>
-                          <div style=${{ fontFamily: "monospace", fontSize: 11, color: th.text, wordBreak: "break-all" }}>${derivedMeshAddress}</div>
-                        </div>
-                        <div style=${{ marginBottom: 10 }}>
-                          <div style=${{ fontSize: 9, color: th.textSecondary, textTransform: "uppercase", marginBottom: 2 }}>Node Private Key (NodePrivHex)</div>
-                          <div style=${{ display: "flex", alignItems: "center", justifySelf: "stretch", justifyContent: "space-between" }}>
-                            <div style=${{ fontFamily: "monospace", fontSize: 10, color: PALETTE.mist, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "80%" }}>
-                              ${derivedMeshPrivKey ? derivedMeshPrivKey + derivedMeshPubKey : ""}
-                            </div>
-                            <span onClick=${() => {
-    navigator.clipboard.writeText(derivedMeshPrivKey + derivedMeshPubKey);
-    addToast('Private key copied', 'success');
-  }} style=${{ color: th.accent, cursor: "pointer", fontSize: 10, textDecoration: "underline" }}>Copy</span>
-                          </div>
-                        </div>
-                        <div>
-                          <div style=${{ fontSize: 9, color: th.textSecondary, textTransform: "uppercase", marginBottom: 2 }}>Node Public Key (NodePubHex)</div>
-                          <div style=${{ display: "flex", alignItems: "center", justifySelf: "stretch", justifyContent: "space-between" }}>
-                            <div style=${{ fontFamily: "monospace", fontSize: 10, color: PALETTE.mist, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "80%" }}>
-                              ${derivedMeshPubKey}
-                            </div>
-                            <span onClick=${() => {
-    navigator.clipboard.writeText(derivedMeshPubKey);
-    addToast('Public key copied', 'success');
-  }} style=${{ color: th.accent, cursor: "pointer", fontSize: 10, textDecoration: "underline" }}>Copy</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style=${{ background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, borderRadius: 8, padding: "10px 12px", marginBottom: 20 }}>
-                        <div style=${{ fontSize: 10, fontWeight: 600, color: PALETTE.amber, marginBottom: 4 }}>⚠ Post-Setup Verification</div>
-                        <div style=${{ fontSize: 10, color: PALETTE.mist, lineHeight: 1.5 }}>
-                          After configuring your Yggdrasil daemon with these keys and restarting, run <code style=${{ color: th.text }}>yggdrasilctl getSelf</code> and compare <strong>both</strong> the reported address AND the full public key hex against the values shown above. Address-only matching is insufficient — address collisions are theoretically possible with truncated SHA-512 hashes.
-                        </div>
-                      </div>
-
-                      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <button onClick=${() => setMeshSetupStep('seed')} style=${{ background: "none", border: "none", color: th.textSecondary, cursor: "pointer", fontSize: 11 }}>
-                          Back
-                        </button>
-                        <button onClick=${async () => {
-    localStorage.setItem('gl_yggdrasil_address', derivedMeshAddress);
-    localStorage.setItem('gl_yggdrasil_enabled', 'true');
-    setYggdrasilAddress(derivedMeshAddress);
-    setYggdrasilEnabled(true);
-    setShowMeshSetup(false);
-    setMeshSeedInput(''); // clear sensitive data from state
-    setMeshPubKeyInput('');
-
-    if (window.ghostlink?.isElectron) {
-      try {
-        const res = await window.ghostlink.ghostMesh.startServer(localStorage.getItem('gl_yggdrasil_address') || '');
-        if (res && res.success === false) throw new Error(res.error || 'unknown error');
-        addToast('Ghost Mesh activated and server started', 'success');
-      } catch (err) {
-        addToast('Saved, but failed to start TCP server: ' + err.message, 'error');
-      }
-    } else {
-      addToast('Ghost Mesh configured for Web Mode', 'success');
-    }
-  }} style=${{ padding: "10px 20px", borderRadius: 8, border: "none", background: th.accent, color: PALETTE.obsidian, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600 }}>
-                          Save & Enable Mesh
-                        </button>
-                      </div>
-                    </div>`}
-
-                </div>
-              </div>`}
 
             ${
 

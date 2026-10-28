@@ -24,7 +24,6 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const Store = require('electron-store');
-const net = require('net');
 
 // Per-launch bridge token (CSPRNG, 256-bit). The renderer presents it to the
 // local bridge as a WebSocket subprotocol; the bridge rejects any connection
@@ -162,34 +161,6 @@ const restoreGuard = createRestoreGuard({
   moveSeedAside: () => seedStore.moveAside(),
   restoreSeedAside: (asideKey) => seedStore.restoreAside(asideKey),
 });
-
-/* ─── Ghost Mesh TCP bridge state ───────────────────────────── */
-// Must differ from the GMP node's port (default 49500). The renderer dials
-// without a port and gets this.
-const GHOSTMESH_PORT = 49600;
-let ghostMeshServer = null;
-const activeMeshSockets = new Map(); // connId -> net.Socket
-
-// Ghost Mesh rides the Yggdrasil overlay (0200::/7), whose addresses are
-// reachable only between Yggdrasil peers over the tun interface — never from
-// the public internet. We bind the server and dial peers ONLY within that
-// space (plus loopback for local testing), so the mesh is never exposed on the
-// host's global IPv6 or LAN addresses the way the old `[::]` bind was (which,
-// on a host with a public IPv6 and no blocking firewall, was internet-reachable).
-function normalizeMeshHost(host) {
-  if (typeof host !== 'string') return '';
-  return host.trim().replace(/^\[/, '').replace(/\]$/, '');
-}
-function isMeshHost(host) {
-  const h = normalizeMeshHost(host);
-  if (!h) return false;
-  if (h === '::1' || h === '127.0.0.1') return true; // loopback (local testing)
-  if (!net.isIPv6(h)) return false;
-  // 0200::/7: the top 7 bits are 0000001, i.e. the first 16-bit group, masked
-  // with 0xfe00, equals 0x0200. Covers 0200:: through 03ff:ffff:…
-  const firstGroup = parseInt(h.split(':')[0] || '', 16);
-  return Number.isFinite(firstGroup) && (firstGroup & 0xfe00) === 0x0200;
-}
 
 /* ─── Window tracking ───────────────────────────────────────── */
 
@@ -399,46 +370,6 @@ function openExternalIfSafe(url) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   GHOST MESH SOCKETS
-   ═══════════════════════════════════════════════════════════════ */
-
-// Cap on one newline-delimited frame, so a peer cannot grow the heap without
-// bound by never sending a newline.
-const MAX_MESH_LINE_CHARS = 1024 * 1024;
-
-function wireMeshSocket(socket, connId, label) {
-  // setEncoding keeps a multi-byte character that straddles two TCP chunks
-  // intact; decoding each chunk on its own turned it into U+FFFD.
-  socket.setEncoding('utf8');
-  let buffer = '';
-  socket.on('data', (data) => {
-    buffer += data;
-    let boundary = buffer.indexOf('\n');
-    while (boundary !== -1) {
-      const line = buffer.slice(0, boundary).trim();
-      buffer = buffer.slice(boundary + 1);
-      if (line) {
-        mainWindow?.webContents.send('ghostmesh-data', { connId, data: line });
-      }
-      boundary = buffer.indexOf('\n');
-    }
-    if (buffer.length > MAX_MESH_LINE_CHARS) {
-      console.warn(`[GhostMesh ${label}] Dropping ${connId}: frame exceeds ${MAX_MESH_LINE_CHARS} chars`);
-      socket.destroy();
-    }
-  });
-
-  socket.on('close', () => {
-    activeMeshSockets.delete(connId);
-    mainWindow?.webContents.send('ghostmesh-peer-disconnected', { connId });
-  });
-
-  socket.on('error', (err) => {
-    console.warn(`[GhostMesh ${label} Socket Error]`, err.message);
-  });
-}
-
-/* ═══════════════════════════════════════════════════════════════
    IPC HANDLERS
    ═══════════════════════════════════════════════════════════════ */
 
@@ -578,122 +509,6 @@ function setupIPC() {
       isQuitting = true;
       quitAndInstall();
     }
-  });
-
-  /* ── Ghost Mesh (Yggdrasil TCP Socket Bridge) ───────────────── */
-  ipcMain.handle('ghostmesh-start-server', async (_e, bindAddress) => {
-    if (ghostMeshServer) {
-      return { success: true, message: 'Server already running' };
-    }
-
-    // Bind to the renderer-supplied Yggdrasil overlay address when it is one,
-    // otherwise to loopback (feature stays local-only). NEVER [::]: that
-    // exposed the mesh on every interface, including a public IPv6.
-    const host = isMeshHost(bindAddress) ? normalizeMeshHost(bindAddress) : '::1';
-
-    return new Promise((resolve) => {
-      try {
-        ghostMeshServer = net.createServer((socket) => {
-          const connId = `mesh-${Math.random().toString(36).slice(2, 10)}`;
-          activeMeshSockets.set(connId, socket);
-          
-          mainWindow?.webContents.send('ghostmesh-peer-connected', {
-            connId,
-            remoteAddress: socket.remoteAddress,
-            type: 'incoming'
-          });
-          
-          wireMeshSocket(socket, connId, 'Server');
-        });
-        
-        ghostMeshServer.on('error', (err) => {
-          console.error('[GhostMesh Server Error]', err.message);
-          resolve({ success: false, error: err.message });
-        });
-        
-        ghostMeshServer.listen({ host, port: GHOSTMESH_PORT }, () => {
-          console.log(`[GhostMesh] Server listening on [${host}]:${GHOSTMESH_PORT}`);
-          resolve({ success: true, boundHost: host });
-        });
-      } catch (err) {
-        resolve({ success: false, error: err.message });
-      }
-    });
-  });
-
-  ipcMain.handle('ghostmesh-stop-server', async () => {
-    if (!ghostMeshServer) {
-      return { success: true };
-    }
-    return new Promise((resolve) => {
-      // destroy, not end: a half-closed socket can stay open forever and
-      // server.close() would never call back.
-      for (const [connId, socket] of activeMeshSockets.entries()) {
-        try { socket.destroy(); } catch (e) {}
-        activeMeshSockets.delete(connId);
-      }
-      ghostMeshServer.close(() => {
-        ghostMeshServer = null;
-        console.log('[GhostMesh] Server stopped');
-        resolve({ success: true });
-      });
-    });
-  });
-
-  ipcMain.handle('ghostmesh-dial', async (_e, { host, port = GHOSTMESH_PORT }) => {
-    // Only dial within the Yggdrasil overlay (or loopback). This closes the
-    // arbitrary-host TCP primitive the renderer otherwise had.
-    if (!isMeshHost(host)) {
-      console.warn('[GhostMesh] Refusing dial to non-mesh host:', host);
-      return { success: false, error: 'Ghost Mesh only dials Yggdrasil overlay (0200::/7) or loopback addresses' };
-    }
-    return new Promise((resolve) => {
-      try {
-        console.log(`[GhostMesh] Dialing ${host}:${port}...`);
-        const socket = net.connect({ host, port }, () => {
-          const connId = `mesh-${Math.random().toString(36).slice(2, 10)}`;
-          activeMeshSockets.set(connId, socket);
-          
-          wireMeshSocket(socket, connId, 'Dial');
-          resolve({ success: true, connId });
-        });
-        
-        socket.on('error', (err) => {
-          console.error('[GhostMesh Dial Error]', err.message);
-          resolve({ success: false, error: err.message });
-        });
-      } catch (err) {
-        resolve({ success: false, error: err.message });
-      }
-    });
-  });
-
-  ipcMain.handle('ghostmesh-send', async (_e, { connId, data }) => {
-    const socket = activeMeshSockets.get(connId);
-    if (socket) {
-      try {
-        socket.write(data + '\n');
-        return true;
-      } catch (err) {
-        console.error('[GhostMesh Send Error]', err.message);
-        return false;
-      }
-    }
-    return false;
-  });
-
-  ipcMain.handle('ghostmesh-close', async (_e, { connId }) => {
-    const socket = activeMeshSockets.get(connId);
-    if (socket) {
-      try {
-        socket.end();
-        activeMeshSockets.delete(connId);
-        return true;
-      } catch (err) {
-        return false;
-      }
-    }
-    return false;
   });
 }
 

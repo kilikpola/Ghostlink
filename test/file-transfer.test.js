@@ -18,7 +18,8 @@ function test(name, fn) { tests.push([name, fn]); }
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const i = html.indexOf('  async encryptWithPublicKey(plaintext, pubKeyHex) {');
-const j = html.indexOf('  /**\n   * Derive the legacy Yggdrasil', i);
+// encryptWithPublicKey and decryptWithPrivateKey are CryptoEngine's last methods.
+const j = html.indexOf('\n};\nwindow.CryptoEngine = CryptoEngine;', i);
 assert.ok(i > -1 && j > -1, 'could not extract the ECIES helpers from index.html');
 const CryptoEngine = vm.runInNewContext(`({ ${html.slice(i, j)} })`,
   { crypto: webcrypto, TextEncoder, TextDecoder });

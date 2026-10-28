@@ -2,21 +2,12 @@
  * What this build can actually do. Features that cannot be relied on are
  * disabled here and the control says why.
  *
- * Mirrors mobile/src/utils/capabilities.js. Keep the two in step.
+ * Mirrors mobile/src/utils/capabilities.js. Keep the two in step. The
+ * desktop has no Yggdrasil setup dialog any more (removed with the unused
+ * Ghost Mesh TCP listener, G0), so MESH_SETUP_* exists on mobile only.
  */
 (function (exports) {
   'use strict';
-
-  /**
-   * The manual Yggdrasil / Ghost Mesh setup dialog. Its address derivation
-   * (SHA-512 of an X25519 key; Yggdrasil uses Ed25519) is unverified against a
-   * real node. Disabled until checked with `yggdrasilctl getSelf`; the
-   * derivation is kept in CryptoEngine.deriveLegacyYggdrasilIP.
-   */
-  var MESH_SETUP_AVAILABLE = false;
-
-  var MESH_SETUP_UNAVAILABLE_REASON =
-    'Yggdrasil setup is unverified against a real node and is disabled.';
 
   /**
    * Guardian (Shamir) social recovery over the network. Disabled on both sides
@@ -32,8 +23,6 @@
 
   exports.GhostLink = exports.GhostLink || {};
   exports.GhostLink.Capabilities = {
-    MESH_SETUP_AVAILABLE: MESH_SETUP_AVAILABLE,
-    MESH_SETUP_UNAVAILABLE_REASON: MESH_SETUP_UNAVAILABLE_REASON,
     GUARDIAN_RECOVERY_AVAILABLE: GUARDIAN_RECOVERY_AVAILABLE,
     GUARDIAN_RECOVERY_UNAVAILABLE_REASON: GUARDIAN_RECOVERY_UNAVAILABLE_REASON
   };

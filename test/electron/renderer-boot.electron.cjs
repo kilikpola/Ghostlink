@@ -40,7 +40,6 @@ fs.writeFileSync(preloadFile, `
     saveFile: async () => true, openFile: async () => null,
     onDeepLink: () => () => {}, onUpdateAvailable: () => () => {}, onUpdateDownloaded: () => () => {},
     onUpdateError: () => () => {}, onTrayAction: () => () => {},
-    ghostMesh: { startServer: async()=>({}), stopServer: async()=>({}), onPeerConnected:()=>()=>{}, onData:()=>()=>{}, onPeerDisconnected:()=>()=>{} },
     notify: () => {}, setBadgeCount: () => {}, minimize:()=>{}, maximize:()=>{}, close:()=>{},
   };
 `);

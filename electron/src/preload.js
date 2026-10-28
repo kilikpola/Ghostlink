@@ -24,11 +24,6 @@ const SEND_CHANNELS = [
 const INVOKE_CHANNELS = [
   'save-file',
   'open-file',
-  'ghostmesh-start-server',
-  'ghostmesh-stop-server',
-  'ghostmesh-dial',
-  'ghostmesh-send',
-  'ghostmesh-close',
   'gmp-start',
   'gmp-restore',
   'contact-vault-key',
@@ -43,9 +38,6 @@ const RECEIVE_CHANNELS = [
   'update-downloaded',
   'update-error',
   'tray-action',
-  'ghostmesh-peer-connected',
-  'ghostmesh-data',
-  'ghostmesh-peer-disconnected',
 ];
 
 /* ─── Secure send helper (validates channel) ────────────────── */
@@ -107,18 +99,6 @@ contextBridge.exposeInMainWorld('ghostlink', {
   onUpdateDownloaded: (callback) => secureOn('update-downloaded', callback),
   onUpdateError: (callback) => secureOn('update-error', callback),
   installUpdate: () => secureSend('install-update'),
-
-  /* ── Ghost Mesh ─────────────────────────────────────────────── */
-  ghostMesh: {
-    startServer: (bindAddress) => secureInvoke('ghostmesh-start-server', bindAddress),
-    stopServer: () => secureInvoke('ghostmesh-stop-server'),
-    dial: (host, port) => secureInvoke('ghostmesh-dial', { host, port }),
-    send: (connId, data) => secureInvoke('ghostmesh-send', { connId, data }),
-    close: (connId) => secureInvoke('ghostmesh-close', { connId }),
-    onPeerConnected: (callback) => secureOn('ghostmesh-peer-connected', callback),
-    onData: (callback) => secureOn('ghostmesh-data', callback),
-    onPeerDisconnected: (callback) => secureOn('ghostmesh-peer-disconnected', callback),
-  },
 
   gmp: {
     start: (seed) => secureInvoke('gmp-start', seed),

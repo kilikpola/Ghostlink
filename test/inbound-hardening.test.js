@@ -33,7 +33,8 @@ function slice(startMarker, endMarker) {
 const helpersSrc = slice('// ==================== INBOUND PAYLOAD SHAPING', '// ==================== PEER CACHE');
 const addrSrc = slice("const GHOST_ADDRESS_ALPHABET", "const GHOST_ADDRESS_PATTERN") +
   slice('function normalizeGhostAddress(input) {', '\nfunction isGhostAddress');
-const cryptoSrc = slice('  async encryptWithPublicKey(plaintext, pubKeyHex) {', '  /**\n   * Derive the legacy Yggdrasil');
+// encryptWithPublicKey and decryptWithPrivateKey are CryptoEngine's last methods.
+const cryptoSrc = slice('  async encryptWithPublicKey(plaintext, pubKeyHex) {', '\n};\nwindow.CryptoEngine = CryptoEngine;');
 const sealSrc = slice('async function sealPayload(', '// ==================== INBOUND PAYLOAD SHAPING');
 const vaultSrc = slice('const SECURE_STORAGE_KEYS =', '\n// ==================== END-TO-END MESSAGE SEALING');
 

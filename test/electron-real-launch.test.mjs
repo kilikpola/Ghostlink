@@ -62,6 +62,16 @@ try {
     ok(s.reachedMain, 'setup socket accepted: the node answered started and the app left the setup screen');
     ok(s.connectorOpen, 'main-view connector holds an open bridge socket');
 
+    console.log('\n=== the renderer loads the safety-number module (importmap, CSP, packaging) ===');
+    {
+      // Two public test NodeIDs (any 128-hex values); the expected value comes
+      // from gmp-core's dist in this process, so this checks the shipped copy.
+      const X = 'a1'.repeat(64), Y = 'b2'.repeat(64);
+      const { safetyNumber } = await import(path.join(repo, 'gmp-core', 'dist', 'safety-number.js'));
+      const inPage = await cdp.evaluate(`import('@ghostlink/safety-number').then((m) => m.safetyNumber('${X}', '${Y}'), (e) => 'error: ' + e.message)`);
+      ok(inPage === safetyNumber(X, Y), `import('@ghostlink/safety-number') in the window gives gmp-core's number (${String(inPage).slice(0, 15)}…)`);
+    }
+
     console.log('\n=== positive control: an untokened client is rejected and logged ===');
     const before = app.count(rejected);
     const status = await untokenedProbe();

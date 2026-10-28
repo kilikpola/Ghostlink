@@ -101,6 +101,20 @@ async function main() {
     outfile: path.join(VENDOR_DIR, 'contact-vault.js')
   });
 
+  // The safety number over two full NodeIDs (identity-v2.md §5). Its one
+  // source is gmp-core/src/safety-number.ts (@noble/hashes only), bundled here
+  // for the renderer as "@ghostlink/safety-number"; gmp-core and mobile run the
+  // same file. test/contact-verification.test.mjs checks this output is current.
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, 'gmp-core', 'src', 'safety-number.ts')],
+    bundle: true,
+    format: 'esm',
+    target: 'es2020',
+    minify: true,
+    platform: 'browser',
+    outfile: path.join(VENDOR_DIR, 'safety-number.js')
+  });
+
   // tweetnacl ships a prebuilt browser file; copy it as-is.
   const nacl = path.join(ROOT, 'node_modules', 'tweetnacl', 'nacl-fast.min.js');
   fs.copyFileSync(nacl, path.join(VENDOR_DIR, 'nacl-fast.min.js'));

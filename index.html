@@ -254,7 +254,8 @@
         "react": "./vendor/react.js",
         "react-dom/client": "./vendor/react-dom-client.js",
         "htm": "./vendor/htm.js",
-        "@ghostlink/contact-vault": "./vendor/contact-vault.js"
+        "@ghostlink/contact-vault": "./vendor/contact-vault.js",
+        "@ghostlink/safety-number": "./vendor/safety-number.js"
       }
     }
     </script>
@@ -854,18 +855,30 @@ function applyInboundReaction(prev, messageHash, emoji, reactorId) {
 // private half: it must open a nonce sealed to that key. The challenge names
 // both ends of the link, so it cannot be relayed to the real key holder.
 const PINNABLE_KEY = /^04[0-9a-f]{128}$/; // raw uncompressed P-256, as exportKey('raw') produces
+// A full NodeID: the only value a contact is verified by (identity-v2.md D9).
+const NODE_ID_FULL = /^[0-9a-f]{128}$/;
 
-function createKeyPinning({ seal, unseal, selfIds, send, getPinned, pin, randomHex }) {
-  const pending = new Map(); // transport peer id -> { key, nonce, name }
+// `via` is the transport a message arrived on: 'gmp' (the bridge, whose link
+// authenticates the sender's NodeID) or 'datachannel' (Quick Connect, whose
+// peer id is only what the bundle claimed). A pin is mesh-proven only when the
+// challenge was issued for, and the proof came back over, a GMP link from a
+// full NodeID; only such a pin can back a VERIFIED badge
+// (contactVerificationState).
+function createKeyPinning({ seal, unseal, selfIds, send, getPinned, hasMeshPin, pin, randomHex }) {
+  const pending = new Map(); // transport peer id -> { key, nonce, name, via }
+  const overMesh = (peerId, via) => via === 'gmp' && NODE_ID_FULL.test(String(peerId).toLowerCase());
   return {
     // → 'invalid' | 'mismatch' | 'known' | 'challenged'
-    async onAnnounce(peerId, msg) {
+    async onAnnounce(peerId, msg, via) {
       const key = typeof msg?.publicKeyHex === 'string' ? msg.publicKeyHex.trim().toLowerCase() : '';
       if (!PINNABLE_KEY.test(key)) return 'invalid';
       const known = getPinned(peerId)?.toLowerCase() || null;
-      if (known) return known === key ? 'known' : 'mismatch';
+      if (known && known !== key) return 'mismatch';
+      // A key already pinned without a mesh proof (Quick Connect, a cached
+      // record) is challenged again the first time it is announced over GMP.
+      if (known && !(overMesh(peerId, via) && !hasMeshPin(peerId, key))) return 'known';
       const nonce = randomHex(16);
-      pending.set(peerId, { key, nonce, name: inboundStr(msg.name, INBOUND_NAME_MAX) || '' });
+      pending.set(peerId, { key, nonce, name: inboundStr(msg.name, INBOUND_NAME_MAX) || '', via });
       send(peerId, {
         type: 'key-challenge',
         sealed: await seal({ nonce, target: peerId, challenger: selfIds() }, key)
@@ -883,13 +896,13 @@ function createKeyPinning({ seal, unseal, selfIds, send, getPinned, pin, randomH
       return true;
     },
     // → the pinned key, or null.
-    onProof(peerId, msg) {
+    onProof(peerId, msg, via) {
       const p = pending.get(peerId);
       if (!p || typeof msg?.nonce !== 'string' || msg.nonce !== p.nonce) return null;
       pending.delete(peerId);
       const known = getPinned(peerId)?.toLowerCase() || null;
       if (known && known !== p.key) return null;
-      pin(peerId, p.key, p.name);
+      pin(peerId, p.key, p.name, { viaMesh: overMesh(peerId, p.via) && overMesh(peerId, via) });
       return p.key;
     }
   };
@@ -1471,14 +1484,38 @@ function messageBlockTags(block, chainValid) {
 function peerLiveSecurityTags(peer) {
   return (peer && peer.status === 'online') ? [{ label: 'E2E ENCRYPTED', icon: 'lock' }] : [];
 }
-//   peerKeyVerified: a contact is verified only against the EXACT full public
-//   key the user compared in the ceremony. If the peer later presents any
-//   different key, this returns false — the badge clears rather than vouching
-//   for a key nobody checked. (The ceremony compares a 160-bit safety number
-//   derived from both full public keys; the stored check here is the full key.)
-function peerKeyVerified(recordedKey, currentKey) {
-  return !!currentKey && !!recordedKey && recordedKey === currentKey;
+//   contactVerificationState: what the user verified is the contact's FULL
+//   NodeID (the safety number is over both full NodeIDs; identity-v2.md §5,
+//   D9) — never the 45-bit Ghost Address, never a fingerprint prefix. VERIFIED
+//   needs all of:
+//     - the contact is a mesh contact (its id is a full NodeID; a Quick Connect
+//       peer's id is only what its bundle claimed, so it is not verifiable);
+//     - the recorded NodeID is that contact's current GMP-authenticated NodeID
+//       (a rotation or substitution clears it: 'nodeid-changed');
+//     - the chat key in use was pinned by proof of possession over a GMP link
+//       authenticated to that NodeID (createKeyPinning).
+//   → 'verified' | 'unverified' | 'nodeid-changed' | 'key-unproven' | 'not-verifiable'
+const VERIFICATION_RECORD_VERSION = 2;
+function contactVerificationState({ peerId, record, keyPin, currentKey }) {
+  const id = typeof peerId === 'string' ? peerId.toLowerCase() : '';
+  if (!NODE_ID_FULL.test(id)) return 'not-verifiable';
+  const rec = record && typeof record === 'object' && record.v === VERIFICATION_RECORD_VERSION &&
+    typeof record.nodeId === 'string' && NODE_ID_FULL.test(record.nodeId.toLowerCase()) ? record : null;
+  if (!rec) return 'unverified';
+  if (rec.nodeId.toLowerCase() !== id) return 'nodeid-changed';
+  const key = typeof currentKey === 'string' ? currentKey.toLowerCase() : '';
+  if (!keyPin || keyPin.via !== 'gmp-pop' || String(keyPin.nodeId).toLowerCase() !== id || !key || keyPin.key !== key) {
+    return 'key-unproven';
+  }
+  return 'verified';
 }
+const VERIFICATION_STATE_TEXT = {
+  'verified': 'You compared this safety number with them. It covers their full NodeID, and their chat key was proven over a Ghost Mesh link to it.',
+  'unverified': 'Not verified yet. Compare the safety number with them over a channel you already trust.',
+  'nodeid-changed': "This contact's NodeID has changed since you verified it (a key rotation or a different identity). Verification was cleared: compare the new safety number before trusting them again.",
+  'key-unproven': "Their chat key has not yet been proven over a Ghost Mesh link to this NodeID, so the contact cannot show as verified. That happens the next time they connect over Ghost Mesh.",
+  'not-verifiable': 'This peer is known only through Quick Connect, which carries a key but no mesh identity, so there is nothing to verify. Add them by their Ghost Address or full NodeID (QR or invite) to verify them.',
+};
 function meshModeLabel(transport) {
   return MESH_TRANSPORT_LABELS[transport] || MESH_TRANSPORT_LABELS.direct;
 }
@@ -1994,7 +2031,11 @@ class GMPBridgeConnector {
 
       if (last.reason === 'ok' && last.nodeId) return last;
       if (last.reason === 'ambiguous') {
-        throw new Error(`${normalized} matches more than one identity on the mesh — ask your peer for their full NodeID`);
+        const err = new Error(`${normalized} matches more than one identity on the mesh — ask your peer for their full NodeID`);
+        err.code = 'AMBIGUOUS';
+        err.address = normalized;
+        err.candidates = Array.isArray(last.candidates) ? last.candidates : [];
+        throw err;
       }
       if (last.reason === 'invalid-address') throw new Error('That is not a Ghost Address');
 
@@ -2147,12 +2188,14 @@ class GMPBridgeConnector {
     };
     ch.onmessage = (evt) => {
       if (this._blocked.has(peerId)) return;
+      // A data channel peer id is whatever its bundle claimed: tag it, so key
+      // pinning never treats it as a mesh-authenticated NodeID.
       if (label === 'messages') {
         try {
           const msg = JSON.parse(evt.data);
-          this.emit('message', peerId, msg);
+          this.emit('message', peerId, msg, { via: 'datachannel' });
         } catch (e) {
-          this.emit('message', peerId, evt.data);
+          this.emit('message', peerId, evt.data, { via: 'datachannel' });
         }
       } else if (label === 'files') {
         try {
@@ -2164,7 +2207,7 @@ class GMPBridgeConnector {
       } else if (label === 'presence') {
         try {
           const parsed = JSON.parse(evt.data);
-          if (parsed.type === 'typing') this.emit('message', peerId, parsed);
+          if (parsed.type === 'typing') this.emit('message', peerId, parsed, { via: 'datachannel' });
           else this.emit('presence-data', peerId, parsed);
         } catch (e) {
           this.emit('presence-data', peerId, evt.data);
@@ -2305,10 +2348,11 @@ class GMPBridgeConnector {
               if (parsed.type === 'file-meta' || parsed.type === 'file-chunk' || parsed.type === 'file-done' || parsed.type === 'file-ack') {
                 this.emit('file-chunk', msg.fromNodeId, parsed);
               } else {
-                this.emit('message', msg.fromNodeId, parsed);
+                // fromNodeId is the NodeID the GMP link authenticated.
+                this.emit('message', msg.fromNodeId, parsed, { via: 'gmp' });
               }
             } catch (e) {
-              this.emit('message', msg.fromNodeId, msg.payload);
+              this.emit('message', msg.fromNodeId, msg.payload, { via: 'gmp' });
             }
           }
         };
@@ -2998,6 +3042,11 @@ function GhostLinkApp() {
   const [showVerificationCeremony, setShowVerificationCeremony] = useState(false);
   const [verificationPeer, setVerificationPeer] = useState(null);
   const [safetyNumber, setSafetyNumber] = useState('');
+  const [safetyQrSvg, setSafetyQrSvg] = useState('');
+  const [safetyQrInput, setSafetyQrInput] = useState('');
+  const [safetyQrResult, setSafetyQrResult] = useState(null); // null | true | false
+  // A typed Ghost Address that matched more than one NodeID: { address, candidates }.
+  const [ambiguousResolution, setAmbiguousResolution] = useState(null);
   const [verificationComplete, setVerificationComplete] = useState(() => { try { const d = SecretStore.get(VERIFIED_STORAGE_KEY); return d ? JSON.parse(d) : {}; } catch { return {}; } });
 
   // Message Reactions
@@ -3683,8 +3732,17 @@ function GhostLinkApp() {
         selfIds: () => [conn.nodeId, (identityRef.current || identity)?.fingerprint].filter(Boolean),
         send: (peerId, payload) => conn.sendMessage(peerId, payload),
         getPinned: (peerId) => PeerCache.getPublicKey(peerId),
-        pin: (peerId, key, name) => {
-          PeerCache.addPeer(peerId, { fingerprint: peerId, publicKeyHex: key, name });
+        hasMeshPin: (peerId, key) => {
+          const kp = PeerCache.getPeer(peerId)?.keyPin;
+          return !!kp && kp.via === 'gmp-pop' && kp.key === key && kp.nodeId === String(peerId).toLowerCase();
+        },
+        pin: (peerId, key, name, { viaMesh } = {}) => {
+          // keyPin records that this key was proven over a GMP link to this
+          // NodeID; only such a pin can back a VERIFIED badge.
+          PeerCache.addPeer(peerId, {
+            fingerprint: peerId, publicKeyHex: key, name,
+            ...(viaMesh ? { keyPin: { key, via: 'gmp-pop', nodeId: String(peerId).toLowerCase(), at: Date.now() } } : {})
+          });
           setPeers((prev) => prev.map((p) =>
           p.fingerprint === peerId || p.id === peerId ? { ...p, pubKey: key } : p
           ));
@@ -3818,7 +3876,7 @@ function GhostLinkApp() {
       });
 
       // Unified message handler for chat, voice, file metadata
-      conn.on('message', async (peerId, msg) => {
+      conn.on('message', async (peerId, msg, meta) => {
         if (peerId === identity?.fingerprint || msg?.fromNodeId === identity?.fingerprint || msg?.from === identity?.fingerprint || msg?.senderId === identity?.fingerprint) {
           return;
         }
@@ -3862,7 +3920,7 @@ function GhostLinkApp() {
             // Trust-on-first-use, but only for a key the peer proves it holds
             // (see createKeyPinning). A changed key is either a reinstall or an
             // impersonation attempt: refuse it and make the user decide.
-            const outcome = await keyPinning.onAnnounce(peerId, msg);
+            const outcome = await keyPinning.onAnnounce(peerId, msg, meta?.via);
             if (outcome === 'invalid') {
               console.warn('[key-announce] ignoring malformed key from', peerId);
               return;
@@ -3892,7 +3950,7 @@ function GhostLinkApp() {
           }
 
           if (msg.type === 'key-proof') {
-            if (!keyPinning.onProof(peerId, msg)) console.warn('[key-proof] unexpected or wrong proof from', peerId);
+            if (!keyPinning.onProof(peerId, msg, meta?.via)) console.warn('[key-proof] unexpected or wrong proof from', peerId);
             return;
           }
 
@@ -5622,6 +5680,7 @@ function GhostLinkApp() {
    */
   const joinPeer = async (code) => {
     const raw = (code || '').trim();
+    setAmbiguousResolution(null);
     if (!raw) {
       addToast('Paste your peer\'s Ghost Address first', 'error');
       return;
@@ -5667,7 +5726,7 @@ function GhostLinkApp() {
           const cands = (resolved.candidates || []).map((x) => String(x).toLowerCase());
           if (!cands.includes(pinnedNodeId.toLowerCase())) {
             setJoinStatus(null);
-            addToast(`${address} matches more than one identity on the mesh — ask your peer for their full NodeID`, 'error');
+            setAmbiguousResolution({ address, candidates: cands });
             return;
           }
           presented = pinnedNodeId;
@@ -5691,6 +5750,20 @@ function GhostLinkApp() {
             addToast("Couldn't save this contact's new key — not connected.", 'error');
             return; // no silent failure: don't connect if the pin didn't persist
           }
+          // A verification was of the OLD NodeID. Carry the record over so the
+          // contact shows 'nodeid-changed' (cleared, with a warning) rather than
+          // silently dropping it or keeping VERIFIED.
+          const oldId = pinnedNodeId.toLowerCase();
+          if (verificationComplete[oldId]) {
+            addToast(`${address}'s NodeID changed. Verification was cleared — compare the new safety number.`, 'error');
+          }
+          setVerificationComplete((prev) => {
+            if (!prev[oldId]) return prev;
+            const { [oldId]: rec, ...rest } = prev;
+            const next = { ...rest, [presented.toLowerCase()]: rec };
+            SecretStore.set(VERIFIED_STORAGE_KEY, JSON.stringify(next));
+            return next;
+          });
         }
         await conn.connectToNode(presented);
         setJoinStatus(null); setJoinCode(''); setShowInvite(false);
@@ -5713,8 +5786,14 @@ function GhostLinkApp() {
       // A legacy LAN dial resolves no NodeID, so fall back to echoing the code.
       addToast(`Connected to ${address || (peerNodeId || '').slice(0, 12) || raw}`, 'success');
     } catch (e) {
-      console.error('Join failed:', e);
       setJoinStatus(null);
+      if (e && e.code === 'AMBIGUOUS' && Array.isArray(e.candidates)) {
+        // Several NodeIDs share this 45-bit address (D9): show them all and
+        // trust none. Nothing was dialled or pinned.
+        setAmbiguousResolution({ address: e.address || address, candidates: e.candidates.map((x) => String(x).toLowerCase()) });
+        return;
+      }
+      console.error('Join failed:', e);
       addToast(e.message || 'Could not reach that peer', 'error');
     }
   };
@@ -6172,53 +6251,64 @@ function GhostLinkApp() {
   };
 
   // ---- Contact Verification Ceremony (Safety Numbers) ----
-  // SHA-256 over the sorted public-key pair, shown as 160 bits in 10 groups of
-  // 4 hex.
-  const generateSafetyNumber = async (peerPubKeyHex, myPubKeyHex) => {
-    const sorted = [String(peerPubKeyHex), String(myPubKeyHex)].sort();
-    const material = new TextEncoder().encode('ghostlink-safety-number-v1|' + sorted.join('|'));
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
-    const hex = Array.from(digest.slice(0, 20)).
-    map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
-    return (hex.match(/.{4}/g) || []).join(' ');
-  };
+  // The number is over both FULL NodeIDs (gmp-core/src/safety-number.ts,
+  // vendored as @ghostlink/safety-number; identity-v2.md §5). It is shown as 60
+  // digits and as a QR carrying both NodeIDs; confirming records the contact's
+  // full NodeID. contactVerificationState decides what the badge says.
+  const peerVerificationState = useCallback((peer) => {
+    if (!peer) return 'not-verifiable';
+    const peerId = String(peer.id || '');
+    const current = peer.pubKey || getPeerPublicKey(peer.fingerprint || peer.id);
+    return contactVerificationState({
+      peerId, record: verificationComplete[peerId] || verificationComplete[peerId.toLowerCase()],
+      keyPin: PeerCache.getPeer(peerId)?.keyPin || null, currentKey: current
+    });
+  }, [verificationComplete, getPeerPublicKey]);
+  const isPeerVerified = useCallback((peer) => peerVerificationState(peer) === 'verified', [peerVerificationState]);
 
   const openVerificationCeremony = async (peer) => {
     setVerificationPeer(peer);
     setSafetyNumber('');
+    setSafetyQrSvg('');
+    setSafetyQrInput('');
     setShowVerificationCeremony(true);
-    // Only a real public key produces a meaningful number. Falling back to the
-    // fingerprint would render a confident-looking value that verifies nothing.
-    const peerPubKey = peer && (peer.pubKey || getPeerPublicKey(peer.fingerprint || peer.id));
-    if (!identity?.publicKeyHex || !peerPubKey) return;
+    // Quick Connect peers have no mesh identity: the modal says why instead.
+    const theirs = String(peer?.id || '').toLowerCase();
+    const mine = String(meshNodeId || p2pConnectorRef.current?.nodeId || '').toLowerCase();
+    if (!NODE_ID_FULL.test(theirs) || !NODE_ID_FULL.test(mine) || theirs === mine) return;
     try {
-      setSafetyNumber(await generateSafetyNumber(peerPubKey, identity.publicKeyHex));
+      const sn = await import('@ghostlink/safety-number');
+      setSafetyNumber(sn.formatSafetyNumber(sn.safetyNumber(mine, theirs)));
+      if (typeof qrEncode !== 'undefined' && typeof matrixToSVG !== 'undefined') {
+        const { matrix } = qrEncode(sn.safetyQrPayload(mine, theirs));
+        setSafetyQrSvg(matrixToSVG(matrix, matrix.length, 200));
+      }
     } catch (e) {
       console.error('Safety number derivation failed:', e);
     }
   };
 
-  // A contact counts as verified only against the exact public key the user
-  // compared. If the peer later presents a different key, the badge clears
-  // rather than vouching for a key nobody checked.
-  const isPeerVerified = useCallback((peer) => {
-    if (!peer) return false;
-    const recorded = verificationComplete[peer.id];
-    if (!recorded) return false;
-    const current = peer.pubKey || getPeerPublicKey(peer.fingerprint || peer.id);
-    return peerKeyVerified(recorded, current);
-  }, [verificationComplete, getPeerPublicKey]);
+  // What they show you, scanned or pasted: matches only the exact two NodeIDs.
+  const checkSafetyQr = async (scanned) => {
+    const theirs = String(verificationPeer?.id || '').toLowerCase();
+    const mine = String(meshNodeId || p2pConnectorRef.current?.nodeId || '').toLowerCase();
+    if (!scanned || !NODE_ID_FULL.test(theirs) || !NODE_ID_FULL.test(mine)) return null;
+    try {
+      const sn = await import('@ghostlink/safety-number');
+      return sn.safetyQrMatches(scanned, mine, theirs);
+    } catch (e) {return null;}
+  };
 
   const confirmVerification = () => {
     if (!verificationPeer) return;
-    const verifiedKey = verificationPeer.pubKey ||
-    getPeerPublicKey(verificationPeer.fingerprint || verificationPeer.id);
-    if (!verifiedKey) {
-      addToast('Cannot mark verified — no public key for this contact', 'error');
+    // The contact's full NodeID, never its Ghost Address or a fingerprint (D9).
+    const nodeId = String(verificationPeer.id || '').toLowerCase();
+    if (!NODE_ID_FULL.test(nodeId)) {
+      addToast('This contact has no mesh identity to verify', 'error');
       return;
     }
     setVerificationComplete((prev) => {
-      const next = { ...prev, [verificationPeer.id]: verifiedKey };
+      const next = { ...prev, [nodeId]: { v: VERIFICATION_RECORD_VERSION, nodeId, at: Date.now() } };
       SecretStore.set(VERIFIED_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
@@ -8107,6 +8197,12 @@ inviteTab === "create" ? html`<>
                           ${joinStatus}
                         </div>`}
 
+                      ${ambiguousResolution && html`<div role="alert" style=${{ marginBottom: 10, padding: "10px 12px", borderRadius: 8, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 10, color: PALETTE.amber, lineHeight: 1.6 }}>
+                          <div style=${{ fontWeight: 700, marginBottom: 4 }}>${ambiguousResolution.address} matches ${ambiguousResolution.candidates.length} identities on the mesh</div>
+                          A Ghost Address is a short form of a NodeID, so different identities can share one. None of these was added or trusted. Ask your contact for their full NodeID (QR code or invite) and paste it above.
+                          ${ambiguousResolution.candidates.map((c) => html`<div key=${c} style=${{ fontFamily: "monospace", fontSize: 9, wordBreak: "break-all", color: th.textSecondary, marginTop: 6 }}>${c}</div>`)}
+                        </div>`}
+
                       <button onClick=${() => joinPeer(joinCode.trim())} disabled=${!joinCode || !joinCode.trim() || !!joinStatus} style=${{ width: "100%", padding: "14px 20px", background: joinCode && joinCode.trim() && !joinStatus ? `${th.accent}` : th.bg2, border: "none", borderRadius: 12, color: joinCode && joinCode.trim() && !joinStatus ? PALETTE.obsidian : th.textSecondary, fontSize: 13, fontWeight: 700, cursor: joinCode && joinCode.trim() && !joinStatus ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
                         <${I} t="link" s=${15} c=${joinCode && joinCode.trim() && !joinStatus ? PALETTE.obsidian : th.textSecondary} /> ${joinStatus ? "CONNECTING..." : "CONNECT TO PEER"}
                       </button>
@@ -8138,9 +8234,13 @@ inviteTab === "create" ? html`<>
                   <div style=${{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 16, flexWrap: "wrap" }}>
                     <${Tag} color=${activePeer.status === "online" ? th.accent : th.textSecondary}>${activePeer.status?.toUpperCase()}<//>
                     ${peerLiveSecurityTags(activePeer).map((t) => html`<${Tag} key=${t.label} color=${th.accent2} icon=${t.icon}>${t.label}<//>`)}
-                    ${isPeerVerified(activePeer) ?
-  html`<${Tag} color=${th.accent} icon="check">VERIFIED<//>` :
-  html`<${Tag} color=PALETTE.amber>UNVERIFIED<//>`}
+                    ${(() => {
+  const vstate = peerVerificationState(activePeer);
+  if (vstate === 'verified') return html`<${Tag} color=${th.accent} icon="check">VERIFIED<//>`;
+  if (vstate === 'nodeid-changed') return html`<${Tag} color=PALETTE.crimson>NODEID CHANGED<//>`;
+  if (vstate === 'not-verifiable') return html`<${Tag} color=${th.textSecondary}>NOT VERIFIABLE<//>`;
+  return html`<${Tag} color=PALETTE.amber>UNVERIFIED<//>`;
+})()}
                   </div>
                   <div style=${{ textAlign: "left", background: th.bg3, borderRadius: 10, padding: 14 }}>
                     ${[
@@ -8164,7 +8264,7 @@ inviteTab === "create" ? html`<>
   }} style=${
   { flex: 1, background: isPeerVerified(activePeer) ? th.bg2 : th.accent, border: isPeerVerified(activePeer) ? "1px solid " + th.border : "none", borderRadius: 10, padding: 10, color: isPeerVerified(activePeer) ? th.accent : PALETTE.obsidian, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <${I} t="shield" s=${13} c=${isPeerVerified(activePeer) ? th.accent : PALETTE.obsidian} />
-                      ${isPeerVerified(activePeer) ? 'Safety Number' : 'Verify Contact'}
+                      ${isPeerVerified(activePeer) ? 'Safety Number' : peerVerificationState(activePeer) === 'not-verifiable' ? 'Why Not Verifiable' : 'Verify Contact'}
                     </button>
                     <button onClick=${() => setShowPeerInfo(false)} style=${{ flex: 1, background: th.bg2, border: "1px solid " + th.border, borderRadius: 10, padding: 10, color: PALETTE.mist, cursor: "pointer", fontFamily: "inherit", fontSize: 11 }}>Close</button>
                   </div>
@@ -8976,36 +9076,49 @@ inviteTab === "create" ? html`<>
                       ${verificationPeer.avatar || verificationPeer.name?.charAt(0)?.toUpperCase() || "?"}
                     </div>
                     <div style=${{ fontSize: 15, fontWeight: 600 }}>${verificationPeer.name}</div>
-                    <div style=${{ fontSize: 9, color: th.textSecondary, fontFamily: "monospace", marginTop: 4 }}>FP: ${verificationPeer.fingerprint}</div>
+                    <div style=${{ fontSize: 9, color: th.textSecondary, fontFamily: "monospace", marginTop: 4, wordBreak: "break-all" }}>${NODE_ID_FULL.test(String(verificationPeer.id || '').toLowerCase()) ? `NodeID ${verificationPeer.id}` : 'No mesh identity'}</div>
                   </div>
 
-                  <div style=${{ background: `${th.accent}06`, border: `1px solid ${th.accent}15`, borderRadius: 12, padding: 16, marginBottom: 20, textAlign: "center" }}>
-                    <div style=${{ fontSize: 9, color: th.textSecondary, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Safety Number</div>
-                    ${safetyNumber ? html`<>
-                      <div style=${{ fontSize: 18, fontWeight: 700, fontFamily: "'Space Grotesk', monospace", letterSpacing: 2, color: th.accent, wordBreak: "break-all", lineHeight: 1.8 }}>
-                        ${safetyNumber}
-                      </div>
-                      <div style=${{ fontSize: 10, color: th.textSecondary, marginTop: 10, lineHeight: 1.6 }}>
-                        Read this out to ${verificationPeer.name} over a channel you already trust. If every group matches, no one is intercepting your keys.
-                      </div>
-                    </>` : html`<div style=${
-  { fontSize: 11, color: PALETTE.crimson, lineHeight: 1.6, padding: "8px 0" }}>
-                      No safety number available — this contact's public key hasn't been received yet.
-                      Connect to them first; until then this contact cannot be verified.
+                  ${(() => {
+  const vstate = peerVerificationState(verificationPeer);
+  if (vstate === 'not-verifiable') return html`<div role="status" style=${{ padding: "12px 14px", borderRadius: 10, background: PALETTE.amberGlow, border: `1px solid ${PALETTE.amberGlow}`, fontSize: 11, color: PALETTE.amber, lineHeight: 1.6 }}>
+                      ${VERIFICATION_STATE_TEXT['not-verifiable']}
+                    </div>`;
+  return html`<>
+                    ${vstate === 'nodeid-changed' && html`<div role="alert" style=${{ padding: "10px 14px", borderRadius: 10, background: PALETTE.crimsonGlow, border: `1px solid ${PALETTE.crimsonGlow}`, fontSize: 11, color: PALETTE.crimson, lineHeight: 1.6, marginBottom: 14 }}>
+                      ${VERIFICATION_STATE_TEXT['nodeid-changed']}
                     </div>`}
-                  </div>
-
-                  ${isPeerVerified(verificationPeer) ? html`<div style=${
-  { padding: "10px 14px", borderRadius: 10, background: `${th.accent}10`, border: `1px solid ${th.accent}25`, fontSize: 11, color: th.accent, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                      <${I} t="check" s=${14} c=${th.accent} /> Contact verified
-                    </div>` : safetyNumber ? html`<${Btn} accent style=${
-
-  { width: "100%" }} onClick=${confirmVerification}>
-                      <${I} t="shield" s=${15} c=PALETTE.obsidian /> I VERIFIED THIS NUMBER
-                    <//>` : html`<div style=${
-  { padding: "10px 14px", borderRadius: 10, background: th.bg3, border: "1px solid " + th.border, fontSize: 11, color: th.textSecondary, textAlign: "center" }}>
-                      Nothing to verify yet
-                    </div>`}
+                    <div style=${{ background: `${th.accent}06`, border: `1px solid ${th.accent}15`, borderRadius: 12, padding: 16, marginBottom: 16, textAlign: "center" }}>
+                      <div style=${{ fontSize: 9, color: th.textSecondary, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Safety Number</div>
+                      ${safetyNumber ? html`<>
+                        <div style=${{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, color: th.accent, lineHeight: 1.8 }}>
+                          ${safetyNumber}
+                        </div>
+                        ${safetyQrSvg && html`<div style=${{ display: "flex", justifyContent: "center", margin: "12px 0 4px" }} dangerouslySetInnerHTML=${{ __html: safetyQrSvg }} />`}
+                        <div style=${{ fontSize: 10, color: th.textSecondary, marginTop: 10, lineHeight: 1.6 }}>
+                          Compare all 60 digits with ${verificationPeer.name} in person or over a channel you already trust, or scan each other's code. The number covers both full NodeIDs; if every group matches, you are talking to the identity you think you are.
+                        </div>
+                        <div style=${{ display: "flex", gap: 6, marginTop: 10 }}>
+                          <input value=${safetyQrInput} onChange=${(e) => {setSafetyQrInput(e.target.value);setSafetyQrResult(null);}} placeholder="Or paste the code from their screen" aria-label="Paste the safety code from their screen" style=${{ flex: 1, background: th.bg2, border: `1px solid ${PALETTE.divider}`, borderRadius: 8, padding: "6px 8px", color: th.text, fontSize: 10, fontFamily: "monospace" }} />
+                          <${Btn} small onClick=${async () => setSafetyQrResult(await checkSafetyQr(safetyQrInput))}>Compare<//>
+                        </div>
+                        ${safetyQrResult === true && html`<div style=${{ fontSize: 10, color: th.accent, marginTop: 6 }}>The code names exactly your NodeID and theirs.</div>`}
+                        ${safetyQrResult === false && html`<div style=${{ fontSize: 10, color: PALETTE.crimson, marginTop: 6 }}>The code does not match. Do not verify this contact.</div>`}
+                      </>` : html`<div style=${{ fontSize: 11, color: th.textSecondary, lineHeight: 1.6, padding: "8px 0" }}>
+                        No safety number yet: your Ghost Mesh identity is still starting. Try again in a moment.
+                      </div>`}
+                    </div>
+                    ${vstate === 'verified' ? html`<div style=${
+    { padding: "10px 14px", borderRadius: 10, background: `${th.accent}10`, border: `1px solid ${th.accent}25`, fontSize: 11, color: th.accent, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                        <${I} t="check" s=${14} c=${th.accent} /> Contact verified
+                      </div>` : safetyNumber ? html`<>
+                        ${vstate === 'key-unproven' && verificationComplete[String(verificationPeer.id).toLowerCase()] && html`<div style=${{ fontSize: 10, color: PALETTE.amber, lineHeight: 1.6, marginBottom: 10 }}>${VERIFICATION_STATE_TEXT['key-unproven']}</div>`}
+                        <${Btn} accent style=${{ width: "100%" }} onClick=${confirmVerification}>
+                          <${I} t="shield" s=${15} c=PALETTE.obsidian /> I COMPARED ALL 60 DIGITS
+                        <//>
+                      </>` : null}
+                  </>`;
+})()}
                 </div>
               </div>`}
 

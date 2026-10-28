@@ -21,8 +21,10 @@ function extract(name) {
   const close = html.indexOf('\n}', start);
   return html.slice(start, close + 2);
 }
-const scope = new Function(`${extract('messageBlockTags')}\n${extract('peerLiveSecurityTags')}\n${extract('peerKeyVerified')}\n${extract('iceModeLabel')}\n return { messageBlockTags, peerLiveSecurityTags, peerKeyVerified, iceModeLabel };`)();
-const { messageBlockTags, peerLiveSecurityTags, peerKeyVerified, iceModeLabel } = scope;
+// NODE_ID_FULL and VERIFICATION_RECORD_VERSION are one-line consts.
+const oneLine = (name) => { const m = new RegExp(`^const ${name}\\b.*$`, 'm').exec(html); if (!m) throw new Error(`index.html no longer declares: ${name}`); return m[0]; };
+const scope = new Function(`${extract('messageBlockTags')}\n${extract('peerLiveSecurityTags')}\n${oneLine('NODE_ID_FULL')}\n${oneLine('VERIFICATION_RECORD_VERSION')}\n${extract('contactVerificationState')}\n${extract('iceModeLabel')}\n return { messageBlockTags, peerLiveSecurityTags, contactVerificationState, iceModeLabel };`)();
+const { messageBlockTags, peerLiveSecurityTags, contactVerificationState, iceModeLabel } = scope;
 
 // getIceServers reads localStorage + the module-scope sessionTurnServers mirror.
 function getIceServersWith(lsData, sessionTurn = []) {
@@ -56,15 +58,23 @@ console.log('\n=== peerLiveSecurityTags: E2E is a LIVE claim, only while connect
   ok(peerLiveSecurityTags(null).length === 0, 'a null/unknown peer shows no E2E claim');
 }
 
-console.log('\n=== Round 2 #2: VERIFIED is gated on the FULL key and clears on key change ===');
+console.log('\n=== Round 2 #2 (R3): VERIFIED is gated on the FULL NodeID and clears when it changes ===');
 {
-  const KEY_A = 'a1'.repeat(64);   // a full X25519 public key (hex)
-  const KEY_B = 'b2'.repeat(64);   // a different key (rotation / impersonation)
-  ok(peerKeyVerified(KEY_A, KEY_A) === true, 'verified only after the ceremony recorded this exact key, and it still matches (positive control)');
-  ok(peerKeyVerified(KEY_A, KEY_B) === false, 'a different current key (rotation / substitution) CLEARS verified');
-  ok(peerKeyVerified('', KEY_A) === false, 'no recorded key (never verified) -> not verified');
-  ok(peerKeyVerified(KEY_A, null) === false, 'no current key received yet -> not verified');
-  ok(peerKeyVerified(KEY_A.slice(0, 20), KEY_A.slice(0, 20)) === true && KEY_A.length === 128, 'the comparison is the full 128-hex (256-bit) key, not a 45-bit address or short fingerprint');
+  // Verification is of the contact's full 64-byte NodeID (identity-v2.md D9),
+  // backed by a chat key proven over a GMP link to that NodeID. The full test
+  // matrix is in test/contact-verification.test.mjs.
+  const NODE_A = 'a1'.repeat(64);  // a full NodeID (128 hex)
+  const NODE_B = 'b2'.repeat(64);  // a different NodeID (rotation / substitution)
+  const KEY = '04' + 'cd'.repeat(64);
+  const rec = (nodeId) => ({ v: 2, nodeId });
+  const pin = (nodeId) => ({ key: KEY, via: 'gmp-pop', nodeId });
+  const st = (o) => contactVerificationState({ currentKey: KEY, ...o });
+  ok(st({ peerId: NODE_A, record: rec(NODE_A), keyPin: pin(NODE_A) }) === 'verified', 'verified only after the ceremony recorded this exact NodeID, and the key is mesh-proven to it (positive control)');
+  ok(st({ peerId: NODE_A, record: rec(NODE_B), keyPin: pin(NODE_A) }) === 'nodeid-changed', 'a different current NodeID (rotation / substitution) CLEARS verified');
+  ok(st({ peerId: NODE_A, record: null, keyPin: pin(NODE_A) }) === 'unverified', 'no record (never verified) -> not verified');
+  ok(st({ peerId: NODE_A, record: rec(NODE_A), keyPin: pin(NODE_A), currentKey: null }) !== 'verified', 'no current key received yet -> not verified');
+  ok(st({ peerId: NODE_A.slice(0, 16), record: rec(NODE_A.slice(0, 16)), keyPin: pin(NODE_A.slice(0, 16)) }) === 'not-verifiable' && NODE_A.length === 128,
+    'the comparison is the full 128-hex NodeID, not a 45-bit address or short fingerprint');
 }
 
 console.log('\n=== Round 2 #3: the call badge says ENCRYPTED (not E2E), gated on remote media ===');

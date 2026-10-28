@@ -60,6 +60,8 @@ gmp-core/dist/
 
 # electron-builder output (desktop installers / unpacked dirs)
 electron/dist/
+# gmp-core runtime node_modules staged by electron/scripts/prepare-packaging.cjs
+electron/build-staging/
 
 # Android release signing — losing these means never being able to update the
 # app, but committing them means anyone can sign a build as us.

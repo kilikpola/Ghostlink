@@ -11,7 +11,7 @@
  *   KDF_RK(rk, dh) = HKDF-SHA256(IKM = dh, salt = rk, info = "gl-ratchet-rk-v1", 64) -> (rk', ck)
  *   KDF_CK(ck)     = mk = HMAC-SHA256(ck, 0x01);  ck' = HMAC-SHA256(ck, 0x02)
  *   message key    = HKDF-SHA256(mk, salt = 0x00*32, info = "gl-ratchet-mk-v1", 44)
- *                    -> AES-256-GCM key (32) ‖ nonce (12)
+ *                    -> AES-256-GCM-SIV key (32) ‖ nonce (12)   (RFC 8452; R4b)
  *   AD             = "gl-ratchet-ad-v1" ‖ header ‖ sender NodeID ‖ recipient NodeID
  *
  * Wire (§3.1): version 0x01 ‖ kind ‖ messageId(16) [‖ EK_s(32) ‖ sentAt(8), kind
@@ -25,9 +25,13 @@
  *
  * One message key, one encryption: `encrypt` derives the key from CKs and
  * returns a state whose CKs is past it. A pure function cannot stop a caller
- * from encrypting twice with the SAME input state (that repeats the key and the
- * derived nonce; test 5 of §7 shows it); never re-using a state, including
- * after a restore, is the caller's rule (§4.5, task R5).
+ * from encrypting twice with the SAME input state, which repeats the key and
+ * the derived nonce (test 5 of §7 shows it). The AEAD is therefore
+ * AES-256-GCM-SIV, not GCM: under a repeated (key, nonce) GCM repeats its
+ * keystream (c1 XOR c2 = p1 XOR p2) and loses tag security, while GCM-SIV only
+ * reveals whether two messages had the same header AND plaintext. Never
+ * re-using a state, including after a restore, stays the caller's rule (§4.5,
+ * task R5); GCM-SIV makes breaking it far less costly.
  *
  * @noble only (curves, hashes, ciphers), so the same file runs in Node,
  * Electron main and React Native.
@@ -36,7 +40,7 @@ import { x25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
-import { gcm } from '@noble/ciphers/aes';
+import { gcmsiv } from '@noble/ciphers/aes';
 
 export const RATCHET_VERSION = 0x01;
 export const KIND_RATCHET = 0x01;
@@ -256,7 +260,7 @@ export function encrypt(
   const headerBytes = encodeHeader(header);
   const mk = messageKey(step.mk);
   opts.observe?.onMessageKey?.('encrypt', hex(mk.both));
-  const sealed = gcm(mk.key, mk.nonce, associatedData(headerBytes, s.selfNodeId, s.peerNodeId)).encrypt(plaintext);
+  const sealed = gcmsiv(mk.key, mk.nonce, associatedData(headerBytes, s.selfNodeId, s.peerNodeId)).encrypt(plaintext);
   s.CKs = hex(step.chainKey);
   s.Ns += 1;
   // One message key, one encryption: the returned state is exactly one step
@@ -273,7 +277,7 @@ function open(mkRaw: Uint8Array, headerBytes: Uint8Array, body: Uint8Array, s: R
   const mk = messageKey(mkRaw);
   observe?.onMessageKey?.('decrypt', hex(mk.both));
   try {
-    return gcm(mk.key, mk.nonce, associatedData(headerBytes, s.peerNodeId, s.selfNodeId)).decrypt(body);
+    return gcmsiv(mk.key, mk.nonce, associatedData(headerBytes, s.peerNodeId, s.selfNodeId)).decrypt(body);
   } catch {
     return null;
   }

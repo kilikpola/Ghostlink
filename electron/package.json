@@ -74,16 +74,8 @@
         "to": "gmp-core/data/public-peers.json"
       },
       {
-        "from": "../node_modules/ws",
-        "to": "gmp-core/node_modules/ws"
-      },
-      {
-        "from": "../node_modules/@noble/curves",
-        "to": "gmp-core/node_modules/@noble/curves"
-      },
-      {
-        "from": "../node_modules/@noble/hashes",
-        "to": "gmp-core/node_modules/@noble/hashes"
+        "from": "build-staging/gmp-core-node_modules",
+        "to": "gmp-core/node_modules"
       }
     ],
     "win": {

@@ -131,6 +131,13 @@ jobs:
           (cd "$tmp/gmp-core" && node --input-type=module -e \
             "await import('./dist/gmp-node-manager.js'); await import('./dist/gmp-bridge.js'); console.log('packaged gmp-core imports OK')")
 
+      # Every file of the packaged gmp-core/dist, not just the two entry points,
+      # imported from a copy outside the checkout under the packaged Electron
+      # binary (ELECTRON_RUN_AS_NODE). Catches a runtime dependency that
+      # prepare-packaging did not stage (R4b: @noble/ciphers was missed once).
+      - name: Every packaged gmp-core file imports
+        run: node test/packaged-gmp-imports.test.mjs
+
   audit:
     name: npm audit (advisory)
     runs-on: ubuntu-latest

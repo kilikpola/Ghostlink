@@ -15,16 +15,16 @@
   ],
   "plaintexts": "`${who} says ${i}`",
   "messageSha256Prefix": [
-    "12b2fbb2ad87196b",
-    "31a81673f751b5cc",
-    "3ff56cd18e5500b6",
-    "6f5e7605c391a0c6",
-    "05d8bb6a19e1cec4",
-    "6429b47b2f6ff802",
-    "a086cd9b61b5453d",
-    "6ca8b87c6ce4d1fc",
-    "cd77e9e07d66007a",
-    "52dd2b483b1b0a77"
+    "4c3c292a302effdf",
+    "d0b761fbf691f030",
+    "2231324d01ddf8f8",
+    "ad041e10ea4b449d",
+    "36b341d362764d6d",
+    "c1038ac81d04c0a1",
+    "16599df84faf64e5",
+    "9e5a6e57344c4277",
+    "d9e5b3e8ab7cdb06",
+    "2f251a6ed7a4d19d"
   ],
   "finalStateSha256Prefix": {
     "alice": "0ee5617d38ebbb70",

@@ -16,7 +16,8 @@
  *     outcomes. Prints SKIP with the reason if it cannot load.
  *  6. AGPL boundary: libsignal in no runtime dependency, not in gmp-core/dist,
  *     app.bundle.js, the RN bundle or the packaged Electron app.
- *  + §7 test 5 (nonce-reuse witness), sizes (§3.1), purity, no importers.
+ *  + §7 test 5 (nonce-reuse witness) and the same-state misuse test (R4b:
+ *    AES-256-GCM-SIV), RFC 8452 C.2 vectors, sizes (§3.1), purity, no importers.
  *
  * Regenerate vectors (only when the format deliberately changes):
  *   node test/ratchet-test.js --write-vectors
@@ -30,11 +31,13 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { absenceAsserter } from './helpers/assert-absent.mjs';
 import { x25519 } from '@noble/curves/ed25519';
+import { gcm, gcmsiv } from '@noble/ciphers/aes';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = path.join(here, '..');
 const repo = path.join(pkg, '..');
 const VECTORS = path.join(here, 'vectors', 'ratchet-v1.json');
+const RFC8452 = path.join(here, 'vectors', 'rfc8452-c2-aes256gcmsiv.json');
 const vectorsOnly = process.argv.includes('--vectors-only');
 let passed = 0, failed = 0;
 const ok = (c, m) => { if (c) { passed++; if (!vectorsOnly) console.log(`  ✓ ${m}`); } else { failed++; console.error(`  ✗ ${m}`); } };
@@ -118,7 +121,17 @@ if (vec) {
   ok(JSON.stringify(got.digests) !== JSON.stringify(other.messageSha256Prefix), 'control: one changed digest is noticed');
 }
 {
-  // Independent rebuild of the first message with node:crypto (HKDF, HMAC, AES-GCM, AD).
+  // The AEAD primitive: noble's gcmsiv against all RFC 8452 Appendix C.2 (AES-256) vectors.
+  const rfc = JSON.parse(fs.readFileSync(RFC8452, 'utf8')).vectors;
+  const h = (x) => Uint8Array.from(Buffer.from(x, 'hex'));
+  const rfcOk = rfc.filter((v) => Buffer.from(gcmsiv(h(v.key), h(v.nonce), h(v.aad)).encrypt(h(v.plaintext))).toString('hex') === v.result).length;
+  const v0 = rfc[3];
+  const tampered = Buffer.from(gcmsiv(h(v0.key), h(v0.nonce), h(v0.aad)).encrypt(h(v0.plaintext)));
+  tampered[0] ^= 1;
+  ok(rfc.length === 24 && rfcOk === 24 && tampered.toString('hex') !== v0.result, `AES-256-GCM-SIV (@noble/ciphers gcmsiv) matches all ${rfcOk}/${rfc.length} RFC 8452 C.2 vectors (control: a flipped byte differs)`);
+}
+{
+  // Independent rebuild of the first message: KDFs with node:crypto, AEAD = RFC-checked gcmsiv.
   const p = pair('independent-check');
   const e = R.encrypt(p.alice, te('hello'), p.dA);
   const hkdf = (ikm, salt, info, len) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from(info), len));
@@ -129,10 +142,10 @@ if (vec) {
   const kn = hkdf(mk, Buffer.alloc(32), 'gl-ratchet-mk-v1', 44);
   const header = Buffer.from(e.message.subarray(0, 58));
   const ad = Buffer.concat([Buffer.from('gl-ratchet-ad-v1'), header, Buffer.from(A_ID, 'hex'), Buffer.from(B_ID, 'hex')]);
-  const c = crypto.createCipheriv('aes-256-gcm', kn.subarray(0, 32), kn.subarray(32, 44));
-  c.setAAD(ad);
-  const ct = Buffer.concat([c.update(Buffer.from('hello')), c.final(), c.getAuthTag()]);
-  ok(Buffer.concat([header, ct]).equals(Buffer.from(e.message)), 'message 1 is byte-identical to an independent node:crypto build');
+  const ct = Buffer.from(gcmsiv(kn.subarray(0, 32), kn.subarray(32, 44), ad).encrypt(te('hello')));
+  const asGcm = Buffer.from(gcm(kn.subarray(0, 32), kn.subarray(32, 44), ad).encrypt(te('hello')));
+  ok(Buffer.concat([header, ct]).equals(Buffer.from(e.message)), 'message 1 is byte-identical to an independent build (node:crypto HKDF/HMAC, AES-256-GCM-SIV, the §3.1 AD)');
+  ok(!Buffer.concat([header, asGcm]).equals(Buffer.from(e.message)) && asGcm.length === ct.length, 'control: the same key, nonce and AD under plain AES-256-GCM give a different message of the same length');
   ok(header[0] === 0x01 && header[1] === 0x01 && header.subarray(2, 18).toString('hex') === e.messageId &&
     header.subarray(18, 50).toString('hex') === p.alice.dhSelf.pub && header.readUInt32BE(50) === 0 && header.readUInt32BE(54) === 0,
     'header fields at the §3.1 offsets: version 0x01, kind 0x01, messageId 2-17, DHr 18-49, PN 50-53, N 54-57');
@@ -255,11 +268,34 @@ console.log('\n=== §7 test 5: re-using a state repeats (key, nonce) — the R5 
   ok(new Set(seen).size === 3, 'control: a state lineage gives three distinct (key, nonce) pairs');
   const restored = R.deserializeState(R.serializeState(snapshot));               // "restore" without the discard rule
   const again = R.encrypt(restored, te('attack at dusk'), p.dA, { observe });
-  ok(seen[3] === seen[1], 'the restored snapshot derives the SAME AES key and nonce again (the rule in §4.5 is needed)');
-  const x = Buffer.from(first.message.subarray(58, 58 + 14)), y = Buffer.from(again.message.subarray(58, 58 + 14));
-  const xorCt = Buffer.from(x.map((b, i) => b ^ y[i])), xorPt = Buffer.from(te('attack at dawn').map((b, i) => b ^ te('attack at dusk')[i]));
-  ok(xorCt.equals(xorPt), 'and the two ciphertexts XOR to the two plaintexts XOR (a real GCM keystream reuse)');
+  ok(seen[3] === seen[1], 'the restored snapshot derives the SAME AES key and nonce again (the rule in §4.5 is still needed)');
   ok(next.state.Ns === 3 && first.state.Ns === 2, 'control: within one lineage Ns only moves forward');
+}
+
+// ── R4b: misuse resistance — two encryptions from the SAME frozen state ─────
+console.log('\n=== R4b: encrypting twice from the same state (AES-256-GCM-SIV) ===');
+{
+  const p = pair('same-state');
+  const frozen = deepFreeze(JSON.parse(R.serializeState(R.encrypt(p.alice, te('advance'), p.dA).state)));
+  const bobReady = R.decrypt(p.bob, R.encrypt(p.alice, te('advance'), deps('same-state/A')).message, p.dB).state;
+  // The same state AND the same RNG position: identical headers, so only the cipher differs.
+  const p1 = te('attack at dawn!'), p2 = te('retreat at dusk');
+  const c1 = R.encrypt(frozen, p1, deps('same-state/rng')).message;
+  const c2 = R.encrypt(frozen, p2, deps('same-state/rng')).message;
+  ok(Buffer.from(c1.subarray(0, 58)).equals(Buffer.from(c2.subarray(0, 58))), 'setup: both messages carry the identical 58-byte header (same N, DHr, messageId)');
+  const n = Math.min(p1.length, p2.length);
+  const xorCt = Buffer.from(c1.subarray(58, 58 + n).map((b, i) => b ^ c2[58 + i]));
+  const xorPt = Buffer.from(p1.subarray(0, n).map((b, i) => b ^ p2[i]));
+  const sameBytes = xorCt.filter((b, i) => b === xorPt[i]).length;
+  ok(!xorCt.equals(xorPt), `c1 XOR c2 != p1 XOR p2 over the common ${n} bytes (${sameBytes}/${n} bytes coincide; GCM: all ${n})`);
+  const d1 = R.decrypt(bobReady, c1, p.dB), d2 = R.decrypt(bobReady, c2, p.dB);
+  ok(d1.ok && d2.ok && td(d1.plaintext) === td(p1) && td(d2.plaintext) === td(p2), 'both still decrypt, each to its own plaintext');
+  const c3 = R.encrypt(frozen, p1, deps('same-state/rng')).message;
+  ok(Buffer.from(c3).equals(Buffer.from(c1)), 'control: an IDENTICAL plaintext from the same state and RNG gives the identical message (the test reaches the cipher)');
+  // With a fresh messageId (an ordinary RNG), equal plaintexts no longer even look equal.
+  const f1 = R.encrypt(frozen, p1, deps('same-state/fresh-1')).message, f2 = R.encrypt(frozen, p1, deps('same-state/fresh-2')).message;
+  const ctSame = Buffer.from(f1.subarray(58, f1.length - 16)).equals(Buffer.from(f2.subarray(58, f2.length - 16)));
+  ok(!ctSame, 'same state, same plaintext, fresh messageId: the ciphertexts (tag excluded) differ (the messageId is in the AD, so SIV reveals equality only if the header repeats too; GCM: identical)');
 }
 
 // ── 3. failure paths ──────────────────────────────────────────────────────
@@ -574,9 +610,12 @@ console.log('\n=== 6. AGPL boundary: libsignal never ships ===');
     console.log(`  note: the packaged gmp-core/package.json names ${NAME} under devDependencies: ${NAME in (m.devDependencies || {}) ? 'yes (name only; no code ships)' : 'no'}`);
   }
   const extra = (manifests['electron/package.json'].build || {}).extraResources || [];
-  const fromNodeModules = extra.filter((r) => /node_modules/.test(r.from)).map((r) => r.from);
-  ok(fromNodeModules.length > 0 && fromNodeModules.every((f) => f.startsWith('../node_modules/') && !LIBSIGNAL.test(f)),
-    `electron-builder copies modules only from the ROOT node_modules, never gmp-core's (${fromNodeModules.join(', ')})`);
+  const toNodeModules = extra.filter((r) => /node_modules/.test(r.to));
+  ok(toNodeModules.length === 1 && toNodeModules[0].from === 'build-staging/gmp-core-node_modules',
+    `electron-builder fills gmp-core/node_modules only from the staged runtime closure (${toNodeModules.map((r) => r.from).join(', ')})`);
+  const staged = path.join(repo, 'electron', 'build-staging', 'gmp-core-node_modules');
+  if (!fs.existsSync(staged)) console.log('  NOT CHECKED: electron/build-staging (run `npm run build:dir` in electron/)');
+  else ok(scanDir(staged).length === 0, `the staged runtime closure has no libsignal (${fs.readdirSync(staged).join(', ')})`);
 }
 
 done();

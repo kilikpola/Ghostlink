@@ -18,6 +18,15 @@ export interface RatchetStoreEvents {
   'ratchet-memory-only': [info: { reason: string }];
   /** State files that cannot be opened; refused and kept unchanged. `keyMismatch`: the whole store, wrong seal key. */
   'ratchet-unreadable': [info: { peers: string[]; keyMismatch: boolean }];
+  /**
+   * R6: the sending session changed. 'peer-reset': a valid initial arrived over an
+   * established session (the peer lost its state, or someone with its phrase);
+   * `unacknowledged` lists every messageId sent and never acknowledged. 'glare':
+   * the §4.2 tie-break or a reply on our own initial moved sending; nothing is lost.
+   */
+  'ratchet-session-replaced': [info: { peer: string; reason: 'peer-reset' | 'glare'; previous: string | null; current: string; unacknowledged: string[] }];
+  /** More than MAX_UNACKED unacknowledged messages: these ids left the list (never silently). */
+  'ratchet-unacknowledged-dropped': [info: { peer: string; messageIds: string[] }];
 }
 
 // ── L2: link ────────────────────────────────────────

@@ -48,6 +48,32 @@
  *
  * Residual (same as boot-counter.ts:8-9): restoring a full disk image that
  * includes the keyring rolls the anchor back with the files, and is not detected.
+ *
+ * R6 — sessions (identity-v2.md §4.2, §4.4, D8, Q2, Q3). A contact's record
+ * (file format 0x02) holds its sessions, a messageId dedup set and the
+ * messages sent but not yet acknowledged:
+ *   - initiate(): X3DH-lite (x3dh.ts) → a session named by EK_a; every message
+ *     on it is kind 0x02 until the first reply arrives on it.
+ *   - receive(): dedup, then for kind 0x02 the sentAt bound (8 days old /
+ *     5 min ahead) and the NodeID↔static-key check, all before any DH. A new
+ *     session is created only if its first message authenticates (the
+ *     static–static term); nothing is stored for a message that does not.
+ *   - Glare (both initiated, neither acknowledged): the session initiated by the
+ *     lower NodeID sends (doc §4.2); the other is kept for receiving.
+ *   - A valid initial on an ESTABLISHED session means the peer lost its state
+ *     (R5 rollback / crash reset): it replaces the session for sending, the old
+ *     one is kept for receiving, and 'ratchet-session-replaced' lists every
+ *     message sent and never acknowledged, by messageId (the app resends or
+ *     marks them failed: R7/R9). A reply arriving on a session this side
+ *     initiated makes that session the sending one, which also resolves an
+ *     initial that arrives after the tie-break was already settled.
+ *   - Q2 residual: whoever holds the phrase holds the static key, so they can
+ *     produce a valid initial and force this replacement. The event and log
+ *     line are the only signal.
+ *   - Q3: initial messages have no forward secrecy against the recipient's
+ *     static key (x3dh.ts).
+ * Dedup entries and receive-only sessions expire after TTL + 1 day. Every
+ * change is written ahead, as above, before anything is released.
  */
 import fs from 'fs';
 import os from 'os';
@@ -64,14 +90,16 @@ import { withFileLock } from '../file-lock.js';
 import { derivePurposeKey, Purpose } from '../keys.js';
 import type { RatchetStoreEvents } from '../events.js';
 import {
-  encrypt, decrypt, serializeState, deserializeState,
+  encrypt, decrypt, serializeState, deserializeState, initSender, initReceiver, decodeMessage, KIND_INITIAL,
   type RatchetState, type RatchetDeps, type Observe, type DecryptFailure,
 } from './ratchet.js';
+import { x3dhInitiate, x3dhRespond, initialAgeProblem, staticMatchesNodeId, MAX_INITIAL_AGE_MS, type X3dhObserve } from './x3dh.js';
+import { x25519 } from '@noble/curves/ed25519';
 
 export const STORE_LABELS = Object.freeze({ STATE_AAD: 'gl-ratchet-state-v1', FILE: 'gl-ratchet-file-v1' });
 const FILE_MAGIC = 'GLRS';
 const MARKER_MAGIC = 'GLRM';
-const FORMAT = 0x01;
+const FORMAT = 0x02;                              // 0x02: contact records with sessions (R6)
 const HEADER_LEN = 4 + 1 + 16 + 8 + 12;          // 41
 const NODE_ID_HEX = /^[0-9a-f]{128}$/;
 const enc = new TextEncoder();
@@ -92,6 +120,10 @@ export class RatchetSessionPoisonedError extends NamedError { constructor(m: str
 export class RatchetNoSessionError extends NamedError { constructor(m: string) { super('RatchetNoSessionError', m); } }
 /** Used after close(). */
 export class RatchetStoreClosedError extends NamedError { constructor(m: string) { super('RatchetStoreClosedError', m); } }
+/** initiate() while an established session exists (pass { replace: true } to start over deliberately). */
+export class RatchetSessionExistsError extends NamedError { constructor(m: string) { super('RatchetSessionExistsError', m); } }
+/** A static key that does not hash to the contact's NodeID. */
+export class RatchetPeerKeyError extends NamedError { constructor(m: string) { super('RatchetPeerKeyError', m); } }
 /** A ratchet node with no store and no explicit memory-only mode (bug family 1). */
 export class RatchetStoreRequiredError extends NamedError { constructor(m: string) { super('RatchetStoreRequiredError', m); } }
 
@@ -120,7 +152,37 @@ export interface StartupReport {
 export type CheckpointPoint =
   | 'send:anchored' | 'send:computed' | 'send:persisted'
   | 'receive:computed' | 'receive:anchored' | 'receive:persisted'
-  | 'put:anchored' | 'put:persisted';
+  | 'put:anchored' | 'put:persisted'
+  | 'initiate:anchored' | 'initiate:computed' | 'initiate:persisted'
+  | 'ack:anchored' | 'ack:persisted';
+
+/** One ratchet session with a contact. `id` = hex EK_a for X3DH-lite sessions. */
+export interface StoredSession {
+  id: string;
+  /** NodeID that sent the initial message (null for put()). */
+  initiator: string | null;
+  sending: boolean;
+  /** Set on a session this side initiated until a reply arrives on it. */
+  initPending: { ek: string } | null;
+  state: RatchetState;
+  createdAt: number;
+  lastUsedAt: number;
+}
+export interface ContactRecord {
+  v: 2;
+  peer: string;
+  sessions: StoredSession[];
+  dedup: { id: string; exp: number }[];
+  unacked: { id: string; sessionId: string; sentAt: number }[];
+}
+/** Our static identity (the node's): needed to start and accept sessions. */
+export interface StoreIdentity { staticPrivKey: Uint8Array; staticPubKey: Uint8Array; nodeIdHex: string }
+export type ReceiveFailure = DecryptFailure | 'duplicate' | 'initial-too-old' | 'initial-from-future' | 'peer-key-mismatch' | 'no-session';
+export type StoreObserve = Observe & X3dhObserve;
+/** §4.4: dedup and receive-only sessions live TTL + 1 day. */
+export const DEDUP_TTL_MS = MAX_INITIAL_AGE_MS;
+export const MAX_DEDUP_ENTRIES = 10_000;
+export const MAX_UNACKED = 2000;
 
 export interface RatchetStoreOptions {
   dir: string;
@@ -133,6 +195,7 @@ export interface RatchetStoreOptions {
   /** Test-only crash points. */
   checkpoint?: (point: CheckpointPoint) => void;
   randomBytes?: (n: number) => Uint8Array;
+  identity?: StoreIdentity;
 }
 
 /** #34 from the mesh seed. */
@@ -155,7 +218,8 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
   startup!: StartupReport;
   private readonly opts: RatchetStoreOptions | null;
   private readonly memoryReason: string | null;
-  private readonly states = new Map<string, RatchetState>();
+  private readonly records = new Map<string, ContactRecord>();
+  private readonly identity: StoreIdentity | null;
   private readonly poisoned = new Set<string>();
   private unreadable = new Set<string>();
   private keyMismatch = false;
@@ -166,8 +230,17 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
   private closed = false;
 
   /** Use openRatchetStore / memoryOnlyRatchetStore. */
-  constructor(spec: { sealed: RatchetStoreOptions } | { memoryOnly: string }) {
+  constructor(spec: { sealed: RatchetStoreOptions } | { memoryOnly: string; identity?: StoreIdentity }) {
     super();
+    const id = 'memoryOnly' in spec ? spec.identity : spec.sealed?.identity;
+    if (id !== undefined) {
+      if (!id || !(id.staticPrivKey instanceof Uint8Array) || !(id.staticPubKey instanceof Uint8Array) ||
+          Buffer.from(x25519.getPublicKey(id.staticPrivKey)).toString('hex') !== Buffer.from(id.staticPubKey).toString('hex') ||
+          !staticMatchesNodeId(id.staticPubKey, id.nodeIdHex)) {
+        throw new RatchetStoreRequiredError('ratchet store identity: staticPrivKey, staticPubKey and nodeIdHex must belong together');
+      }
+    }
+    this.identity = id ?? null;
     if ('memoryOnly' in spec) {
       if (typeof spec.memoryOnly !== 'string' || !spec.memoryOnly.trim()) throw new RatchetStoreRequiredError('memory-only ratchets need a stated reason');
       this.mode = 'memory-only'; this.opts = null; this.memoryReason = spec.memoryOnly;
@@ -236,7 +309,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     } else if (marker && marker !== anchor.installId) {
       rollback = 'install-mismatch';
     }
-    const loaded = new Map<string, { state: RatchetState; gen: number }>();
+    const loaded = new Map<string, { record: ContactRecord; gen: number }>();
     const attributed = new Set<string>();
     const peers = Object.keys(anchor.gens);
     if (!rollback) {
@@ -257,8 +330,8 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       return;
     }
     let raised = false;
-    for (const [peer, { state, gen }] of loaded) {
-      this.states.set(peer, state);
+    for (const [peer, { record, gen }] of loaded) {
+      this.records.set(peer, record);
       if (gen > anchor.gens[peer]) { anchor.gens[peer] = gen; raised = true; }
     }
     if (raised || marker !== anchor.installId) this.saveAnchor(anchor, 'record the anchor');
@@ -305,7 +378,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     return Buffer.concat([Buffer.from(STORE_LABELS.STATE_AAD), Buffer.from(peer, 'hex'), installId, gen]);
   }
 
-  private openFile(peer: string, file: string, installId: string): { state: RatchetState; gen: number } | 'unreadable' | 'install-mismatch' {
+  private openFile(peer: string, file: string, installId: string): { record: ContactRecord; gen: number } | 'unreadable' | 'install-mismatch' {
     let b: Buffer;
     try { b = fs.readFileSync(file); } catch { return 'unreadable'; }
     if (b.length < HEADER_LEN + 16 || b.toString('latin1', 0, 4) !== FILE_MAGIC || b[4] !== FORMAT) return 'unreadable';
@@ -313,19 +386,18 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     const genBytes = b.subarray(21, 29);
     try {
       const plain = gcm((this.opts as RatchetStoreOptions).sealKey, b.subarray(29, 41), this.aad(peer, b.subarray(5, 21), genBytes)).decrypt(b.subarray(41));
-      const state = deserializeState(Buffer.from(plain).toString('utf8'));
-      if (state.peerNodeId !== peer) return 'unreadable';
-      return { state, gen: Number(genBytes.readBigUInt64BE(0)) };
+      const record = parseRecord(Buffer.from(plain).toString('utf8'), peer);
+      return record ? { record, gen: Number(genBytes.readBigUInt64BE(0)) } : 'unreadable';
     } catch {
       return 'unreadable';
     }
   }
 
-  private seal(peer: string, state: RatchetState, gen: number, installId: string): Buffer {
+  private seal(peer: string, record: ContactRecord, gen: number, installId: string): Buffer {
     const id = Buffer.from(installId, 'hex');
     const g = u64(gen);
     const nonce = this.random(12);
-    const ct = gcm((this.opts as RatchetStoreOptions).sealKey, nonce, this.aad(peer, id, g)).encrypt(enc.encode(serializeState(state)));
+    const ct = gcm((this.opts as RatchetStoreOptions).sealKey, nonce, this.aad(peer, id, g)).encrypt(enc.encode(JSON.stringify(record)));
     return Buffer.concat([Buffer.from(FILE_MAGIC, 'latin1'), Buffer.of(FORMAT), id, g, Buffer.from(nonce), Buffer.from(ct)]);
   }
 
@@ -382,43 +454,202 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
   }
 
   // ── public API ─────────────────────────────────────────────────────────
-  has(peer: string): boolean { return this.states.has(peer); }
-  get(peer: string): RatchetState | null { const s = this.states.get(peer); return s ? deserializeState(serializeState(s)) : null; }
-  peers(): string[] { return [...this.states.keys()]; }
+  /** Is there a session to send on? */
+  has(peer: string): boolean { return !!sendingOf(this.records.get(peer)); }
+  /** The sending session's ratchet state (a copy). */
+  get(peer: string): RatchetState | null { const s = sendingOf(this.records.get(peer)); return s ? deserializeState(serializeState(s.state)) : null; }
+  peers(): string[] { return [...this.records.keys()].filter((p) => this.has(p)); }
   needsRehandshake(): string[] { return [...this.rehandshake]; }
+  sessionInfo(peer: string): { sending: string | null; sessions: { id: string; initiator: string | null; sending: boolean; initPending: boolean; createdAt: number; lastUsedAt: number }[] } {
+    const r = this.records.get(peer);
+    return {
+      sending: sendingOf(r)?.id ?? null,
+      sessions: (r?.sessions || []).map((x) => ({ id: x.id, initiator: x.initiator, sending: x.sending, initPending: !!x.initPending, createdAt: x.createdAt, lastUsedAt: x.lastUsedAt })),
+    };
+  }
+  /** messageIds sent to this contact and not yet acknowledged, oldest first. */
+  unacknowledged(peer: string): string[] { return (this.records.get(peer)?.unacked || []).map((u) => u.id); }
+  /** messageIds currently held for dedup. */
+  dedupIds(peer: string): string[] { return (this.records.get(peer)?.dedup || []).map((d) => d.id); }
 
-  /** Store a new session (from the handshake, R6), write-ahead like every write. */
+  /** Store a ready session (tests, and any future non-X3DH path), write-ahead like every write. */
   put(peer: string, state: RatchetState): void {
     this.usable(peer, false);
     if (state.peerNodeId !== peer) throw new Error('ratchet store: the state belongs to a different contact');
-    const copy = deserializeState(serializeState(state));
-    this.persist(peer, copy, 'put');
-    this.states.set(peer, copy);
-    this.poisoned.delete(peer);
+    const now = Date.now();
+    const next = cloneRecord(this.records.get(peer) || emptyRecord(peer));
+    for (const x of next.sessions) x.sending = false;
+    next.sessions.push({ id: `direct-${hex(this.random(8))}`, initiator: null, sending: true, initPending: null, state: deserializeState(serializeState(state)), createdAt: now, lastUsedAt: now });
+    prune(next, now);
+    this.persist(peer, next, 'put');
     this.rehandshake.delete(peer);
   }
 
-  /** Encrypt, persist the new state, and only then return the ciphertext. */
-  send(peer: string, plaintext: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe } = {}): Uint8Array {
-    const state = this.usable(peer, true) as RatchetState;
-    let message: Uint8Array | null = null;
-    this.persist(peer, null, 'send', () => {
-      const e = encrypt(state, plaintext, deps, opts);
-      message = e.message;
-      return e.state;
+  /**
+   * Start a session with X3DH-lite (§4.2). The EK and SK are derived after the
+   * anchor step, so a crash cannot make them derive again on the same state.
+   * Messages sent next are kind 0x02 until a reply arrives on this session.
+   */
+  initiate(peer: string, o: { peerStaticPub: Uint8Array; replace?: boolean }, deps: RatchetDeps, opts: { observe?: StoreObserve } = {}): string {
+    this.usable(peer, false);
+    const me = this.needIdentity();
+    if (!staticMatchesNodeId(o.peerStaticPub, peer)) throw new RatchetPeerKeyError('that static key does not hash to the contact NodeID');
+    const current = sendingOf(this.records.get(peer));
+    if (current && !current.initPending && !o.replace) throw new RatchetSessionExistsError('an established session exists; pass { replace: true } to start over');
+    const now = deps.now();
+    let id = '';
+    this.persist(peer, null, 'initiate', () => {
+      const { rootKey, ekPub } = x3dhInitiate({ selfStaticPriv: me.staticPrivKey, selfNodeId: me.nodeIdHex, peerStaticPub: o.peerStaticPub, peerNodeId: peer }, deps, opts.observe);
+      const state = initSender({ rootKey, remoteDhPub: o.peerStaticPub, selfNodeId: me.nodeIdHex, peerNodeId: peer }, deps);
+      const next = cloneRecord(this.records.get(peer) || emptyRecord(peer));
+      for (const x of next.sessions) x.sending = false;
+      id = hex(ekPub);
+      next.sessions.push({ id, initiator: me.nodeIdHex, sending: true, initPending: { ek: id }, state, createdAt: now, lastUsedAt: now });
+      prune(next, now);
+      return next;
     });
+    this.rehandshake.delete(peer);
+    return id;
+  }
+
+  /** Encrypt on the sending session, persist, and only then return the ciphertext. */
+  send(peer: string, plaintext: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe } = {}): Uint8Array {
+    this.usable(peer, true);
+    const now = deps.now();
+    let message: Uint8Array | null = null;
+    let dropped: string[] = [];
+    this.persist(peer, null, 'send', () => {
+      const next = cloneRecord(this.records.get(peer) as ContactRecord);
+      const s = sendingOf(next) as StoredSession;
+      const initial = s.initPending ? { ek: unhexB(s.initPending.ek), sentAt: now } : undefined;
+      const e = encrypt(s.state, plaintext, deps, { observe: opts.observe, initial });
+      s.state = e.state; s.lastUsedAt = now;
+      next.unacked.push({ id: e.messageId, sessionId: s.id, sentAt: now });
+      dropped = prune(next, now);
+      message = e.message;
+      return next;
+    });
+    this.reportDropped(peer, dropped);
     return message as unknown as Uint8Array;
   }
 
-  /** Decrypt, persist the new state, and only then return the plaintext. A failed decrypt changes nothing. */
-  receive(peer: string, message: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe } = {}):
-    { ok: true; plaintext: Uint8Array; messageId: string } | { ok: false; reason: DecryptFailure } {
-    const state = this.usable(peer, true) as RatchetState;
-    const d = decrypt(state, message, deps, opts);
-    if (!d.ok) return d;
+  /**
+   * Decrypt, persist (dedup entry included), and only then return the
+   * plaintext. Every check that can fail runs before anything is written, so
+   * a rejected message changes nothing.
+   */
+  receive(peer: string, message: Uint8Array, deps: RatchetDeps, opts: { observe?: StoreObserve; peerStaticPub?: Uint8Array } = {}):
+    { ok: true; plaintext: Uint8Array; messageId: string } | { ok: false; reason: ReceiveFailure } {
+    this.usable(peer, false);
+    const parsed = decodeMessage(message);
+    if (typeof parsed === 'string') return { ok: false, reason: parsed };
+    const { header } = parsed;
+    const now = deps.now();
+    const rec = this.records.get(peer);
+    const id = hex(header.messageId);
+    if (rec?.dedup.some((d) => d.id === id && d.exp > now)) return { ok: false, reason: 'duplicate' };
+
+    let decrypted: { state: RatchetState; plaintext: Uint8Array } | null = null;
+    let sessionId = '';
+    let created: StoredSession | null = null;
+    if (header.kind === KIND_INITIAL) {
+      const age = initialAgeProblem(header.sentAt as number, now);
+      if (age) return { ok: false, reason: age };
+      sessionId = hex(header.ek as Uint8Array);
+      const known = rec?.sessions.find((x) => x.id === sessionId);
+      if (known) {
+        const d = decrypt(known.state, message, deps, { observe: opts.observe, allowInitial: true });
+        if (!d.ok) return { ok: false, reason: (d as { reason: DecryptFailure }).reason };
+        decrypted = d;
+      } else {
+        const me = this.needIdentity();
+        if (!opts.peerStaticPub) throw new RatchetPeerKeyError('an initial message needs the contact static key (peerStaticPub)');
+        if (!staticMatchesNodeId(opts.peerStaticPub, peer)) return { ok: false, reason: 'peer-key-mismatch' };
+        let start: RatchetState;
+        try {
+          const sk = x3dhRespond({ selfStaticPriv: me.staticPrivKey, selfNodeId: me.nodeIdHex, peerStaticPub: opts.peerStaticPub, peerNodeId: peer, ekPub: header.ek as Uint8Array }, opts.observe);
+          start = initReceiver({ rootKey: sk, selfDh: { priv: me.staticPrivKey, pub: me.staticPubKey }, selfNodeId: me.nodeIdHex, peerNodeId: peer }, deps);
+        } catch {
+          return { ok: false, reason: 'malformed' };       // e.g. a low-order EK_s
+        }
+        const d = decrypt(start, message, deps, { observe: opts.observe, allowInitial: true });
+        if (!d.ok) return { ok: false, reason: (d as { reason: DecryptFailure }).reason };
+        decrypted = d;
+        created = { id: sessionId, initiator: peer, sending: false, initPending: null, state: d.state, createdAt: now, lastUsedAt: now };
+      }
+    } else {
+      if (!rec || !rec.sessions.length) return { ok: false, reason: 'no-session' };
+      const order = [...rec.sessions].sort((x, y) => (x.sending === y.sending ? y.lastUsedAt - x.lastUsedAt : x.sending ? -1 : 1));
+      let first: DecryptFailure | null = null;
+      for (const x of order) {
+        const d = decrypt(x.state, message, deps, { observe: opts.observe });
+        if (d.ok) { decrypted = d; sessionId = x.id; break; }
+        first ||= (d as { reason: DecryptFailure }).reason;
+      }
+      if (!decrypted) return { ok: false, reason: first as DecryptFailure };
+    }
     this.opts?.checkpoint?.('receive:computed');
-    this.persist(peer, d.state, 'receive');
-    return { ok: true, plaintext: d.plaintext, messageId: d.messageId };
+
+    const next = cloneRecord(rec || emptyRecord(peer));
+    const events: { reason: 'peer-reset' | 'glare'; previous: string | null; current: string; unacknowledged: string[] }[] = [];
+    const me = this.identity;
+    if (created) {
+      const cur = sendingOf(next);
+      next.sessions.push(created);
+      if (!cur) {
+        created.sending = true;
+      } else if (cur.initPending && me && cur.initiator === me.nodeIdHex) {
+        // Glare (§4.2): the session initiated by the lower NodeID sends; both stay receivable.
+        if (peer < me.nodeIdHex) {
+          cur.sending = false; created.sending = true;
+          events.push({ reason: 'glare', previous: cur.id, current: created.id, unacknowledged: [] });
+        }
+      } else {
+        // The peer started over on an established session: it lost its state.
+        cur.sending = false; created.sending = true;
+        events.push({ reason: 'peer-reset', previous: cur.id, current: created.id, unacknowledged: next.unacked.map((u) => u.id) });
+      }
+    } else {
+      const x = next.sessions.find((y) => y.id === sessionId) as StoredSession;
+      x.state = (decrypted as { state: RatchetState }).state;
+      x.lastUsedAt = now;
+      if (x.initPending && me && x.initiator === me.nodeIdHex) {
+        // A reply on a session we initiated: the peer holds it, so it is the one to send on.
+        x.initPending = null;
+        if (!x.sending) {
+          const cur = sendingOf(next);
+          if (cur) cur.sending = false;
+          x.sending = true;
+          events.push({ reason: 'glare', previous: cur?.id ?? null, current: x.id, unacknowledged: [] });
+        }
+      }
+    }
+    next.dedup.push({ id, exp: now + DEDUP_TTL_MS });
+    const dropped = prune(next, now);
+    this.persist(peer, next, 'receive');
+    this.rehandshake.delete(peer);
+    for (const ev of events) {
+      if (ev.reason === 'peer-reset') {
+        logger.warn('ratchet-store', 'ratchet-session-replaced',
+          `A contact started a new secure session over an established one (it lost its ratchet state, or someone holding its phrase did this); ${ev.unacknowledged.length} sent message(s) were never acknowledged`,
+          { peerPrefix: peer.slice(0, 16), unacknowledged: ev.unacknowledged.length });
+      }
+      this.emit('ratchet-session-replaced', { peer, ...ev });
+    }
+    this.reportDropped(peer, dropped);
+    return { ok: true, plaintext: (decrypted as { plaintext: Uint8Array }).plaintext, messageId: id };
+  }
+
+  /** The app received a receipt for these messages (R7/R9): they are no longer reported. */
+  acknowledge(peer: string, messageIds: string[]): void {
+    this.usable(peer, false);
+    const rec = this.records.get(peer);
+    if (!rec) return;
+    const drop = new Set(messageIds);
+    if (!rec.unacked.some((u) => drop.has(u.id))) return;
+    const next = cloneRecord(rec);
+    next.unacked = next.unacked.filter((u) => !drop.has(u.id));
+    this.persist(peer, next, 'ack');
   }
 
   /** The one explicit way to deal with an unreadable file: move it aside, unchanged. */
@@ -445,11 +676,22 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     if (this.closed) return;
     this.closed = true;
     this.releaseOwner();
-    this.states.clear();
+    this.records.clear();
   }
 
   // ── internals ──────────────────────────────────────────────────────────
-  private usable(peer: string, needSession: boolean): RatchetState | null {
+  private needIdentity(): StoreIdentity {
+    if (!this.identity) throw new RatchetStoreRequiredError('starting or accepting a session needs the node identity (store option `identity`)');
+    return this.identity;
+  }
+
+  private reportDropped(peer: string, ids: string[]): void {
+    if (!ids.length) return;
+    logger.warn('ratchet-store', 'ratchet-unacknowledged-dropped', `${ids.length} unacknowledged message id(s) were dropped from the list (cap ${MAX_UNACKED})`, { count: ids.length });
+    this.emit('ratchet-unacknowledged-dropped', { peer, messageIds: ids });
+  }
+
+  private usable(peer: string, needSession: boolean): ContactRecord | null {
     if (this.closed) throw new RatchetStoreClosedError('ratchet store is closed');
     if (!this.opened) throw new RatchetStoreRequiredError('ratchet store used before open()');
     if (!NODE_ID_HEX.test(peer)) throw new Error('ratchet store: a contact is a 128-hex NodeID');
@@ -457,21 +699,22 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       throw new RatchetStateUnreadableError('the state file for this contact cannot be opened; it is kept unchanged (moveAsideUnreadable to replace it)');
     }
     if (this.poisoned.has(peer)) {
-      throw new RatchetSessionPoisonedError('a message key for this contact was derived but its state could not be saved; the session ends with this run');
+      throw new RatchetSessionPoisonedError('a key for this contact was derived but its state could not be saved; the session ends with this run');
     }
-    const s = this.states.get(peer) || null;
-    if (needSession && !s) throw new RatchetNoSessionError('no ratchet session for this contact; a new handshake is needed');
-    return s;
+    const r = this.records.get(peer) || null;
+    if (needSession && !sendingOf(r)) throw new RatchetNoSessionError('no ratchet session for this contact; a new handshake is needed');
+    return r;
   }
 
   /**
-   * The write-ahead sequence. `compute` (send) runs after the anchor step and
-   * before the file write, so a derived key is always covered by the anchor.
+   * The write-ahead sequence. `compute` (initiate, send) runs after the anchor
+   * step and before the file write, so every key it derives is covered by the
+   * anchor: a crash in between reads as rollback, never as a reusable state.
    */
-  private persist(peer: string, next: RatchetState | null, op: 'put' | 'send' | 'receive', compute?: () => RatchetState): void {
+  private persist(peer: string, next: ContactRecord | null, op: 'put' | 'send' | 'receive' | 'initiate' | 'ack', compute?: () => ContactRecord): void {
     const cp = this.opts?.checkpoint;
     if (this.mode === 'memory-only' || !this.opts) {     // memory-only: nothing is ever written
-      this.states.set(peer, compute ? compute() : (next as RatchetState));
+      this.records.set(peer, compute ? compute() : (next as ContactRecord));
       return;
     }
     const anchor = this.anchor as RatchetAnchor;
@@ -480,25 +723,25 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     this.saveAnchor(bumped, `generation ${gen}`);        // throws RatchetPersistError; nothing derived yet
     this.anchor = bumped;
     cp?.(`${op}:anchored` as CheckpointPoint);
-    let state = next as RatchetState;
+    let record = next as ContactRecord;
     if (compute) {
-      state = compute();
-      cp?.('send:computed');
+      record = compute();
+      cp?.(`${op}:computed` as CheckpointPoint);
     }
     try {
       const file = path.join(this.opts.dir, ratchetFileName(this.opts.sealKey, peer));
-      const bytes = this.seal(peer, state, gen, anchor.installId);
+      const bytes = this.seal(peer, record, gen, anchor.installId);
       withFileLock(file, () => {
         if (this.readOwner()?.token !== this.token) throw new RatchetStoreInUseError('this process no longer owns the ratchet store');
         writeFileAtomicSync(file, bytes);
       }, { timeoutMs: this.opts.lockTimeoutMs ?? 5000 });
     } catch (e) {
-      if (compute) this.poisoned.add(peer);              // a sending key exists that no file covers
+      if (compute) this.poisoned.add(peer);              // keys exist that no file covers
       logger.error('ratchet-store', 'ratchet-persist-failed', `Could not save ratchet state (${op}); nothing was released`, { err: (e as Error).message });
       throw new RatchetPersistError(`could not save ratchet state (${op}): ${(e as Error).message}`);
     }
     cp?.(`${op}:persisted` as CheckpointPoint);
-    this.states.set(peer, state);
+    this.records.set(peer, record);
   }
 
   private random(n: number): Uint8Array {
@@ -513,6 +756,44 @@ function ownerIsDead(o: Owner): boolean {
   try { process.kill(o.pid, 0); return false; } catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
 
+const cloneRecord = (r: ContactRecord): ContactRecord => JSON.parse(JSON.stringify(r));
+const unhexB = (h: string): Uint8Array => new Uint8Array(Buffer.from(h, 'hex'));
+const emptyRecord = (peer: string): ContactRecord => ({ v: 2, peer, sessions: [], dedup: [], unacked: [] });
+const sendingOf = (r: ContactRecord | undefined | null): StoredSession | undefined => r?.sessions.find((x) => x.sending);
+
+/** Parse and validate a contact record; null if anything is off. */
+function parseRecord(text: string, peer: string): ContactRecord | null {
+  try {
+    const r = JSON.parse(text) as ContactRecord;
+    if (!r || r.v !== 2 || r.peer !== peer || !Array.isArray(r.sessions) || !Array.isArray(r.dedup) || !Array.isArray(r.unacked)) return null;
+    if (r.sessions.filter((x) => x.sending).length > 1) return null;
+    for (const x of r.sessions) {
+      if (typeof x.id !== 'string' || typeof x.sending !== 'boolean' || !Number.isFinite(x.createdAt) || !Number.isFinite(x.lastUsedAt)) return null;
+      if (x.initPending !== null && !(x.initPending && /^[0-9a-f]{64}$/.test(x.initPending.ek))) return null;
+      x.state = deserializeState(JSON.stringify(x.state));
+      if (x.state.peerNodeId !== peer) return null;
+    }
+    if (!r.dedup.every((d) => /^[0-9a-f]{32}$/.test(d.id) && Number.isFinite(d.exp))) return null;
+    if (!r.unacked.every((u) => /^[0-9a-f]{32}$/.test(u.id) && typeof u.sessionId === 'string' && Number.isFinite(u.sentAt))) return null;
+    return r;
+  } catch {
+    return null;
+  }
+}
+
+/** TTL + 1 day for dedup entries and for sessions that only receive; caps on both lists. */
+function prune(r: ContactRecord, now: number): string[] {
+  r.dedup = r.dedup.filter((d) => d.exp > now);
+  if (r.dedup.length > MAX_DEDUP_ENTRIES) r.dedup = r.dedup.slice(r.dedup.length - MAX_DEDUP_ENTRIES);
+  r.sessions = r.sessions.filter((x) => x.sending || now - x.lastUsedAt <= DEDUP_TTL_MS);
+  let dropped: string[] = [];
+  if (r.unacked.length > MAX_UNACKED) {
+    dropped = r.unacked.slice(0, r.unacked.length - MAX_UNACKED).map((u) => u.id);
+    r.unacked = r.unacked.slice(r.unacked.length - MAX_UNACKED);
+  }
+  return dropped;
+}
+
 /** Build and open a sealed store. Production code reaches this only through createGMPNode. */
 export function openRatchetStore(opts: RatchetStoreOptions): RatchetStore {
   const s = new RatchetStore({ sealed: opts });
@@ -522,9 +803,9 @@ export function openRatchetStore(opts: RatchetStoreOptions): RatchetStore {
 }
 
 /** An explicit memory-only store (browser build, Q8; or a locked keyring). A reason is required. */
-export function memoryOnlyRatchetStore(reason: string, on?: RatchetStoreOptions['on']): RatchetStore {
-  const s = new RatchetStore({ memoryOnly: reason });
-  for (const [ev, fn] of Object.entries(on || {})) s.on(ev as keyof RatchetStoreEvents, fn as never);
+export function memoryOnlyRatchetStore(reason: string, opts: { on?: RatchetStoreOptions['on']; identity?: StoreIdentity } = {}): RatchetStore {
+  const s = new RatchetStore({ memoryOnly: reason, identity: opts.identity });
+  for (const [ev, fn] of Object.entries(opts.on || {})) s.on(ev as keyof RatchetStoreEvents, fn as never);
   s.open();
   return s;
 }

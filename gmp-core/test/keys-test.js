@@ -149,6 +149,28 @@ console.log('\n=== label uniqueness ===');
     absent: () => storeClash(outsideStore).length === 0,
     message: `no store label equals or prefixes any of the ${outsideStore.size} labels outside the store`,
   });
+  // R6: X3DH-lite's info label (§5), only in ratchet/x3dh.ts.
+  const X3DH_LABELS = ['gl-x3dh-v1'];
+  let x3 = null;
+  try { x3 = await import('../dist/ratchet/x3dh.js'); } catch { /* A: module absent */ }
+  ok(!!x3 && x3.X3DH_LABEL === X3DH_LABELS[0], `dist/ratchet/x3dh.js X3DH_LABEL is ${X3DH_LABELS[0]} (got ${x3 ? x3.X3DH_LABEL : 'no module'})`);
+  const x3Src = path.join(pkg, 'src', 'ratchet', 'x3dh.ts');
+  const outsideX3 = new Set(DOC_UNCHANGED);
+  for (const f of files.filter((x) => x !== x3Src)) for (const m of fs.readFileSync(f, 'utf8').matchAll(labelRe)) outsideX3.add(m[1]);
+  for (const l of [...labels, ...RATCHET_LABELS, ...STORE_LABELS]) outsideX3.add(l);
+  const all7 = [...labels, ...RATCHET_LABELS, ...STORE_LABELS, ...X3DH_LABELS];
+  ok(new Set(all7).size === all7.length && all7.every((a) => all7.every((b) => a === b || !a.startsWith(b))),
+    `the ${all7.length} new labels (Purpose + ratchet + store + x3dh) are pairwise distinct and none prefixes another`);
+  const x3Clash = (against) => X3DH_LABELS.filter((x) => [...against].some((e) => e === x || e.startsWith(x) || x.startsWith(e)));
+  assertAbsent({
+    channel: 'the x3dh label equal to, or a prefix of, an existing label',
+    controlMessage: 'a planted duplicate (gl-x3dh-v1) and a planted prefix (gl-x3dh) are both caught',
+    control: () => x3Clash(new Set(['gl-x3dh-v1'])).length === 1 && x3Clash(new Set(['gl-x3dh'])).length === 1,
+    absent: () => x3Clash(outsideX3).length === 0,
+    message: `gl-x3dh-v1 equals or prefixes none of the ${outsideX3.size} labels outside x3dh.ts`,
+  });
+  const x3Elsewhere = files.filter((f) => f !== x3Src && f !== path.join(pkg, 'src', 'keys.ts') && X3DH_LABELS.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
+  ok(fs.existsSync(x3Src) && x3Elsewhere.length === 0, `gl-x3dh-v1 appears in src/ only in ratchet/x3dh.ts (${JSON.stringify(x3Elsewhere.map((f) => path.relative(pkg, f)))})`);
   const storeElsewhere = files.filter((f) => f !== storeSrc && STORE_LABELS.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
   ok(fs.existsSync(storeSrc) && storeElsewhere.length === 0,
     `the store labels appear in src/ only in ratchet/ratchet-store.ts (${JSON.stringify(storeElsewhere.map((f) => path.relative(pkg, f)))})`);

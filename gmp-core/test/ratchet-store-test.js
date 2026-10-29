@@ -359,7 +359,8 @@ console.log('\n=== 6. sealed at rest: no state or key material on disk ===');
   const d = crypto.createDecipheriv('aes-256-gcm', Buffer.from(derivePurposeKey(MESH_SEED, Purpose.RATCHET_SEAL)), file.subarray(29, 41));
   d.setAAD(aad); d.setAuthTag(file.subarray(file.length - 16));
   let opened = null; try { opened = Buffer.concat([d.update(file.subarray(41, file.length - 16)), d.final()]).toString('utf8'); } catch { opened = null; }
-  ok(opened === R.serializeState(state) && Number(gen) === anchor.gens[B_ID] && file.subarray(0, 5).toString('latin1') === 'GLRS\x01' && file.subarray(5, 21).toString('hex') === anchor.installId,
+  const rec = opened ? JSON.parse(opened) : null;               // R6: the plaintext is the contact record (format 0x02)
+  ok(!!rec && R.serializeState(R.deserializeState(JSON.stringify(rec.sessions.find((x) => x.sending).state))) === R.serializeState(state) && Number(gen) === anchor.gens[B_ID] && file.subarray(0, 5).toString('latin1') === 'GLRS\x02' && file.subarray(5, 21).toString('hex') === anchor.installId,
     `an independent node:crypto AES-256-GCM open with #34 and AAD "gl-ratchet-state-v1"‖peerNodeId‖installId‖generation gives the state (generation ${gen})`);
   const aad2 = Buffer.from(aad); aad2[aad2.length - 1] ^= 1;
   const d2 = crypto.createDecipheriv('aes-256-gcm', Buffer.from(SEAL), file.subarray(29, 41)); d2.setAAD(aad2); d2.setAuthTag(file.subarray(file.length - 16));

@@ -1,0 +1,8 @@
+{
+  "format": "gl X3DH-lite v1 (identity-v2.md §4.2)",
+  "identities": "sha256(\"r6 identity alice\"/\"bob\")",
+  "rng": "r6-vectors/A",
+  "clock": 1800000000000,
+  "skSha256Prefix": "57e7a846352d5fd1",
+  "initialMessageSha256Prefix": "05e291e62e148f29"
+}

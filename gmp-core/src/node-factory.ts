@@ -92,10 +92,11 @@ function attachRatchets(node: GMPNode, spec: RatchetSpec | null): void {
     kind: 'memoryOnly' in spec ? 'memory-only' : 'sealed',
     open(): RatchetStore {
       if (store) return store;
-      if ('memoryOnly' in spec) return (store = memoryOnlyRatchetStore(spec.memoryOnly, spec.on));
+      const identity = (node as unknown as { identity?: { seed?: Uint8Array; staticPrivKey: Uint8Array; staticPubKey: Uint8Array; nodeIdHex: string } | null }).identity;
+      if ('memoryOnly' in spec) return (store = memoryOnlyRatchetStore(spec.memoryOnly, { on: spec.on, identity: identity ?? undefined }));
       const seed = (node as unknown as { identity?: { seed?: Uint8Array } | null }).identity?.seed;
       if (!(seed instanceof Uint8Array)) throw new RatchetStoreRequiredError('node.ratchets.open(): load the identity first (the seal key derives from it)');
-      return (store = openRatchetStore({ dir: spec.dir, anchor: spec.anchor, on: spec.on, sealKey: ratchetSealKey(seed) }));
+      return (store = openRatchetStore({ dir: spec.dir, anchor: spec.anchor, on: spec.on, sealKey: ratchetSealKey(seed), identity: identity ?? undefined }));
     },
   };
   Object.defineProperty(node, 'ratchets', {

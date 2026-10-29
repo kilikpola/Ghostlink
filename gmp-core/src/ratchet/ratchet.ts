@@ -16,9 +16,11 @@
  *
  * Wire (§3.1): version 0x01 ‖ kind ‖ messageId(16) [‖ EK_s(32) ‖ sentAt(8), kind
  * 0x02] ‖ DHr(32) ‖ PN(4) ‖ N(4) ‖ ciphertext ‖ tag(16). The plaintext is
- * whatever the caller passes; padding is R7. This module only produces and
- * accepts kind 0x01; the kind 0x02 header codec is here so its size is pinned,
- * but initial messages (X3DH-lite, messageId dedup, the sentAt bound) are R6.
+ * whatever the caller passes; padding is R7. Kind 0x02 (an initial message,
+ * R6) is the same ratchet message with EK_s and sentAt in the header, so both
+ * sit inside the AD: `encrypt(..., { initial })` produces one, and `decrypt`
+ * accepts one only with `allowInitial` (the store, after its dedup, sentAt and
+ * X3DH-lite checks; x3dh.ts). Plain decrypt still refuses kind 0x02.
  *
  * A replay fails because the message key was deleted when it was first used
  * (same chain: N is behind Nr; earlier chain: the skipped key is gone).
@@ -247,7 +249,8 @@ const pruneSkipped = (s: RatchetState, now: number): void => {
 
 // ── encrypt ──────────────────────────────────────────────────────────────
 export function encrypt(
-  state: RatchetState, plaintext: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe } = {},
+  state: RatchetState, plaintext: Uint8Array, deps: RatchetDeps,
+  opts: { observe?: Observe; initial?: { ek: Uint8Array; sentAt: number } } = {},
 ): { state: RatchetState; message: Uint8Array; messageId: string } {
   if (!state.CKs) throw new Error('ratchet: no sending chain yet (the receiving side sends after its first message arrives)');
   if (!(plaintext instanceof Uint8Array)) throw new Error('ratchet: plaintext is bytes');
@@ -256,7 +259,10 @@ export function encrypt(
   const step = kdfCk(unhex(state.CKs));
   const messageId = deps.rng(16);
   if (!(messageId instanceof Uint8Array) || messageId.length !== 16) throw new Error('ratchet: rng must return 16 bytes');
-  const header: Header = { version: RATCHET_VERSION, kind: KIND_RATCHET, messageId, dh: unhex(s.dhSelf.pub), pn: s.PN, n: s.Ns };
+  const header: Header = {
+    version: RATCHET_VERSION, kind: opts.initial ? KIND_INITIAL : KIND_RATCHET, messageId,
+    ek: opts.initial?.ek, sentAt: opts.initial?.sentAt, dh: unhex(s.dhSelf.pub), pn: s.PN, n: s.Ns,
+  };
   const headerBytes = encodeHeader(header);
   const mk = messageKey(step.mk);
   opts.observe?.onMessageKey?.('encrypt', hex(mk.both));
@@ -305,12 +311,12 @@ function skipTo(s: RatchetState, until: number, now: number): boolean {
  * work happens on a private copy that is returned only after the AEAD opens.
  */
 export function decrypt(
-  state: RatchetState, message: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe } = {},
+  state: RatchetState, message: Uint8Array, deps: RatchetDeps, opts: { observe?: Observe; allowInitial?: boolean } = {},
 ): { ok: true; state: RatchetState; plaintext: Uint8Array; messageId: string } | { ok: false; reason: DecryptFailure } {
   const parsed = decodeMessage(message);
   if (typeof parsed === 'string') return { ok: false, reason: parsed };
   const { header, headerBytes, body } = parsed;
-  if (header.kind !== KIND_RATCHET) return { ok: false, reason: 'unsupported-kind' };
+  if (header.kind !== KIND_RATCHET && !(header.kind === KIND_INITIAL && opts.allowInitial)) return { ok: false, reason: 'unsupported-kind' };
   const now = deps.now();
   const id = hex(header.messageId);
   const dhHex = hex(header.dh);

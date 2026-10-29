@@ -127,6 +127,31 @@ console.log('\n=== label uniqueness ===');
   const ratchetElsewhere = files.filter((f) => f !== ratchetSrc && RATCHET_LABELS.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
   ok(fs.existsSync(ratchetSrc) && ratchetElsewhere.length === 0,
     `the ratchet labels appear in src/ only in ratchet/ratchet.ts (${JSON.stringify(ratchetElsewhere.map((f) => path.relative(pkg, f)))})`);
+
+  // R5: the ratchet store's AAD prefix (§5) and its file-name key label.
+  const STORE_LABELS = ['gl-ratchet-state-v1', 'gl-ratchet-file-v1'];
+  let store = null;
+  try { store = await import('../dist/ratchet/ratchet-store.js'); } catch { /* A: module absent */ }
+  ok(!!store && JSON.stringify(Object.values(store.STORE_LABELS).sort()) === JSON.stringify([...STORE_LABELS].sort()),
+    `dist/ratchet/ratchet-store.js STORE_LABELS are exactly ${JSON.stringify(STORE_LABELS)} (got ${store ? JSON.stringify(store.STORE_LABELS) : 'no module'})`);
+  const storeSrc = path.join(pkg, 'src', 'ratchet', 'ratchet-store.ts');
+  const outsideStore = new Set(DOC_UNCHANGED);
+  for (const f of files.filter((x) => x !== storeSrc)) for (const m of fs.readFileSync(f, 'utf8').matchAll(labelRe)) outsideStore.add(m[1]);
+  for (const l of [...labels, ...RATCHET_LABELS]) outsideStore.add(l);
+  const every = [...labels, ...RATCHET_LABELS, ...STORE_LABELS];
+  ok(new Set(every).size === every.length && every.every((a) => every.every((b) => a === b || !a.startsWith(b))),
+    `the ${every.length} new labels (Purpose + ratchet + store) are pairwise distinct and none prefixes another`);
+  const storeClash = (against) => STORE_LABELS.filter((x) => [...against].some((e) => e === x || e.startsWith(x) || x.startsWith(e)));
+  assertAbsent({
+    channel: 'a store label equal to, or a prefix of, an existing label',
+    controlMessage: 'a planted duplicate (gl-ratchet-file-v1) and a planted prefix (gl-ratchet-state) are both caught',
+    control: () => storeClash(new Set([...outsideStore, 'gl-ratchet-file-v1', 'gl-ratchet-state'])).length === 2,
+    absent: () => storeClash(outsideStore).length === 0,
+    message: `no store label equals or prefixes any of the ${outsideStore.size} labels outside the store`,
+  });
+  const storeElsewhere = files.filter((f) => f !== storeSrc && STORE_LABELS.some((l) => fs.readFileSync(f, 'utf8').includes(l)));
+  ok(fs.existsSync(storeSrc) && storeElsewhere.length === 0,
+    `the store labels appear in src/ only in ratchet/ratchet-store.ts (${JSON.stringify(storeElsewhere.map((f) => path.relative(pkg, f)))})`);
 }
 
 console.log('\n=== fixed vectors (FIXTURE_A), cross-checked against node:crypto hkdfSync ===');

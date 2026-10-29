@@ -9,6 +9,17 @@ import type { RouteEntry } from './types.js';
 import type { BootstrapDiagnosis } from './bootstrap.js';
 import type { RelayConnection } from './relay/relay-client.js';
 
+// ── ratchet store (src/ratchet/ratchet-store.ts, R5) ─
+
+export interface RatchetStoreEvents {
+  /** State was rolled back (or anchor/installId mismatch): every ratchet discarded; `peers` need a new handshake. */
+  'ratchet-rollback': [info: { reason: string; peers: string[] }];
+  /** No secure-storage anchor (locked / insecure keyring, browser build): sessions live in memory for this run. */
+  'ratchet-memory-only': [info: { reason: string }];
+  /** State files that cannot be opened; refused and kept unchanged. `keyMismatch`: the whole store, wrong seal key. */
+  'ratchet-unreadable': [info: { peers: string[]; keyMismatch: boolean }];
+}
+
 // ── L2: link ────────────────────────────────────────
 
 export interface GMPLinkEvents {

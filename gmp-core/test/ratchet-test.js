@@ -486,20 +486,29 @@ console.log('\n=== purity: no I/O, timers, globals or node built-ins; inputs nev
   R.encrypt(p.alice, te('x'), p.dA);
   ok(R.serializeState(p.alice) === before, 'the caller\'s state object is unchanged after encrypt');
 }
-console.log('\n=== nothing outside tests imports the ratchet yet ===');
+console.log('\n=== the ratchet is reached only through the store, and the store only through the factory (R5) ===');
 {
   const files = [];
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === 'node_modules') continue; if (e.isDirectory()) walk(p); else if (/\.(ts|js|mjs|cjs|html)$/.test(e.name)) files.push(p); } };
   for (const d of ['gmp-core/src', 'electron/src', 'src', 'mobile/src', 'scripts', 'shared']) if (fs.existsSync(path.join(repo, d))) walk(path.join(repo, d));
   for (const f of ['index.html', 'app.bundle.js', 'mobile/index.js']) if (fs.existsSync(path.join(repo, f))) files.push(path.join(repo, f));
-  const re = /ratchet\/ratchet(\.js|\.ts)?['"]|['"]\.\/ratchet(\.js)?['"]/;
-  const self = path.join(pkg, 'src', 'ratchet', 'ratchet.ts');
+  const rel = (f) => path.relative(pkg, f);
+  const importers = (re) => files.filter((f) => re.test(fs.readFileSync(f, 'utf8'))).map(rel).sort();
+  const coreRe = /ratchet\/ratchet(\.js|\.ts)?['"]|['"]\.\/ratchet(\.js)?['"]/;
+  const storeRe = /ratchet\/ratchet-store(\.js|\.ts)?['"]|['"]\.\/ratchet-store(\.js)?['"]/;
   assertAbsent({
-    channel: 'an importer of the ratchet outside tests',
+    channel: 'an importer of the ratchet core outside the store (and tests)',
     controlMessage: 'the matcher finds a planted `import … from \'./ratchet/ratchet.js\'`',
-    control: () => re.test("import { encrypt } from './ratchet/ratchet.js';"),
-    absent: () => files.filter((f) => f !== self && re.test(fs.readFileSync(f, 'utf8'))).length === 0,
-    message: `none in ${files.length} source files (gmp-core/src, electron/src, src, mobile/src, scripts, shared, index.html, app.bundle.js)`,
+    control: () => coreRe.test("import { encrypt } from './ratchet/ratchet.js';"),
+    absent: () => JSON.stringify(importers(coreRe)) === JSON.stringify(['src/ratchet/ratchet-store.ts']),
+    message: `only src/ratchet/ratchet-store.ts, in ${files.length} source files (got ${JSON.stringify(importers(coreRe))})`,
+  });
+  assertAbsent({
+    channel: 'an importer of the ratchet store outside the node factory (and tests)',
+    controlMessage: 'the matcher finds a planted `import … from \'./ratchet/ratchet-store.js\'`',
+    control: () => storeRe.test("import { openRatchetStore } from './ratchet/ratchet-store.js';"),
+    absent: () => JSON.stringify(importers(storeRe)) === JSON.stringify(['src/node-factory.ts']),
+    message: `only src/node-factory.ts (got ${JSON.stringify(importers(storeRe))}); R7 wires it`,
   });
 }
 

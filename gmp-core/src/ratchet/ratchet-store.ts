@@ -72,6 +72,19 @@
  *     line are the only signal.
  *   - Q3: initial messages have no forward secrecy against the recipient's
  *     static key (x3dh.ts).
+ *   - R6b: a stale initial cannot reset a newer session. Each session keeps
+ *     `establishedAt`, the sentAt of the initial that made it (the peer's clock
+ *     for a session the peer started; our start time for one we started). An
+ *     initial for a NEW session that is not later than the sending session's
+ *     establishedAt (minus MAX_INITIAL_SKEW_MS when the reference is our own
+ *     clock) never replaces it: it is kept for receiving only and logged at WARN.
+ *     This closes the hole where the host withholds an older session's initial
+ *     (or a dedup entry is evicted) and releases it inside the 8-day window.
+ *     Kept receivable, not refused, so a genuine late message (e.g. glare) is
+ *     still delivered once. A replay of the initial of a session still held is
+ *     refused anyway: its message key is gone. Residual: a peer whose clock runs
+ *     more than 5 minutes behind ours cannot reset a session WE started within
+ *     that margin; its messages still arrive (receive-only).
  * Dedup entries and receive-only sessions expire after TTL + 1 day. Every
  * change is written ahead, as above, before anything is released.
  */
@@ -93,7 +106,7 @@ import {
   encrypt, decrypt, serializeState, deserializeState, initSender, initReceiver, decodeMessage, KIND_INITIAL,
   type RatchetState, type RatchetDeps, type Observe, type DecryptFailure,
 } from './ratchet.js';
-import { x3dhInitiate, x3dhRespond, initialAgeProblem, staticMatchesNodeId, MAX_INITIAL_AGE_MS, type X3dhObserve } from './x3dh.js';
+import { x3dhInitiate, x3dhRespond, initialAgeProblem, staticMatchesNodeId, MAX_INITIAL_AGE_MS, MAX_INITIAL_SKEW_MS, type X3dhObserve } from './x3dh.js';
 import { x25519 } from '@noble/curves/ed25519';
 
 export const STORE_LABELS = Object.freeze({ STATE_AAD: 'gl-ratchet-state-v1', FILE: 'gl-ratchet-file-v1' });
@@ -167,6 +180,8 @@ export interface StoredSession {
   state: RatchetState;
   createdAt: number;
   lastUsedAt: number;
+  /** R6b: sentAt of the initial that established it (peer's clock), or our start time; null for put(). */
+  establishedAt: number | null;
 }
 export interface ContactRecord {
   v: 2;
@@ -196,6 +211,8 @@ export interface RatchetStoreOptions {
   checkpoint?: (point: CheckpointPoint) => void;
   randomBytes?: (n: number) => Uint8Array;
   identity?: StoreIdentity;
+  /** Test-only: a smaller dedup cap (default MAX_DEDUP_ENTRIES), so eviction can be exercised on a sealed store quickly. */
+  maxDedupEntries?: number;
 }
 
 /** #34 from the mesh seed. */
@@ -479,7 +496,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     const now = Date.now();
     const next = cloneRecord(this.records.get(peer) || emptyRecord(peer));
     for (const x of next.sessions) x.sending = false;
-    next.sessions.push({ id: `direct-${hex(this.random(8))}`, initiator: null, sending: true, initPending: null, state: deserializeState(serializeState(state)), createdAt: now, lastUsedAt: now });
+    next.sessions.push({ id: `direct-${hex(this.random(8))}`, initiator: null, sending: true, initPending: null, state: deserializeState(serializeState(state)), createdAt: now, lastUsedAt: now, establishedAt: null });
     prune(next, now);
     this.persist(peer, next, 'put');
     this.rehandshake.delete(peer);
@@ -504,7 +521,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       const next = cloneRecord(this.records.get(peer) || emptyRecord(peer));
       for (const x of next.sessions) x.sending = false;
       id = hex(ekPub);
-      next.sessions.push({ id, initiator: me.nodeIdHex, sending: true, initPending: { ek: id }, state, createdAt: now, lastUsedAt: now });
+      next.sessions.push({ id, initiator: me.nodeIdHex, sending: true, initPending: { ek: id }, state, createdAt: now, lastUsedAt: now, establishedAt: now });
       prune(next, now);
       return next;
     });
@@ -575,7 +592,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
         const d = decrypt(start, message, deps, { observe: opts.observe, allowInitial: true });
         if (!d.ok) return { ok: false, reason: (d as { reason: DecryptFailure }).reason };
         decrypted = d;
-        created = { id: sessionId, initiator: peer, sending: false, initPending: null, state: d.state, createdAt: now, lastUsedAt: now };
+        created = { id: sessionId, initiator: peer, sending: false, initPending: null, state: d.state, createdAt: now, lastUsedAt: now, establishedAt: header.sentAt as number };
       }
     } else {
       if (!rec || !rec.sessions.length) return { ok: false, reason: 'no-session' };
@@ -593,6 +610,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     const next = cloneRecord(rec || emptyRecord(peer));
     const events: { reason: 'peer-reset' | 'glare'; previous: string | null; current: string; unacknowledged: string[] }[] = [];
     const me = this.identity;
+    let stale = false;
     if (created) {
       const cur = sendingOf(next);
       next.sessions.push(created);
@@ -604,6 +622,9 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
           cur.sending = false; created.sending = true;
           events.push({ reason: 'glare', previous: cur.id, current: created.id, unacknowledged: [] });
         }
+      } else if (isStale(created, cur, peer)) {
+        // R6b: not later than the session it would replace: receive-only, never a reset.
+        stale = true;
       } else {
         // The peer started over on an established session: it lost its state.
         cur.sending = false; created.sending = true;
@@ -625,9 +646,14 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       }
     }
     next.dedup.push({ id, exp: now + DEDUP_TTL_MS });
-    const dropped = prune(next, now);
+    const dropped = prune(next, now, this.opts?.maxDedupEntries);
     this.persist(peer, next, 'receive');
     this.rehandshake.delete(peer);
+    if (stale) {
+      logger.warn('ratchet-store', 'ratchet-stale-initial',
+        'An initial message older than the current session arrived; it is kept for receiving only and does not replace the session',
+        { peerPrefix: peer.slice(0, 16) });
+    }
     for (const ev of events) {
       if (ev.reason === 'peer-reset') {
         logger.warn('ratchet-store', 'ratchet-session-replaced',
@@ -770,6 +796,8 @@ function parseRecord(text: string, peer: string): ContactRecord | null {
     for (const x of r.sessions) {
       if (typeof x.id !== 'string' || typeof x.sending !== 'boolean' || !Number.isFinite(x.createdAt) || !Number.isFinite(x.lastUsedAt)) return null;
       if (x.initPending !== null && !(x.initPending && /^[0-9a-f]{64}$/.test(x.initPending.ek))) return null;
+      if (x.establishedAt === undefined) x.establishedAt = null;
+      if (x.establishedAt !== null && !Number.isFinite(x.establishedAt)) return null;
       x.state = deserializeState(JSON.stringify(x.state));
       if (x.state.peerNodeId !== peer) return null;
     }
@@ -781,10 +809,21 @@ function parseRecord(text: string, peer: string): ContactRecord | null {
   }
 }
 
+/**
+ * R6b: may `created` (a session the peer just started) NOT replace `cur`? Its
+ * initial must be strictly later than cur's establishing initial; when cur was
+ * started by us the reference is our clock, so allow the 5-minute skew.
+ */
+function isStale(created: StoredSession, cur: StoredSession, peer: string): boolean {
+  if (cur.establishedAt === null || created.establishedAt === null) return false;
+  const ref = cur.initiator === peer ? cur.establishedAt : cur.establishedAt - MAX_INITIAL_SKEW_MS;
+  return created.establishedAt <= ref;
+}
+
 /** TTL + 1 day for dedup entries and for sessions that only receive; caps on both lists. */
-function prune(r: ContactRecord, now: number): string[] {
+function prune(r: ContactRecord, now: number, maxDedup = MAX_DEDUP_ENTRIES): string[] {
   r.dedup = r.dedup.filter((d) => d.exp > now);
-  if (r.dedup.length > MAX_DEDUP_ENTRIES) r.dedup = r.dedup.slice(r.dedup.length - MAX_DEDUP_ENTRIES);
+  if (r.dedup.length > maxDedup) r.dedup = r.dedup.slice(r.dedup.length - maxDedup);
   r.sessions = r.sessions.filter((x) => x.sending || now - x.lastUsedAt <= DEDUP_TTL_MS);
   let dropped: string[] = [];
   if (r.unacked.length > MAX_UNACKED) {

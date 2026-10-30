@@ -15,6 +15,7 @@
  *  7. crash (SIGKILL) at every step of initiating and accepting.
  *  8. reset → re-handshake: the old session is replaced only by a valid
  *     initial; the unacknowledged list is exact.
+ *  R6b. a stale initial (older than the current session's) cannot reset it.
  */
 import crypto from 'crypto';
 import fs from 'fs';
@@ -343,7 +344,9 @@ console.log('\n=== 8. reset on one side → re-handshake; unacknowledged message
   const mal = mem(MALLORY); mal.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
   const forged = b.receive(ALICE.nodeIdHex, mal.send(BOB.nodeIdHex, te('reset!'), depsOf(null, clock)), depsOf(null, clock), toB);
   ok(!forged.ok && JSON.stringify(b.sessionInfo(ALICE.nodeIdHex)) === before && events.length === 0, `a forged initial on an established session: rejected (${forged.reason}), session not replaced, no event`);
-  // Alice loses her state (R5 rollback / crash reset) and starts over.
+  // Alice loses her state (R5 rollback / crash reset) and starts over — later than S1 began (R6b: an
+  // initial not later than the current session's establishing initial cannot reset it).
+  clock.t += 1000;
   a = mem(ALICE);
   a.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
   const restart = a.send(BOB.nodeIdHex, te('it is me again'), depsOf(null, clock));
@@ -371,6 +374,129 @@ console.log('\n=== 8. reset on one side → re-handshake; unacknowledged message
   ok(b2.sessionInfo(ALICE.nodeIdHex).sending === info.sending && JSON.stringify(b2.unacknowledged(ALICE.nodeIdHex).sort()) === JSON.stringify([ids[1], ids[2], ids[3], idOf(reply)].sort()),
     'the replacement and the unacknowledged list survive a restart (sealed store)');
   b2.close();
+}
+
+// ── R6b: a stale initial cannot reset a newer session ─────────────────────
+console.log('\n=== R6b: a stale initial message cannot reset a newer session ===');
+{
+  const shm = fs.existsSync('/dev/shm') ? fs.mkdtempSync('/dev/shm/r6b-') : fs.mkdtempSync(path.join(os.tmpdir(), 'r6b-'));
+  const envAt = (label) => { const d = path.join(shm, label); fs.mkdirSync(d); return { dir: path.join(d, 'ratchets'), anchorFile: path.join(d, 'keyring', 'anchor.json'), base: d }; };
+  const filesOf = (env) => fs.readdirSync(env.dir).filter((f) => f.endsWith('.ratchet')).sort().map((f) => `${f}:${sha(fs.readFileSync(path.join(env.dir, f)))}`).join('|');
+  const stateOf = (st) => JSON.stringify([st.sessionInfo(ALICE.nodeIdHex), st.get(ALICE.nodeIdHex) && R.serializeState(st.get(ALICE.nodeIdHex))]);
+
+  // The brief's case: I1 established S1; later messages evict I1's dedup entry; I1 is replayed.
+  // Literally (10 001 messages, the real cap) on a memory store; then on a sealed store with a test cap
+  // of 50, so the restart and the byte-identical files are checked without rewriting a 600 KB record 10 001 times.
+  const evictCase = (label, makeB, pushes) => {
+    const clock = clockAt(T0);
+    const events = [];
+    const a = mem(ALICE);
+    let b = makeB(events);
+    a.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    const i1 = a.send(BOB.nodeIdHex, te('I1'), depsOf(null, clock));
+    b.receive(ALICE.nodeIdHex, i1, depsOf(null, clock), toB);
+    a.receive(BOB.nodeIdHex, b.send(ALICE.nodeIdHex, te('ack'), depsOf(null, clock)), depsOf(null, clock), toA);
+    const t = Date.now();
+    for (let k = 0; k < pushes; k++) {
+      clock.t += 10;
+      const r = b.receive(ALICE.nodeIdHex, a.send(BOB.nodeIdHex, te(`m${k}`), depsOf(null, clock)), depsOf(null, clock), toB);
+      if (!r.ok) throw new Error(`push ${k}: ${r.reason}`);
+      if (k % 1000 === 999) a.acknowledge(BOB.nodeIdHex, a.unacknowledged(BOB.nodeIdHex));   // receipts, so Alice's list stays under its cap
+    }
+    const evicted = !b.dedupIds(ALICE.nodeIdHex).includes(idOf(i1));
+    return { b, i1, events, evicted, secs: ((Date.now() - t) / 1000).toFixed(1), restart: () => { b.close(); b = makeB(events); return b; } };
+  };
+  {
+    const c = evictCase('memory', () => mem(BOB), S.MAX_DEDUP_ENTRIES + 1);
+    const before = stateOf(c.b);
+    const replay = c.b.receive(ALICE.nodeIdHex, c.i1, depsOf(null, clockAt(T0 + 200_000)), toB);
+    ok(c.evicted && !replay.ok && c.events.length === 0 && stateOf(c.b) === before,
+      `${S.MAX_DEDUP_ENTRIES + 1} messages later (${c.secs} s, real cap) I1's dedup entry is gone; replaying I1 is rejected (${replay.reason}), S1 unchanged, no event`);
+  }
+  {
+    const env = envAt('evicted');
+    const c = evictCase('sealed', (events) => sealed(env, BOB, { maxDedupEntries: 50, on: { 'ratchet-session-replaced': (i) => events.push(i) } }), 51);
+    const b = c.restart();                                                       // a restart between S1 and the replay
+    const beforeState = stateOf(b), beforeFiles = filesOf(env);
+    const replay = b.receive(ALICE.nodeIdHex, c.i1, depsOf(null, clockAt(T0 + 2000)), toB);
+    ok(c.evicted && !replay.ok && c.events.length === 0 && stateOf(b) === beforeState && filesOf(env) === beforeFiles,
+      `sealed store, dedup cap 50, 51 messages: I1 evicted; after a restart, replaying it is rejected (${replay.reason}), S1 unchanged, files byte-identical, no event`);
+    b.close();
+  }
+
+  // The live variant: Alice started S0, lost her state, started S1. Bob established S1; the host releases S0's initial late.
+  for (const restart of [false, true]) {
+    const clock = clockAt(T0);
+    const env = envAt(`delayed-${restart}`);
+    const events = [];
+    const on = { on: { 'ratchet-session-replaced': (i) => events.push(i) } };
+    const a0 = mem(ALICE);
+    a0.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    const i0 = a0.send(BOB.nodeIdHex, te('from the session Alice lost'), depsOf(null, clock));   // the host keeps this one
+    clock.t += 3_600_000;
+    const a1 = mem(ALICE);
+    a1.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    let b = sealed(env, BOB, on);
+    b.receive(ALICE.nodeIdHex, a1.send(BOB.nodeIdHex, te('I1'), depsOf(null, clock)), depsOf(null, clock), toB);
+    a1.receive(BOB.nodeIdHex, b.send(ALICE.nodeIdHex, te('ack'), depsOf(null, clock)), depsOf(null, clock), toA);
+    const s1 = b.sessionInfo(ALICE.nodeIdHex).sending;
+    if (restart) { b.close(); b = sealed(env, BOB, on); }
+    clock.t += 3_600_000;
+    const cap = captureLogs(() => b.receive(ALICE.nodeIdHex, i0, depsOf(null, clock), toB));
+    const warn = cap.lines.filter((l) => l.event === 'ratchet-stale-initial' && l.level === 'WARN');
+    const reply = b.send(ALICE.nodeIdHex, te('still on S1'), depsOf(null, clock));
+    const back = a1.receive(BOB.nodeIdHex, reply, depsOf(null, clock), toA);
+    ok(b.sessionInfo(ALICE.nodeIdHex).sending === s1 && events.length === 0 && back.ok && warn.length === 1 && !JSON.stringify(warn[0]).includes(ALICE.nodeIdHex) && JSON.stringify(warn[0]).includes(ALICE.nodeIdHex.slice(0, 16)),
+      `${restart ? 'after a restart: ' : ''}S0's initial (1 h older than S1's) arriving late does NOT reset S1: still sending on S1, no event, one WARN line with the NodeID prefix only; Bob → Alice still works`);
+    ok(cap.value.ok && td(cap.value.plaintext) === 'from the session Alice lost' && !b.receive(ALICE.nodeIdHex, i0, depsOf(null, clock), toB).ok,
+      `${restart ? 'after a restart: ' : ''}its message is still delivered, once, from a receive-only session (it was never delivered before)`);
+    // Control: a genuinely newer initial still resets.
+    clock.t += 3_600_000;
+    const a2 = mem(ALICE);
+    a2.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    const i2 = a2.send(BOB.nodeIdHex, te('I2: newer'), depsOf(null, clock));
+    const r2 = b.receive(ALICE.nodeIdHex, i2, depsOf(null, clock), toB);
+    ok(r2.ok && b.sessionInfo(ALICE.nodeIdHex).sending === hex(i2.subarray(18, 50)) && events.length === 1 && events[0].reason === 'peer-reset',
+      `${restart ? 'after a restart: ' : ''}control: a NEWER valid initial (later sentAt) still resets the session and fires the event`);
+    b.close();
+  }
+
+  // Equal sentAt, different messageId: stale. Same messageId: the dedup duplicate.
+  {
+    const clock = clockAt(T0);
+    const a1 = mem(ALICE), b = mem(BOB);
+    a1.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    const i1 = a1.send(BOB.nodeIdHex, te('I1'), depsOf(null, clock));
+    b.receive(ALICE.nodeIdHex, i1, depsOf(null, clock), toB);
+    const a2 = mem(ALICE);
+    a2.initiate(BOB.nodeIdHex, toA, depsOf(null, clock));
+    const same = a2.send(BOB.nodeIdHex, te('same millisecond'), depsOf(null, clock));
+    const s1 = b.sessionInfo(ALICE.nodeIdHex).sending;
+    b.receive(ALICE.nodeIdHex, same, depsOf(null, clock), toB);
+    const dup = b.receive(ALICE.nodeIdHex, i1, depsOf(null, clock), toB);
+    ok(b.sessionInfo(ALICE.nodeIdHex).sending === s1 && !dup.ok && dup.reason === 'duplicate', `equal sentAt with a different messageId does not reset; the same messageId is the dedup duplicate (${dup.reason})`);
+  }
+
+  // Late glare with a stale initial: the higher side's first initial reaches the lower side days late.
+  {
+    const clock = clockAt(T0);
+    const lo = mem(LOW), hi = mem(HIGH);
+    hi.initiate(LOW.nodeIdHex, { peerStaticPub: LOW.staticPubKey }, depsOf(null, clock));
+    const h1 = hi.send(LOW.nodeIdHex, te('h1, sent first'), depsOf(null, clock));       // delayed 3 days in a mailbox
+    clock.t += 3_600_000;
+    lo.initiate(HIGH.nodeIdHex, { peerStaticPub: HIGH.staticPubKey }, depsOf(null, clock));
+    const l1 = lo.send(HIGH.nodeIdHex, te('l1'), depsOf(null, clock));
+    const rl = hi.receive(LOW.nodeIdHex, l1, depsOf(null, clock), { peerStaticPub: LOW.staticPubKey });
+    const r1 = hi.send(LOW.nodeIdHex, te('r1 on l'), depsOf(null, clock));
+    const rr = lo.receive(HIGH.nodeIdHex, r1, depsOf(null, clock), { peerStaticPub: HIGH.staticPubKey });
+    clock.t += 3 * DAY;
+    const rh = lo.receive(HIGH.nodeIdHex, h1, depsOf(null, clock), { peerStaticPub: HIGH.staticPubKey });
+    const l2 = lo.send(HIGH.nodeIdHex, te('l2'), depsOf(null, clock));
+    const r2 = hi.receive(LOW.nodeIdHex, l2, depsOf(null, clock), { peerStaticPub: LOW.staticPubKey });
+    ok(rl.ok && rr.ok && rh.ok && td(rh.plaintext) === 'h1, sent first' && r2.ok && lo.sessionInfo(HIGH.nodeIdHex).sending === hex(l1.subarray(18, 50)) && hi.sessionInfo(LOW.nodeIdHex).sending === hex(l1.subarray(18, 50)),
+      'late glare with a stale initial: h1 is still delivered (receive-only), and both sides stay on the lower NodeID\'s session');
+  }
+  fs.rmSync(shm, { recursive: true, force: true });
 }
 
 console.log('\n=== x3dh.ts is reached only through the store ===');

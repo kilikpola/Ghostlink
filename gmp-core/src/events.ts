@@ -27,6 +27,8 @@ export interface RatchetStoreEvents {
   'ratchet-session-replaced': [info: { peer: string; reason: 'peer-reset' | 'glare'; previous: string | null; current: string; unacknowledged: string[] }];
   /** More than MAX_UNACKED unacknowledged messages: these ids left the list (never silently). */
   'ratchet-unacknowledged-dropped': [info: { peer: string; messageIds: string[] }];
+  /** R6b/R7: an initial older than the current session arrived; kept receive-only, no reset. */
+  'ratchet-stale-initial': [info: { peer: string; sessionId: string }];
 }
 
 // ── L2: link ────────────────────────────────────────
@@ -83,11 +85,21 @@ export interface GMPNodeEvents {
   'bootstrap-complete': [peersConnected: number];
   'bootstrap-failed': [peersConnected: number, diagnosis: BootstrapDiagnosis];
   'key-rotated': [info: { oldNodeId: string; newNodeId: string }];
+  /** R7: a DATA plaintext with content type 0x02 (a ratchet message), as bytes, from forwarder.ts. */
+  'ratchet-data': [info: { link: GMPLink; message: Uint8Array }];
 }
 
 // ── L6: application ─────────────────────────────────
 
 export interface GMPNodeManagerEvents {
+  /** R7: a ratchet message from fromNodeId (full NodeID hex), decrypted and unpadded. */
+  'ratchet-message': [info: { fromNodeId: string; payload: Buffer; messageId: string }];
+  'ratchet-session-replaced': RatchetStoreEvents['ratchet-session-replaced'];
+  'ratchet-unacknowledged-dropped': RatchetStoreEvents['ratchet-unacknowledged-dropped'];
+  'ratchet-stale-initial': RatchetStoreEvents['ratchet-stale-initial'];
+  'ratchet-rollback': RatchetStoreEvents['ratchet-rollback'];
+  'ratchet-memory-only': RatchetStoreEvents['ratchet-memory-only'];
+  'ratchet-unreadable': RatchetStoreEvents['ratchet-unreadable'];
   'external-address': [info: { address: string; port: number }];
   /** transport is 'relayed-unseparated' when the relay is not separated from identity-aware hosts. */
   'peer-connected': [info: { nodeId: string; address: string | null; port: number | null; transport: 'direct' | 'relayed' | 'relayed-unseparated' }];

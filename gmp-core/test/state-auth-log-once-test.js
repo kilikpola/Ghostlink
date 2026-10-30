@@ -37,7 +37,7 @@ const count = (comp) => lines.filter((l) => l.c === comp && l.e === 'state-authe
 
 const junk = () => JSON.stringify({ version: 1, iv: crypto.randomBytes(12).toString('hex'), ciphertext: crypto.randomBytes(64).toString('hex') });
 const plant = (dir) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'peer-cache.json'), junk()); fs.writeFileSync(path.join(dir, 'nonce-state.json'), junk()); };
-const mk = (dir, extra = {}) => new GMPNodeManager({ ...electronManagerOptions({ seedPhrase: `auth-once-test:${process.pid}` }), GMP_LAN_DISCOVERY: false, GMP_PORT: 0, disableBootstrap: true, dataDir: dir, ...extra });
+const mk = (dir, extra = {}) => new GMPNodeManager({ ...electronManagerOptions({ seedPhrase: `auth-once-test:${process.pid}`, ratchets: { memoryOnly: 'test: as main.js passes when the keyring is unusable' } }), GMP_LAN_DISCOVERY: false, GMP_PORT: 0, disableBootstrap: true, dataDir: dir, ...extra });
 
 console.log('=== 1. one line per store per start ===');
 const dir = path.join(tmp, 'a');

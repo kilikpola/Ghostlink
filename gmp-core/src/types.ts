@@ -324,6 +324,12 @@ export interface GMPNodeManagerOptions extends Partial<GMPConfig> {
   inboundOnly?: boolean;
   /** Run the store-and-forward client (default true; a storage peer has no mailbox of its own). */
   storeForward?: boolean;
+  /** R7: this node carries ratchet sessions; without `ratchets` it refuses to start. */
+  ratchetCapable?: boolean;
+  /** R7: { dir, anchor } (sealed) or { memoryOnly: reason } — see node-factory.ts RatchetSpec. */
+  ratchets?: unknown;
+  /** Test-only: false sends ratchet messages unpadded (the padding test's control). */
+  ratchetPadding?: boolean;
 }
 
 /**

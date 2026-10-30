@@ -24,6 +24,17 @@ import { StoreForward, parseStoragePeer } from './storage/store-forward.js';
 import type { StorageAddress } from './storage/storage-client.js';
 import { SfPollScheduler } from './storage/sf-scheduler.js';
 import { sampleResources, reportAgainst, fdPressure } from './resource-sample.js';
+import type { RatchetStore } from './ratchet/ratchet-store.js';
+import { RatchetStoreRequiredError } from './ratchet/ratchet-store.js';
+import { padContent, unpadContent, toData, KIND_INITIAL, KIND_RATCHET } from './ratchet/ratchet-wire.js';
+
+/** R7: ratchetSend to a contact with no live link (direct, relayed or virtual). No queue, no fallback, no mailbox. */
+export class RatchetNotConnectedError extends Error {
+  constructor(m: string) { super(m); this.name = 'RatchetNotConnectedError'; }
+}
+const RATCHET_STORE_EVENTS = ['ratchet-session-replaced', 'ratchet-unacknowledged-dropped', 'ratchet-stale-initial',
+  'ratchet-rollback', 'ratchet-memory-only', 'ratchet-unreadable'] as const;
+const ratchetDeps = { rng: (n: number) => new Uint8Array(crypto.randomBytes(n)), now: () => Date.now() };
 
 /** How long a direct dial to a LAN-discovered peer may take before falling back to the mesh. */
 const LAN_DIAL_TIMEOUT_MS = 5000;
@@ -62,6 +73,9 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
   private _sf: StoreForward | null = null;
   private _sfScheduler: SfPollScheduler | null = null;
   private _resourceTimer: ReturnType<typeof setInterval> | null = null;
+  /** R7: the node's ratchet store, opened once the identity is loaded; null when the node has none. */
+  private _ratchets: RatchetStore | null = null;
+  private _ratchetNoStoreWarned = false;
 
   constructor(options: GMPNodeManagerOptions = {}) {
     super();
@@ -176,7 +190,10 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
       transport: this.options.transport,
       ...(this.options.disableBootstrap ? { disableBootstrap: true } : {}),
       ...(this.options.inboundOnly ? { inboundOnly: true } : {}),
-    };
+      // R7: refused here (RatchetStoreRequiredError) when ratchet-capable without a spec.
+      ...(this.options.ratchetCapable ? { ratchetCapable: true } : {}),
+      ...('ratchets' in this.options ? { ratchets: this.options.ratchets } : {}),
+    } as GMPNodeConstructorOptions;
 
     this._node = createGMPNode(nodeOptions as CreateNodeOptions);
 
@@ -192,6 +209,8 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
       void this.discoverExternalAddress();
       this._onSfPeer(nodeIdHex, link);
     });
+
+    this._node.on('ratchet-data', (info: { link: GMPLinkLike; message: Uint8Array }) => this._onRatchetData(info));
 
     this._node.on('close', ({ connId }: { connId: string }) => {
       const nodeIdHex = this.connToNodeId.get(connId);
@@ -255,6 +274,7 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
 
     try {
       await this._node.loadIdentity(seedPhrase);
+      this._openRatchets();
 
       metrics.registerNode(this._node, this);
       metrics.startServer(this.config.GMP_METRICS_PORT);
@@ -265,6 +285,7 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
     } catch (err) {
       // Leave no half-started node behind, so start() can be retried.
       metrics.stopServer();
+      if (this._ratchets) { try { this._ratchets.close(); } catch { } this._ratchets = null; }
       try { this._node.close(); } catch { }
       this._node = null;
       this.connToNodeId.clear();
@@ -306,9 +327,107 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
       } catch { }
     }
 
+    if (this._ratchets) { try { this._ratchets.close(); } catch { } this._ratchets = null; }
     this._node.close();
     this._node = null;
     this.connToNodeId.clear();
+  }
+
+  // ── Ratchet sessions (R7) ───────
+
+  /** Open the store (if this node has a ratchet spec) and take ratchet DATA from the node. */
+  private _openRatchets(): void {
+    const node = this._node as GMPNode & { ratchets?: { open(on?: Record<string, (...a: never[]) => void>): RatchetStore } };
+    if (!('ratchets' in this.options)) return;
+    const on: Record<string, (...a: never[]) => void> = {};
+    for (const ev of RATCHET_STORE_EVENTS) on[ev] = ((info: never) => this.emit(ev, info as never)) as (...a: never[]) => void;
+    this._ratchets = node.ratchets!.open(on);       // startup events (memory-only, rollback) reach the manager; late listeners use ratchetStatus()
+  }
+
+  private _onRatchetData({ link, message }: { link: GMPLinkLike; message: Uint8Array }): void {
+    const from = link.remoteNodeId ? toHex(link.remoteNodeId) : '';
+    if (!/^[0-9a-f]{128}$/.test(from)) return;
+    if (!this._ratchets) {
+      if (!this._ratchetNoStoreWarned) {
+        this._ratchetNoStoreWarned = true;
+        logger.warn('gmp-node-manager', 'ratchet-no-store', 'A ratchet message arrived but this node has no ratchet store; dropped (logged once)', { peerPrefix: from.slice(0, 16) });
+      }
+      return;
+    }
+    let r;
+    try {
+      r = this._ratchets.receive(from, message, ratchetDeps, { peerStaticPub: (link as { remoteStaticPubkey?: Uint8Array | null }).remoteStaticPubkey ?? undefined });
+    } catch (err) {
+      logger.error('gmp-node-manager', 'ratchet-receive-failed', `Could not process a ratchet message: ${(err as Error).message}`, { peerPrefix: from.slice(0, 16), err: (err as Error).name });
+      return;
+    }
+    if (!r.ok) {
+      logger.debug('gmp-node-manager', 'ratchet-receive-rejected', `Ratchet message rejected (${(r as { reason: string }).reason})`, { peerPrefix: from.slice(0, 16) });
+      return;
+    }
+    let content: Uint8Array;
+    try { content = unpadContent(r.plaintext); } catch (err) {
+      logger.warn('gmp-node-manager', 'ratchet-bad-padding', `A decrypted ratchet message had invalid padding: ${(err as Error).message}`, { peerPrefix: from.slice(0, 16) });
+      return;
+    }
+    this.emit('ratchet-message', { fromNodeId: from, payload: Buffer.from(content), messageId: r.messageId });
+  }
+
+  /** The store, or the named refusal when this node has none. */
+  private _ratchetStore(): RatchetStore {
+    if (!this._node) throw new Error('GMPNodeManager not started');
+    if (!this._ratchets) throw new RatchetStoreRequiredError('this node has no ratchet store (not built ratchet-capable)');
+    return this._ratchets;
+  }
+
+  /**
+   * Send bytes to a contact over its ratchet session, padded (D13), on an
+   * existing live link only. The first send starts the session (X3DH-lite).
+   * Persisted before it leaves (R5). Never the old sealPayload path, never a
+   * queue or the mailbox: no link → RatchetNotConnectedError.
+   */
+  async ratchetSend(toNodeId: string, payload: Uint8Array): Promise<{ messageId: string; kind: 'initial' | 'ratchet' }> {
+    const store = this._ratchetStore();
+    if (!/^[0-9a-f]{128}$/.test(toNodeId)) throw new Error('ratchetSend: `to` is a full 128-hex NodeID');
+    const link = this._liveLink(toNodeId);
+    if (!link) throw new RatchetNotConnectedError(`not connected to ${toNodeId.slice(0, 16)}…; nothing was sent (no queue, no fallback)`);
+    if (!store.has(toNodeId)) {
+      if (!link.remoteStaticPubkey) throw new RatchetNotConnectedError('the link has no verified static key for this contact');
+      store.initiate(toNodeId, { peerStaticPub: new Uint8Array(link.remoteStaticPubkey) }, ratchetDeps);
+    }
+    const sending = store.sessionInfo(toNodeId).sessions.find((x) => x.sending);
+    const kind = sending && sending.initPending ? KIND_INITIAL : KIND_RATCHET;
+    const padded = padContent(payload, kind, { padding: this.options.ratchetPadding !== false });
+    const message = store.send(toNodeId, padded, ratchetDeps);
+    await link.send(toData(message));
+    return { messageId: Buffer.from(message.subarray(2, 18)).toString('hex'), kind: kind === KIND_INITIAL ? 'initial' : 'ratchet' };
+  }
+
+  /**
+   * A live link to this contact, never a new dial: a direct or relayed link
+   * (node.connections), or a mesh-routed virtual one (node.virtualConnections,
+   * keyed by the 64-hex prefix), whose proven NodeID must be the full one asked for.
+   */
+  private _liveLink(nodeId: string): (GMPLinkLike & { remoteStaticPubkey?: Uint8Array | null; send(d: Uint8Array): Promise<void> }) | null {
+    type L = GMPLinkLike & { remoteStaticPubkey?: Uint8Array | null; send(d: Uint8Array): Promise<void> };
+    const node = this._node as GMPNode;
+    const direct = node.getLinkByNodeId(nodeId) as L | null;
+    if (direct) return direct;
+    const v = node.virtualConnections.get(nodeId.slice(0, 64)) as L | undefined;
+    if (v && v.state === 'connected' && v.remoteNodeId && toHex(v.remoteNodeId) === nodeId) return v;
+    return null;
+  }
+
+  /** What the renderer can show: how ratchet sessions are kept on this node. */
+  ratchetStatus(): { mode: 'sealed' | 'memory-only' | 'none'; memoryOnlyReason?: string; rollback?: unknown; unreadable?: string[] } {
+    if (!this._ratchets) return { mode: 'none' };
+    const s = this._ratchets.startup;
+    return { mode: s.mode, ...(s.memoryOnlyReason ? { memoryOnlyReason: s.memoryOnlyReason } : {}), ...(s.rollback ? { rollback: s.rollback } : {}), unreadable: s.unreadable };
+  }
+
+  /** The unacknowledged messageIds for a contact (R6), for the app to resend or mark failed. */
+  ratchetUnacknowledged(nodeId: string): string[] {
+    return this._ratchetStore().unacknowledged(nodeId);
   }
 
   // ── Resource self-measurement ───────

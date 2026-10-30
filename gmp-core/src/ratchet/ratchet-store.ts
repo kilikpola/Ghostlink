@@ -236,6 +236,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
   private readonly opts: RatchetStoreOptions | null;
   private readonly memoryReason: string | null;
   private readonly records = new Map<string, ContactRecord>();
+  private readonly droppedLogged = new Set<string>();
   private readonly identity: StoreIdentity | null;
   private readonly poisoned = new Set<string>();
   private unreadable = new Set<string>();
@@ -653,6 +654,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       logger.warn('ratchet-store', 'ratchet-stale-initial',
         'An initial message older than the current session arrived; it is kept for receiving only and does not replace the session',
         { peerPrefix: peer.slice(0, 16) });
+      this.emit('ratchet-stale-initial', { peer, sessionId: (created as StoredSession).id });
     }
     for (const ev of events) {
       if (ev.reason === 'peer-reset') {
@@ -711,9 +713,15 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
     return this.identity;
   }
 
+  /** The event fires for every drop; the WARN line once per contact per run (R7). */
   private reportDropped(peer: string, ids: string[]): void {
     if (!ids.length) return;
-    logger.warn('ratchet-store', 'ratchet-unacknowledged-dropped', `${ids.length} unacknowledged message id(s) were dropped from the list (cap ${MAX_UNACKED})`, { count: ids.length });
+    if (!this.droppedLogged.has(peer)) {
+      this.droppedLogged.add(peer);
+      logger.warn('ratchet-store', 'ratchet-unacknowledged-dropped',
+        `The unacknowledged-message list for a contact reached its cap (${MAX_UNACKED}); older ids are now dropped from it, each reported by event (logged once)`,
+        { peerPrefix: peer.slice(0, 16), count: ids.length });
+    }
     this.emit('ratchet-unacknowledged-dropped', { peer, messageIds: ids });
   }
 

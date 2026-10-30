@@ -72,6 +72,10 @@ interface Session {
   manager: GMPNodeManager | null;
 }
 
+/** R7: ratchet session events forwarded to bridge clients as-is. */
+const RATCHET_EVENTS = ['ratchet-session-replaced', 'ratchet-unacknowledged-dropped', 'ratchet-stale-initial',
+  'ratchet-rollback', 'ratchet-memory-only', 'ratchet-unreadable'] as const;
+
 export async function startBridge(
   managerInstance: GMPNodeManager | null = null,
   bridgePort: number = DEFAULT_BRIDGE_PORT,
@@ -328,6 +332,16 @@ export async function startBridge(
     m.on('routing-degraded', (data) => {
       publish(m, { type: 'routing-degraded', ...data });
     });
+
+    // R7: ratchet messages and session events. Bytes cross the WebSocket as
+    // explicit base64 (payloadB64): the bridge protocol is JSON text frames.
+    m.on('ratchet-message', ({ fromNodeId, payload, messageId }) => {
+      publish(m, { type: 'ratchet-message', fromNodeId, payloadB64: Buffer.from(payload).toString('base64'), messageId });
+    });
+    for (const ev of RATCHET_EVENTS) {
+      (m as unknown as { on(e: string, fn: (info: Record<string, unknown>) => void): void })
+        .on(ev, (info) => publish(m, { type: ev, ...info }));
+    }
   };
 
   if (managerInstance) {
@@ -411,6 +425,34 @@ export async function startBridge(
             const error = err as Error;
             sendTo(session, { type: 'error', code: error.name || 'SEND_FAILED', message: error.message });
           }
+          break;
+        }
+
+        // R7: { type: 'ratchet-send', to: <full NodeID>, payloadB64, requestId }. Ratchet path only:
+        // no sealPayload, no queue, no mailbox; RatchetNotConnectedError when there is no live link.
+        case 'ratchet-send': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          const to = typeof msg.to === 'string' ? msg.to : '';
+          const b64 = msg.payloadB64;
+          if (typeof b64 !== 'string' || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
+            sendTo(session, { type: 'error', code: 'INVALID_PAYLOAD', requestId, message: 'payloadB64 must be standard base64' });
+            break;
+          }
+          try {
+            const result = await m.ratchetSend(to, new Uint8Array(Buffer.from(b64, 'base64')));
+            sendTo(session, { type: 'ratchet-send-result', requestId, to, ...result });
+          } catch (err) {
+            const error = err as Error;
+            sendTo(session, { type: 'error', code: error.name || 'RATCHET_SEND_FAILED', requestId, message: error.message });
+          }
+          break;
+        }
+
+        case 'ratchet-status': {
+          const m = session.manager;
+          if (!m || !m.node) return notStarted(session);
+          sendTo(session, { type: 'ratchet-status', requestId, ...m.ratchetStatus() });
           break;
         }
 

@@ -45,9 +45,13 @@ export function storagePeerManagerOptions({ seedPhrase }: { seedPhrase: string }
   };
 }
 
-/** Electron main process. */
-export function electronManagerOptions({ seedPhrase }: { seedPhrase: string }): Record<string, unknown> {
-  return { seedPhrase };
+/**
+ * Electron main process. The chat node is ratchet-capable (R7): main.js passes
+ * `ratchets` (a sealed store anchored in safeStorage, or memory-only with its
+ * reason when the keyring is not usable); without it the node refuses to start.
+ */
+export function electronManagerOptions({ seedPhrase, ratchets }: { seedPhrase: string; ratchets?: unknown }): Record<string, unknown> {
+  return { seedPhrase, ratchetCapable: true, ...(ratchets !== undefined ? { ratchets } : {}) };
 }
 
 /**

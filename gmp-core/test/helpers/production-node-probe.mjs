@@ -25,7 +25,9 @@ if (entry === 'electron') {
   // main.js: decide GMP_DATA_DIR first (packaged app), then load the rest.
   const dir = ep.electronDataDir({ isPackaged: true, userDataPath: process.env.PROBE_ELECTRON_USERDATA, env: process.env });
   if (dir) process.env.GMP_DATA_DIR = dir;
-  options = ep.electronManagerOptions({ seedPhrase });
+  // R7: main.js always passes a ratchet spec (sealed, or memory-only with a reason).
+  // No safeStorage in this process, so the probe passes the explicit memory-only form.
+  options = ep.electronManagerOptions({ seedPhrase, ratchets: { memoryOnly: 'production-construction probe: no OS secure storage in this process' } });
 } else if (entry === 'cli' || entry === 'public-peer') {
   const { default: config } = await core('config.js'); // cli.ts: `import config from './config.js'`
   options = ep.cliManagerOptions({ seedPhrase, isPublic: entry === 'public-peer', env: process.env, configuredPort: config.GMP_PORT });

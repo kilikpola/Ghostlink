@@ -33,6 +33,7 @@ const bridgeAuthToken = crypto.randomBytes(32).toString('hex');
 const { createTray, updateBadge, flashTray, destroyTray } = require('./tray');
 const { initUpdater, updateReady, quitAndInstall } = require('./updater');
 const { getContactVaultKey, replaceContactVaultKey, secureStorageStatus } = require('./contact-key');
+const { ratchetSpecFor } = require('./ratchet-anchor');
 const { createSeedStore } = require('./seed-store');
 const { createRestoreGuard } = require('./restore-guard');
 const { selectKeyringBackend } = require('./keyring-backend');
@@ -67,7 +68,12 @@ function startGMPNode(seedPhrase) {
       const { GMPNodeManager } = await coreModule('gmp-node-manager.js');
       const { startBridge } = await coreModule('gmp-bridge.js');
 
-      gmpManager = new GMPNodeManager(electronManagerOptions({ seedPhrase }));
+      // R7: ratchet sessions are configured at construction. Keyring ok → a sealed
+      // store anchored in safeStorage; locked / insecure / unreadable anchor →
+      // explicitly memory-only (the node refuses to start with neither).
+      const { state: ratchetKeyring, ...ratchets } = ratchetSpecFor(safeStorage, store, path.join(app.getPath('userData'), 'ratchets'));
+      console.log(`[GhostLink] secure sessions: ${ratchets.dir ? 'sealed store' : 'memory-only'} (keyring ${ratchetKeyring})`);
+      gmpManager = new GMPNodeManager(electronManagerOptions({ seedPhrase, ratchets }));
       gmpBridge = await startBridge(gmpManager, 3002, '127.0.0.1', { authToken: bridgeAuthToken });
       const { port } = await gmpManager.start();
       console.log(`[Electron GMP] Node Manager started on port ${port}, Bridge on 3002`);

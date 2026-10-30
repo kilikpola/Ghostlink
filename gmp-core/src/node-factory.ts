@@ -29,7 +29,7 @@ export type RatchetSpec =
   | { memoryOnly: string; on?: RatchetStoreOptions['on'] };
 
 /** node.ratchets: open() builds the store once the identity (and so #34) is loaded. */
-export interface NodeRatchets { readonly kind: 'sealed' | 'memory-only'; open(): RatchetStore }
+export interface NodeRatchets { readonly kind: 'sealed' | 'memory-only'; open(on?: RatchetStoreOptions['on']): RatchetStore }
 
 /** GMPNode's constructor options, plus explicit GMP_* config values. */
 export type CreateNodeOptions = Omit<GMPNodeConstructorOptions, 'config'> & Partial<GMPConfig> & {
@@ -82,6 +82,18 @@ function validateRatchetSpec(spec: unknown): RatchetSpec {
   return spec as RatchetSpec;
 }
 
+type Listeners = NonNullable<RatchetStoreOptions['on']>;
+function mergeListeners(a?: Listeners, b?: Listeners): Listeners | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const out: Record<string, (...args: never[]) => void> = { ...(a as Record<string, (...args: never[]) => void>) };
+  for (const [k, fn] of Object.entries(b as Record<string, (...args: never[]) => void>)) {
+    const first = out[k];
+    out[k] = first ? (...args: never[]) => { first(...args); fn(...args); } : fn;
+  }
+  return out as Listeners;
+}
+
 /**
  * node.ratchets. Without a spec, any use refuses: a node never falls back to
  * unsealed or unanchored ratchets on its own.
@@ -90,13 +102,14 @@ function attachRatchets(node: GMPNode, spec: RatchetSpec | null): void {
   let store: RatchetStore | null = null;
   const handle: NodeRatchets | null = spec && {
     kind: 'memoryOnly' in spec ? 'memory-only' : 'sealed',
-    open(): RatchetStore {
+    open(extra?: RatchetStoreOptions['on']): RatchetStore {
       if (store) return store;
+      const on = mergeListeners(spec.on, extra);
       const identity = (node as unknown as { identity?: { seed?: Uint8Array; staticPrivKey: Uint8Array; staticPubKey: Uint8Array; nodeIdHex: string } | null }).identity;
-      if ('memoryOnly' in spec) return (store = memoryOnlyRatchetStore(spec.memoryOnly, { on: spec.on, identity: identity ?? undefined }));
+      if ('memoryOnly' in spec) return (store = memoryOnlyRatchetStore(spec.memoryOnly, { on, identity: identity ?? undefined }));
       const seed = (node as unknown as { identity?: { seed?: Uint8Array } | null }).identity?.seed;
       if (!(seed instanceof Uint8Array)) throw new RatchetStoreRequiredError('node.ratchets.open(): load the identity first (the seal key derives from it)');
-      return (store = openRatchetStore({ dir: spec.dir, anchor: spec.anchor, on: spec.on, sealKey: ratchetSealKey(seed), identity: identity ?? undefined }));
+      return (store = openRatchetStore({ dir: spec.dir, anchor: spec.anchor, on, sealKey: ratchetSealKey(seed), identity: identity ?? undefined }));
     },
   };
   Object.defineProperty(node, 'ratchets', {
@@ -111,7 +124,12 @@ function attachRatchets(node: GMPNode, spec: RatchetSpec | null): void {
 
 /** Construct a node and report the configuration it was built with. */
 export function createGMPNodeDetailed(options: CreateNodeOptions = {}): CreatedNode {
-  const { config: explicitConfig, derivedSeed, ratchets, ...rest } = options;
+  const { config: explicitConfig, derivedSeed, ratchets, ratchetCapable, ...rest } = options;
+  // R7: a node that will carry ratchet sessions (the Electron chat node) must be
+  // given a store or an explicit memory-only mode here, or it does not start.
+  if (ratchetCapable === true && !('ratchets' in options && ratchets != null)) {
+    throw new RatchetStoreRequiredError('createGMPNode: a ratchet-capable node needs `ratchets` ({ dir, anchor } or { memoryOnly: "<reason>" }); refusing to start without one');
+  }
   const ratchetSpec = 'ratchets' in options ? validateRatchetSpec(ratchets) : null;
   const validatedSeed = derivedSeed == null
     ? null

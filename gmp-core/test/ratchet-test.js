@@ -486,7 +486,7 @@ console.log('\n=== purity: no I/O, timers, globals or node built-ins; inputs nev
   R.encrypt(p.alice, te('x'), p.dA);
   ok(R.serializeState(p.alice) === before, 'the caller\'s state object is unchanged after encrypt');
 }
-console.log('\n=== the ratchet is reached only through the store, and the store only through the factory (R5) ===');
+console.log('\n=== the ratchet core is reached only through the store and the wire module; the store module only from the factory and the manager (R5, R7) ===');
 {
   const files = [];
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === 'node_modules') continue; if (e.isDirectory()) walk(p); else if (/\.(ts|js|mjs|cjs|html)$/.test(e.name)) files.push(p); } };
@@ -497,18 +497,18 @@ console.log('\n=== the ratchet is reached only through the store, and the store 
   const coreRe = /ratchet\/ratchet(\.js|\.ts)?['"]|['"]\.\/ratchet(\.js)?['"]/;
   const storeRe = /ratchet\/ratchet-store(\.js|\.ts)?['"]|['"]\.\/ratchet-store(\.js)?['"]/;
   assertAbsent({
-    channel: 'an importer of the ratchet core outside the store (and tests)',
+    channel: 'an importer of the ratchet core outside the store and the wire module (and tests)',
     controlMessage: 'the matcher finds a planted `import … from \'./ratchet/ratchet.js\'`',
     control: () => coreRe.test("import { encrypt } from './ratchet/ratchet.js';"),
-    absent: () => JSON.stringify(importers(coreRe)) === JSON.stringify(['src/ratchet/ratchet-store.ts']),
-    message: `only src/ratchet/ratchet-store.ts, in ${files.length} source files (got ${JSON.stringify(importers(coreRe))})`,
+    absent: () => JSON.stringify(importers(coreRe)) === JSON.stringify(['src/ratchet/ratchet-store.ts', 'src/ratchet/ratchet-wire.ts']),
+    message: `only src/ratchet/ratchet-store.ts and ratchet-wire.ts, in ${files.length} source files (got ${JSON.stringify(importers(coreRe))})`,
   });
   assertAbsent({
-    channel: 'an importer of the ratchet store outside the node factory (and tests)',
+    channel: 'an importer of the ratchet store module outside the node factory and the manager (and tests)',
     controlMessage: 'the matcher finds a planted `import … from \'./ratchet/ratchet-store.js\'`',
     control: () => storeRe.test("import { openRatchetStore } from './ratchet/ratchet-store.js';"),
-    absent: () => JSON.stringify(importers(storeRe)) === JSON.stringify(['src/node-factory.ts']),
-    message: `only src/node-factory.ts (got ${JSON.stringify(importers(storeRe))}); R7 wires it`,
+    absent: () => JSON.stringify(importers(storeRe)) === JSON.stringify(['src/gmp-node-manager.ts', 'src/node-factory.ts']),
+    message: `only src/node-factory.ts (builds it) and src/gmp-node-manager.ts (its type and error; R7) (got ${JSON.stringify(importers(storeRe))})`,
   });
 }
 

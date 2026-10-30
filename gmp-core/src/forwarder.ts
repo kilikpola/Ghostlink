@@ -14,6 +14,13 @@ function toHex(nodeId: string | Uint8Array | Buffer | unknown): string {
   return String(nodeId);
 }
 
+/**
+ * R7: content type of a ratchet message in DATA (ratchet/ratchet-wire.ts
+ * RATCHET_CONTENT_TYPE; equality is tested). A literal here so the routing
+ * module imports nothing from the ratchet.
+ */
+const RATCHET_CONTENT_TYPE = 0x02;
+
 export class Forwarder {
   private node: GMPNodeLike;
   private forwardTimestamps: Map<string, number[]>;
@@ -25,6 +32,16 @@ export class Forwarder {
 
   processIncoming(plaintext: Uint8Array, incomingLink: GMPLinkLike | null): ProcessResult {
     if (plaintext.length < 1) return false;
+
+    // R7: a ratchet message (identity-v2.md §3.1) is binary. Hand it to the node
+    // as bytes here, before the link would turn the DATA plaintext into a string.
+    if (plaintext[0] === RATCHET_CONTENT_TYPE) {
+      if (incomingLink) {
+        (this.node as unknown as { emit(e: 'ratchet-data', i: { link: GMPLinkLike; message: Uint8Array }): boolean })
+          .emit('ratchet-data', { link: incomingLink, message: Uint8Array.prototype.slice.call(plaintext, 1) });
+      }
+      return { local: false };
+    }
 
     const isRouted = plaintext[0];
 

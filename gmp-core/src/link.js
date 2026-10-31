@@ -56,6 +56,23 @@ import { countOpenFds, readFdLimits } from './fd-limits.js';
 const requireLocal = createRequire(import.meta.url);
 
 const DEFAULT_PORT = DEFAULTS.GMP_PORT;
+/** L1: return-route lookups for incoming mesh handshakes (handleIncomingRoutedPayload). */
+const RETURN_ROUTE_MAX_QUERIES = 8;
+const RETURN_ROUTE_MAX_BUFFERED = 8;
+
+/**
+ * The full NodeID a routed HELLO frame claims, if it self-certifies (its static
+ * or signing key hashes to it) and starts with the routed 32-byte source prefix;
+ * else null. A claim still: the handshake proves it. (frame: len 4, type 1, then
+ * version 1, nodeId 64, static 32, signing 32 — handshake.ts parseHello.)
+ */
+function claimedHelloNodeId(frame, sourceHex) {
+  const f = Buffer.from(frame);
+  if (f.length < 5 + 129) return null;
+  const claimed = f.subarray(6, 70);
+  if (toHex(claimed).slice(0, 64) !== sourceHex) return null;
+  return nodeIdMatchesKeys(claimed, f.subarray(70, 102), f.subarray(102, 134)) ? toHex(claimed) : null;
+}
 
 // Tests isolate themselves through the environment (GMP_LAN_DISCOVERY=false,
 // empty GMP_PUBLIC_PEERS_PATH); there is no test-process detection here.
@@ -73,20 +90,13 @@ class VirtualSocket extends EventEmitter {
   write(data, callback) {
     const destHex = toHex(this.destNodeId);
     const route = this.node.routingTable.getBestRoute(destHex);
-    if (!route) {
+    const nextHopLink = route ? this.node.getLinkByNodeId(route.nextHopNodeId) : null;
+    if (!route || !nextHopLink || nextHopLink.state !== 'connected') {
       this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32).toString('hex') });
       const err = new Error('no-route');
       this.emit('error', err);
       if (callback) callback(err);
-      return;
-    }
-
-    const nextHopLink = this.node.getLinkByNodeId(route.nextHopNodeId);
-    if (!nextHopLink || nextHopLink.state !== 'connected') {
-      this.node.emit('no-route', { finalDestinationNodeId: Buffer.from(destHex, 'hex').slice(0, 32).toString('hex') });
-      const err = new Error('no-route');
-      this.emit('error', err);
-      if (callback) callback(err);
+      this._closeUnroutable(destHex, route ? 'next hop not connected' : 'no route');
       return;
     }
 
@@ -99,12 +109,27 @@ class VirtualSocket extends EventEmitter {
     }
   }
 
+  /**
+   * L1: a virtual link whose frames cannot be routed cannot carry anything, so
+   * the socket closes and takes the link with it. Before, the error was only
+   * re-emitted: an initiator whose key-confirm PING was unroutable stayed
+   * 'connected' until its PONG timeout (~10 s) and took sends that never left.
+   */
+  _closeUnroutable(destHex, why) {
+    if (this._closed) return;
+    logger.warn('node', 'virtual-no-route', `Closing a mesh-routed link: ${why} to the destination; the frame was not sent`,
+      { destinationNodeId: destHex.slice(0, 16), reason: why });
+    this.destroy();
+  }
+
   /** Called by GMPLink's HTTP health-check shim. */
   end() {
     this.destroy();
   }
 
   destroy() {
+    if (this._closed) return;
+    this._closed = true;
     this.emit('close');
   }
 }
@@ -852,6 +877,14 @@ class GMPNode extends EventEmitter {
     return cert;
   }
 
+  /** Another connected, non-virtual link to this peer than `except`, or null (L1). */
+  _otherDirectLink(peerNodeIdHex, except) {
+    for (const l of this.connections.values()) {
+      if (l !== except && l.state === 'connected' && !l.isVirtual && l.remoteNodeId && toHex(l.remoteNodeId) === peerNodeIdHex) return l;
+    }
+    return null;
+  }
+
   getLinkByNodeId(nodeId) {
     const targetHex = toHex(nodeId);
     for (const link of this.connections.values()) {
@@ -1021,8 +1054,12 @@ class GMPNode extends EventEmitter {
       }
       if (!link.isVirtual && link.remoteNodeId) {
         const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-        if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
-        this.routingTable.removeRoutesVia(peerNodeIdHex);
+        // L1: another live link to the same peer still carries those routes (a
+        // second link, e.g. an address query, closing must not drop them).
+        if (!this._otherDirectLink(peerNodeIdHex, link)) {
+          if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
+          this.routingTable.removeRoutesVia(peerNodeIdHex);
+        }
       }
       this.emit('close', { connId });
     });
@@ -1148,8 +1185,11 @@ class GMPNode extends EventEmitter {
         }
         if (!link.isVirtual && link.remoteNodeId) {
           const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-          if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
-          this.routingTable.removeRoutesVia(peerNodeIdHex);
+          // L1: only when no other live link to this peer remains.
+          if (!this._otherDirectLink(peerNodeIdHex, link)) {
+            if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
+            this.routingTable.removeRoutesVia(peerNodeIdHex);
+          }
         }
         this.emit('close', { connId });
         if (!settled) {
@@ -1257,8 +1297,11 @@ class GMPNode extends EventEmitter {
         }
         if (!link.isVirtual && link.remoteNodeId) {
           const peerNodeIdHex = Buffer.from(link.remoteNodeId).toString('hex');
-          if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
-          this.routingTable.removeRoutesVia(peerNodeIdHex);
+          // L1: only when no other live link to this peer remains.
+          if (!this._otherDirectLink(peerNodeIdHex, link)) {
+            if (!link.socket.isRelayed && link.role === 'peer') this.topologyManager.handleLinkClosed(peerNodeIdHex);
+            this.routingTable.removeRoutesVia(peerNodeIdHex);
+          }
         }
         this.emit('close', { connId });
         if (!settled) {
@@ -1380,7 +1423,47 @@ class GMPNode extends EventEmitter {
 
   handleIncomingRoutedPayload(sourceNodeId, payload) {
     const sourceHex = toHex(sourceNodeId).slice(0, 64);
+    // L1: payloads from a source whose return route is being looked up wait for it.
+    const waiting = this._returnRouteWait && this._returnRouteWait.get(sourceHex);
+    if (waiting) {
+      if (waiting.length < RETURN_ROUTE_MAX_BUFFERED) waiting.push([sourceNodeId, payload]);
+      return;
+    }
     let virtualLink = this.virtualConnections.get(sourceHex);
+
+    // L1: a new HELLO from a peer whose previous handshake with us never
+    // finished (we answered, its key-confirm never came: it gave up) starts a
+    // fresh responder link. The half-done one dropped every new HELLO
+    // (link.ts _handleHELLO) for up to HANDSHAKE_CONFIRM_TIMEOUT_MS. Established
+    // links are never replaced this way: a HELLO is not authenticated.
+    if (virtualLink && !virtualLink.isInitiator && virtualLink.state !== 'connected' &&
+        payload && payload.length > 4 && payload[4] === MESSAGETYPES.HELLO) {
+      logger.info('node', 'virtual-handshake-superseded',
+        `A new handshake from the same peer replaces one that never completed (${virtualLink.state})`,
+        { sourceNodeId: sourceHex.slice(0, 16), state: virtualLink.state });
+      virtualLink.destroy(new Error('Superseded by a new handshake from the same peer'));
+      if (this.virtualConnections.get(sourceHex) === virtualLink) this.virtualConnections.delete(sourceHex);
+      virtualLink = null;
+    }
+
+    // L1: a new handshake from a node we hold no route back to could never be
+    // answered (our HELLO_ACK fails 'no-route'; live: 54 of 54 in the failing
+    // trials). Ask the mesh for the return route first — one query, then the
+    // buffered payloads — instead of answering into nothing. The routed source
+    // prefix is only a claim, so nothing is learned from it: the route comes
+    // from the topology query, and the handshake still proves the identity.
+    if (!virtualLink && this.topologyManager && payload && payload.length > 4 && payload[4] === MESSAGETYPES.HELLO) {
+      const claimedHex = claimedHelloNodeId(payload, sourceHex);
+      if (!claimedHex) {
+        logger.warn('node', 'virtual-handshake-dropped', 'A mesh-routed HELLO was dropped: its NodeID does not match its keys or its routed source',
+          { sourceNodeId: sourceHex.slice(0, 16) });
+        return;
+      }
+      if (!this.routingTable.getBestRoute(claimedHex)) {
+        this._queryReturnRoute(sourceHex, claimedHex, sourceNodeId, payload);
+        return;
+      }
+    }
 
     if (!virtualLink) {
       const socket = new VirtualSocket({
@@ -1436,6 +1519,27 @@ class GMPNode extends EventEmitter {
     }
 
     virtualLink.socket.emit('data', payload);
+  }
+
+  /** L1: one return-route query per source at a time, a few at most overall; then replay or drop (logged). */
+  _queryReturnRoute(sourceHex, claimedHex, sourceNodeId, payload) {
+    if (!this._returnRouteWait) this._returnRouteWait = new Map();
+    if (this._returnRouteWait.size >= RETURN_ROUTE_MAX_QUERIES) {
+      logger.warn('node', 'virtual-handshake-dropped', 'A mesh-routed handshake was dropped: too many return-route lookups in flight',
+        { sourceNodeId: sourceHex.slice(0, 16), inFlight: this._returnRouteWait.size });
+      return;
+    }
+    this._returnRouteWait.set(sourceHex, [[sourceNodeId, payload]]);
+    Promise.resolve(this.topologyManager.queryRoute(claimedHex)).catch(() => false).then((found) => {
+      const buffered = this._returnRouteWait ? this._returnRouteWait.get(sourceHex) || [] : [];
+      if (this._returnRouteWait) this._returnRouteWait.delete(sourceHex);
+      if (!found || !this.routingTable.getBestRoute(claimedHex)) {
+        logger.warn('node', 'virtual-handshake-no-return-route',
+          'A mesh-routed handshake was dropped: no route back to its source could be found', { sourceNodeId: sourceHex.slice(0, 16) });
+        return;
+      }
+      for (const [src, p] of buffered) this.handleIncomingRoutedPayload(src, p);
+    });
   }
 
   get bootstrapStatus() {

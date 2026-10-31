@@ -400,6 +400,10 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
     const padded = padContent(payload, kind, { padding: this.options.ratchetPadding !== false });
     const message = store.send(toNodeId, padded, ratchetDeps);
     await link.send(toData(message));
+    // L1: a mesh-routed link closes when its frame cannot be routed; a send is
+    // never reported as handed to a link that could not carry it. The message
+    // stays on the unacknowledged list (R6), so it is not lost silently.
+    if (link.state !== 'connected') throw new RatchetNotConnectedError(`the link to ${toNodeId.slice(0, 16)}… closed while sending (the frame could not be carried); not sent`);
     return { messageId: Buffer.from(message.subarray(2, 18)).toString('hex'), kind: kind === KIND_INITIAL ? 'initial' : 'ratchet' };
   }
 
@@ -775,10 +779,18 @@ export class GMPNodeManager extends EventEmitter<GMPNodeManagerEvents> {
         if (timer) clearTimeout(timer);
       }
     }
+    // L1: ask the mesh for a route first, as _getOrConnect and the Ghost Address
+    // lookup do. Routes are not flooded: without this the dial fails 'no-route'
+    // whenever no announce happened to name the target (R7: 10 of 10 attempts).
+    if (!this._node.routingTable.getBestRoute(nodeId) && this._node.topologyManager) {
+      await this._node.topologyManager.queryRoute(nodeId);
+    }
     try {
       await this._node.dialVirtual(Buffer.from(nodeId, 'hex'));
       return { connected: true, transport: 'virtual' };
-    } catch {
+    } catch (e) {
+      logger.warn('gmp-node-manager', 'connect-by-nodeid-failed', `Could not reach the node by NodeID over the mesh: ${(e as Error).message}`,
+        { nodeId: nodeId.slice(0, 16), reason: (e as Error).message });
       return { connected: false, transport: 'failed' };
     }
   }

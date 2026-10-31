@@ -197,6 +197,29 @@ interface QueryResult {
   err?: Error;
 }
 
+/** A connected, direct (not relayed, not virtual) link to this peer, if any. */
+function existingLinkTo(node: GMPNodeLike, peer: PublicPeerEntry): GMPLinkLike | null {
+  if (!peer.nodeId) return null;
+  const l = (node as unknown as { getLinkByNodeId(id: string): GMPLinkLike | null }).getLinkByNodeId(peer.nodeId.toLowerCase());
+  return l && l.state === 'connected' && !(l as { isVirtual?: boolean }).isVirtual && !(l.socket && (l.socket as { isRelayed?: boolean }).isRelayed) ? l : null;
+}
+
+/** BINDING_REQUEST over an existing link; never closes it. */
+function queryOverLink(link: GMPLinkLike, peer: PublicPeerEntry, timeoutMs: number): Promise<BindingResponse> {
+  return new Promise((resolve, reject) => {
+    const onResponse = (info: unknown): void => {
+      clearTimeout(timer);
+      if (isBindingResponse(info)) resolve(info); else reject(new Error('Malformed BINDING_RESPONSE'));
+    };
+    const timer = setTimeout(() => {
+      (link as unknown as { off(e: string, fn: (info: unknown) => void): void }).off('binding-response', onResponse);
+      reject(new Error(`Timeout querying peer ${peer.address}:${peer.port} over the existing link`));
+    }, timeoutMs);
+    link.once('binding-response', onResponse);
+    link.sendBindingRequest();
+  });
+}
+
 export async function queryPublicAddress(
   node: GMPNodeLike,
   peers: PublicPeerEntry[],
@@ -206,8 +229,12 @@ export async function queryPublicAddress(
     throw new Error('No public peers specified for query');
   }
 
+  // L1: ask over the link we already hold to that peer. Dialling a second,
+  // throwaway link (as querySinglePeer does, which NAT detection needs) made the
+  // peer withdraw its edge to us and our side drop every route through it when
+  // the duplicate closed — just as users start connecting.
   const promises: Promise<QueryResult>[] = peers.map(peer =>
-    querySinglePeer(node, peer, timeoutMs)
+    (existingLinkTo(node, peer) ? queryOverLink(existingLinkTo(node, peer)!, peer, timeoutMs) : querySinglePeer(node, peer, timeoutMs))
       .then(res => ({ success: true, res }))
       .catch(err => ({ success: false, err }))
   );

@@ -77,9 +77,10 @@ The blanket `*.md` / `*.txt` rules are replaced with `docs/archive/*.md` and
     `index.html`, `app.bundle.js`, `vendor/`, `assets/` and gmp-core are in
     `resources/`. It then copies the packaged gmp-core out of the checkout and
     imports it, which proves it loads from its own bundled dependencies.
-  - **audit**: `npm audit --omit=dev --audit-level=high` for the root and
-    gmp-core. It is advisory for now: findings become `::warning` annotations
-    and the check stays green. See remaining work.
+  - **audit**: `node scripts/audit-gate.mjs`. It fails on any high or critical
+    advisory in the runtime dependencies of gmp-core, electron and the root
+    package. Mobile findings pass only if listed one by one in
+    `audit-allowlist.json` (package, advisories, reason, reviewBy date).
 - **`.github/workflows/release.yml`** runs on `v*` tags.
   1. It checks that the tag equals all four package versions.
   2. It rebuilds and re-runs the bundle-sync gate and all tests.
@@ -104,7 +105,7 @@ URLs, so one `git push` updates both. GitHub stays the primary: `SECURITY.md`,
 package metadata, releases and the desktop installer workflow all live there.
 
 `.gitlab-ci.yml` runs the same `test` (Node 22 and 24), bundle-sync,
-`desktop-package` and advisory `audit` jobs as GitHub CI. A `pages` job then
+`desktop-package` and `audit` (gate) jobs as GitHub CI. A `pages` job then
 publishes the web app to GitLab Pages from the default branch, after the tests
 pass. Pages gets only what `index.html` loads (`index.html`,
 `app.bundle.js`, `vendor/`, `src/`, `shared/`, `assets/` and `LICENSE`), not
@@ -421,8 +422,9 @@ To finish:
 1. Plan the React Navigation 7 migration: an API change across the mobile
    screens, then device testing.
 2. Plan a React Native upgrade: large, with native Gradle and iOS changes.
-3. Remove the `|| echo "::warning::…"` fallbacks from the audit steps once
-   the remainder is fixed.
+3. Done in B5 (2026-10-31): the audit steps are a gate (`scripts/audit-gate.mjs`);
+   the remaining mobile findings are listed in `audit-allowlist.json`, with
+   review dates.
 4. Add Dependabot (`.github/dependabot.yml`) for `npm` (root and
    `/gmp-core`) and `github-actions`.
 

@@ -120,18 +120,58 @@
     <link href="vendor/fonts/fonts.css" rel="stylesheet">
     <script>
       (function() {
-        const origLog = console.log;
-        const origError = console.error;
-        window.errs = [];
+        // Console capture for the in-page error overlay. Bounded (B5): a ring of
+        // the last ERRS_MAX entries, and the overlay renders only the last
+        // OVERLAY_MAX errors, so nothing rescans everything captured so far.
+        // It keeps no message content: the leading text of each call (the
+        // code's own tag), the types of other arguments, error names with
+        // quoted values elided, and stack frames without the message line.
+        const ERRS_MAX = 500;
+        const OVERLAY_MAX = 50;
+        const TEXT_MAX = 200;
+        const orig = { log: console.log, warn: console.warn, error: console.error };
+        const errs = [];
+        window.errs = errs;
+        const overlay = [];
         let logging = false;
+        const elide = (s) => String(s).replace(/(["'`])(?:(?!\1)[^\n])*\1/g, '$1…$1').slice(0, TEXT_MAX);
+        const describe = (a, i) => {
+          if (a instanceof Error) return `${a.name}: ${elide(a.message)}`;
+          if (typeof a === 'string') return i === 0 ? elide(a) : `<string ${a.length}>`;
+          if (typeof a === 'number' || typeof a === 'boolean' || a === null || a === undefined) return String(a);
+          if (typeof a === 'object') return `<${(a.constructor && a.constructor.name) || 'object'}>`;
+          return `<${typeof a}>`;
+        };
+        const frames = (stack) => (typeof stack === 'string'
+          ? stack.split('\n').filter((l) => /^\s+at\s/.test(l)).slice(0, 8).join('\n') || undefined
+          : undefined);
+        function record(entry) {
+          errs.push(entry);
+          if (errs.length > ERRS_MAX) errs.shift();
+          if (entry.type === 'error' || entry.type === 'promise') {
+            overlay.push(entry);
+            if (overlay.length > OVERLAY_MAX) overlay.shift();
+            showDebug();
+          }
+        }
+        const capture = (level) => function(...args) {
+          orig[level].apply(console, args);
+          if (logging) return;
+          logging = true;
+          try {
+            record({ type: level, text: args.map(describe).join(' ') });
+          } catch (e) {
+          } finally {
+            logging = false;
+          }
+        };
         window.onerror = function(msg, url, line, col, error) {
           if (logging) return false;
           logging = true;
           try {
-            window.errs.push({type: 'error', msg, url, line, col, stack: error?.stack});
-            showDebug();
+            record({ type: 'error', msg: elide(msg), url, line, col, stack: frames(error?.stack) });
           } catch (e) {
-            origError.call(console, 'Error inside window.onerror:', e);
+            orig.error.call(console, 'Error inside window.onerror:', e);
           } finally {
             logging = false;
           }
@@ -141,40 +181,19 @@
           if (logging) return;
           logging = true;
           try {
-            window.errs.push({type: 'promise', msg: event.reason?.message || event.reason, stack: event.reason?.stack});
-            showDebug();
+            const r = event.reason;
+            record({ type: 'promise', msg: describe(r, 0), stack: frames(r?.stack) });
           } catch (e) {
-            origError.call(console, 'Error inside window.onunhandledrejection:', e);
+            orig.error.call(console, 'Error inside window.onunhandledrejection:', e);
           } finally {
             logging = false;
           }
         };
-        console.log = function(...args) {
-          origLog.apply(console, args);
-          if (logging) return;
-          logging = true;
-          try {
-            window.errs.push({type: 'log', text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')});
-            showDebug();
-          } catch (e) {
-          } finally {
-            logging = false;
-          }
-        };
-        console.error = function(...args) {
-          origError.apply(console, args);
-          if (logging) return;
-          logging = true;
-          try {
-            window.errs.push({type: 'error', text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')});
-            showDebug();
-          } catch (e) {
-          } finally {
-            logging = false;
-          }
-        };
+        console.log = capture('log');
+        console.warn = capture('warn');
+        console.error = capture('error');
         function showDebug() {
-          const errors = window.errs.filter(e => e.type === 'error' || e.type === 'promise');
+          const errors = overlay;
           if (errors.length === 0) {
             const existing = document.getElementById('debug-reporter');
             if (existing) existing.remove();
@@ -200,7 +219,7 @@
               document.body.appendChild(div);
             } else {
               window.addEventListener('DOMContentLoaded', () => {
-                if (window.errs.filter(e => e.type === 'error' || e.type === 'promise').length > 0) {
+                if (overlay.length > 0) {
                   document.body.appendChild(div);
                   showDebug();
                 }
@@ -2345,7 +2364,9 @@ class GMPBridgeConnector {
             if (this._blocked.has(msg.fromNodeId)) return;
             try {
               const parsed = JSON.parse(msg.payload);
-              if (parsed.type === 'file-meta' || parsed.type === 'file-chunk' || parsed.type === 'file-done' || parsed.type === 'file-ack') {
+              // Every file-transfer frame (src/p2p/file-transfer.js protocol v2), including
+              // the receiver's refusals and the sender's cancel, goes to FileTransfer.
+              if (['file-meta', 'file-chunk', 'file-done', 'file-ack', 'file-refused', 'file-cancel'].includes(parsed.type)) {
                 this.emit('file-chunk', msg.fromNodeId, parsed);
               } else {
                 // fromNodeId is the NodeID the GMP link authenticated.
@@ -4944,7 +4965,16 @@ function GhostLinkApp() {
           setTransferredFiles((prev) => [...prev, { name: fileName, size: fileSize, from: identity?.name || 'You', ts: Date.now(), hash: fHash + '...', chunks: fChunks, encrypted: true, url: URL.createObjectURL(fileObj) }]);
           setUploadProgress((p) => {const n = { ...p };delete n[id];return n;});
           return;
-        } catch (e) {console.error('P2P file transfer failed:', e);addToast('File transfer failed: ' + e.message, 'error');}
+        } catch (e) {
+          console.error('P2P file transfer failed:', e);
+          addToast('File transfer failed: ' + e.message, 'error');
+          // Too large, or refused by the receiver: queueing it for "when they
+          // connect" would only fail the same way again.
+          if (e && (e.code === 'FILE_TOO_LARGE' || e.code === 'REFUSED' || e.code === 'OLD_RECEIVER')) {
+            setUploadProgress((p) => {const n = { ...p };delete n[id];return n;});
+            return;
+          }
+        }
       }
 
       // AWAIT MODE: Peer offline, queue for connection
@@ -9854,7 +9884,7 @@ inviteTab === "create" ? html`<>
   { animation: "fadeIn 0.2s ease" }}>
                       <div style=${{ fontSize: 13, fontWeight: 700, color: PALETTE.amber, marginBottom: 12, textAlign: "center" }}>Payment is not verified in the app</div>
                       <div style=${{ fontSize: 11, color: PALETTE.mist, lineHeight: 1.5, marginBottom: 16 }}>
-                        This app cannot check the blockchain or confirm your payment. After sending the amount to the address shown, contact support with your transaction hash and they will activate your license. Nothing here means your payment has been received or verified.
+                        This app cannot look up the transaction or confirm your payment. After sending the amount to the address shown, contact support with your transaction hash and they will activate your license. Nothing here means your payment has been received or verified.
                       </div>
 
                       <div style=${{ background: th.bg3, border: "1px solid " + th.border, borderRadius: 10, padding: 12, fontSize: 10, color: PALETTE.mist, lineHeight: 1.6, marginBottom: 16 }}>

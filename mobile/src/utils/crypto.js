@@ -7,7 +7,7 @@ import {gcm} from '@noble/ciphers/aes';
 import {p256} from '@noble/curves/p256';
 import {x25519} from '@noble/curves/ed25519';
 import {sha512} from '@noble/hashes/sha512';
-import {WORDLIST, SEED_PHRASE_WORDS} from './wordlist';
+import {BIP39_WORDS} from './wordlist';
 import {ghostAddressFromNodeId} from './ghost-address';
 
 /**
@@ -233,20 +233,27 @@ async function deriveGhostIdentity(words) {
 }
 
 /**
- * A recovery phrase drawn uniformly from the shared wordlist with the CSPRNG,
- * using rejection sampling to avoid modulo bias.
+ * A 12-word checksummed BIP-39 recovery phrase: 128 bits from the CSPRNG plus
+ * the first 4 bits of SHA-256(entropy), over the shared BIP-39 English list.
+ * The same scheme as the desktop app and gmp-core (seed-phrase.ts). Restore
+ * does not require the checksum, so phrases from earlier mobile builds (12
+ * list words drawn independently, no checksum) still restore unchanged.
  */
-function generateSeedPhrase(wordCount = SEED_PHRASE_WORDS, wordlist = WORDLIST) {
-  const n = wordlist.length;
-  if (!n) throw new Error('Wordlist is empty');
-  const limit = Math.floor(65536 / n) * n; // largest unbiased multiple
+function generateSeedPhrase() {
+  if (BIP39_WORDS.length !== 2048) throw new Error('BIP-39 word list is not 2048 words');
+  const entropy = getRandomBytes(16);
+  const checksum = nobleSha256(entropy)[0];
+  const bits = [];
+  for (let i = 0; i < 16; i++) for (let b = 7; b >= 0; b--) bits.push((entropy[i] >> b) & 1);
+  for (let b = 7; b >= 4; b--) bits.push((checksum >> b) & 1);
+  entropy.fill(0);
   const words = [];
-  while (words.length < wordCount) {
-    const b = getRandomBytes(2);
-    const value = (b[0] << 8) | b[1];
-    if (value >= limit) continue; // discard, do not fold
-    words.push(wordlist[value % n]);
+  for (let i = 0; i < 12; i++) {
+    let index = 0;
+    for (let j = 0; j < 11; j++) index = (index << 1) | bits[i * 11 + j];
+    words.push(BIP39_WORDS[index]);
   }
+  bits.fill(0);
   return words;
 }
 

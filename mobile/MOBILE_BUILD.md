@@ -154,7 +154,7 @@ longer exists anywhere in the project, and on a handset `localhost` is the
 handset. Nothing in `mobile/` now contains a live `ws://` except the mesh
 bridge URL, which comes from settings rather than a hardcoded default.
 
-The obvious replacement — a serverless QR/paste SDP exchange — is **not
+The obvious replacement — a QR/paste SDP exchange with no server in between — is **not
 available to copy from the web client, because the web deliberately removed
 it**. From `index.html`:
 
@@ -162,13 +162,13 @@ it**. From `index.html`:
 > waiting, because handing the user a wall of base64 to copy was never an
 > answer.
 
-> This used to be a ladder: GMP bridge, else a Python relay, else a "WebRTC
-> serverless" connector whose only usable feature was the manual SDP paste.
+> This used to be a ladder: GMP bridge, else a Python relay, else a […]
+> connector whose only usable feature was the manual SDP paste.
 > Each rung silently changed what an invite code looked like […] The ladder is
 > gone.
 
 So the web's connection model is: **a Ghost Address, exchanged by QR or paste,
-resolved through the mesh.** The QR is serverless; the *rendezvous* is the mesh.
+resolved through the mesh.** The QR itself needs no server; the *rendezvous* is the mesh.
 
 The consequence for mobile is worth stating plainly: with no signaling server
 and no SDP paste, a direct WebRTC connection has no way to exchange an offer
@@ -299,9 +299,10 @@ alone.
 - `CryptoService.js` (Ghost Mesh identity derivation) still has no backend and
   throws if called — it is only reachable from the Ghost Mesh setup modal, which
   is not functional in this build.
-- The wordlist is a curated 575-word subset with no BIP-39 checksum, so phrases
-  are not interchangeable with other wallets. 110 bits is strong; it is just not
-  BIP-39.
+- Recovery phrases: new phrases are checksummed BIP-39 (128-bit entropy, the
+  shared 2048-word list in `shared/wordlist.js`), the same scheme as the desktop
+  and gmp-core. Phrases from earlier mobile builds (12 list words, no checksum)
+  still restore: restore does not require the checksum.
 
 ## NDK version
 

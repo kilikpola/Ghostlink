@@ -25,7 +25,7 @@ Network: Local host loopback (Simulated LAN via distinct ports)
   Chain valid: YES
   Message content in logs: NO (correct)
   Result: PASS
-  Notes: Blockchain verification of hashes succeeded with 100% integrity. Logs checked and verified to be fully sanitized of plain text content.
+  Notes: Hash-chain verification of hashes succeeded with 100% integrity. Logs checked and verified to be fully sanitized of plain text content.
 
 ## Test 4 — File Transfer
   Small file size: 41 bytes

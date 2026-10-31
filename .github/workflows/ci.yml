@@ -139,18 +139,17 @@ jobs:
         run: node test/packaged-gmp-imports.test.mjs
 
   audit:
-    name: npm audit (advisory)
+    name: npm audit (gate)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Advisory until the existing backlog is triaged (see
-    # docs/PRODUCTION_READINESS.md): findings are reported as warnings and the
-    # check stays green. To enforce, drop the `|| echo ::warning` fallbacks.
+    # Fails on any high/critical advisory in the runtime dependencies of
+    # gmp-core, electron and the root package. Mobile findings are accepted
+    # only one by one, in audit-allowlist.json (package, advisories, reason,
+    # reviewBy). See scripts/audit-gate.mjs.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Audit production dependencies (root + workspaces)
-        run: npm audit --omit=dev --audit-level=high || echo "::warning::npm audit found high/critical advisories in root/workspace dependencies"
-      - name: Audit gmp-core
-        run: npm audit --prefix gmp-core --omit=dev --audit-level=high || echo "::warning::npm audit found high/critical advisories in gmp-core"
+      - name: Audit gate (runtime dependencies; mobile allowlist)
+        run: node scripts/audit-gate.mjs

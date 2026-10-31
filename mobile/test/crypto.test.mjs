@@ -223,6 +223,24 @@ console.log('\n[12] Recovery phrase generation');
   const headExpected = expected * 111;
   ok(`first 111 words are not over-drawn (${head} vs ~${headExpected.toFixed(0)})`,
      head < headExpected * 1.8);
+
+  // B5: checksummed BIP-39, like the desktop app and gmp-core. Checked here
+  // independently: 132 bits = 128 bits of entropy + SHA-256(entropy)[0] >> 4.
+  const {BIP39_WORDS} = await import('../src/utils/wordlist.js');
+  const checksumValid = (words) => {
+    const bits = words.map(w => BIP39_WORDS.indexOf(w).toString(2).padStart(11, '0')).join('');
+    const entropy = Uint8Array.from(bits.slice(0, 128).match(/.{8}/g).map(b => parseInt(b, 2)));
+    return (nobleSha256(entropy)[0] >> 4) === parseInt(bits.slice(128), 2);
+  };
+  const {FIXTURE_A} = await import('../../test/helpers/fixture-phrases.mjs');
+  ok('control: the checker accepts a checksummed fixture and rejects a checksum-less one',
+     checksumValid([...FIXTURE_B]) && !checksumValid([...FIXTURE_A]));
+  let validCount = 0;
+  for (let i = 0; i < 1000; i++) if (checksumValid(generateSeedPhrase())) validCount++;
+  ok(`1000 generated phrases are all checksum-valid BIP-39 (${validCount}/1000; unchecksummed words pass ~1/16)`, validCount === 1000);
+  // Restore does not require the checksum: phrases from earlier mobile builds still restore.
+  const {validatePhrase} = await import('../src/utils/phrase-entry.js');
+  ok('an old checksum-less phrase is still accepted on restore', validatePhrase([...FIXTURE_A]).ok === true);
 }
 
 (await import('fs')).unlinkSync(modPath);

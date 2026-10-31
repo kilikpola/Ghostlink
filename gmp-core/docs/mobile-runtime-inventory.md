@@ -262,7 +262,7 @@ power cut (no fsync) reopens the same double-failure window.
 | rate-limiter.ts, network-health.ts | EXCLUDED | inbound limiting and mesh health are public-peer concerns |
 | metrics.ts, cli.ts, gmp-bridge.ts, gmp-node-manager.ts, node-registry.ts, config.ts, paths.ts | EXCLUDED | desktop application layer (HTTP server, CLI, WebSocket bridge, env/file config); the app passes explicit config and a data dir |
 | transport/tcp-transport, memory-transport, null-transport | EXCLUDED | replaced on the phone by a React Native transport; the other two are test harnesses |
-| bip39-english.ts | EXCLUDED | used only by the CLI; mobile has its own wordlist |
+| bip39-english.ts | EXCLUDED | used only by the CLI; mobile uses the shared BIP-39 word list (`shared/wordlist.js`) |
 
 ## M2-2 — the four boundaries recounted against the profile
 

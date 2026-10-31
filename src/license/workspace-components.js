@@ -122,12 +122,12 @@
         desc: "Establish more than 5 simultaneous WebRTC channels. Free tier is limited to 5 active peers."
       },
       export: {
-        title: "Full Blockchain History Export",
-        desc: "Export complete blockchain verification chains. Free tier limits exports to the last 500 blocks."
+        title: "Full Hash-Chain History Export",
+        desc: "Export the complete hash chains for verification. Free tier limits exports to the last 500 blocks."
       },
       team_workspaces: {
         title: "Collaborative Team Workspaces",
-        desc: "Unlock complete workspaces with separate blockchains, invite templates, ECIES encryption, and member rotations."
+        desc: "Unlock complete workspaces with separate hash chains, invite templates, ECIES encryption, and member rotations."
       }
     };
 
@@ -487,7 +487,7 @@
           )
         ),
         React.createElement("p", { style: { fontSize: 11, color: "#5a5a6a", marginBottom: 16, lineHeight: 1.5 } },
-          "Establish an independent collaborative environment with its own private blockchain ledger and workspace key rotation."
+          "Establish an independent collaborative environment with its own hash-chained history and workspace key rotation."
         ),
         React.createElement("input", {
           type: "text",
@@ -569,7 +569,7 @@
           )
         ),
         React.createElement("p", { style: { fontSize: 11, color: "#5a5a6a", marginBottom: 14, lineHeight: 1.5 } },
-          "Paste a workspace invite payload (GLWS-...) below to decrypt the vault and join the blockchain."
+          "Paste a workspace invite payload (GLWS-...) below to decrypt the vault and join the workspace."
         ),
         React.createElement("textarea", {
           rows: 3,

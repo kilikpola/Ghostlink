@@ -2,8 +2,9 @@
  * Recovery-phrase entry: splitting, validating, autocompleting.
  *
  * Validation accepts ACCEPTED_WORDS (BIP-39 plus legacy words); autocomplete
- * offers BIP-39 only. There is no checksum, so the screen confirms the derived
- * Ghost Address instead.
+ * offers BIP-39 only. New phrases carry a BIP-39 checksum, but restore does not
+ * require it (phrases from earlier mobile builds have none), so the screen
+ * confirms the derived Ghost Address instead.
  */
 
 import {

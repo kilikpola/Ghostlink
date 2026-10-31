@@ -70,5 +70,14 @@ const restored = {
 ok(restored.publicKeyHex === a.publicKeyHex && restored.ghostAddress === ghost.ghostAddress,
    'Restoring from the phrase reproduces both the Ghost Address and the messaging key');
 
+// B5 pin: generation changed to checksummed BIP-39; derivation did not. The same
+// phrases derive the same NodeIDs as before (values from the tree before B5).
+// FIXTURE_A has no valid checksum (as phrases from earlier mobile builds), FIXTURE_B has one.
+const {FIXTURE_B} = await import('../../test/helpers/fixture-phrases.mjs');
+const PIN_A = 'f8e35a7501d17b3b0f8cbca44e3b6339f31ce77dead8aa567639a0edbc7819a72134af3ca8ec348ee82269d05efb020d860a3e1f9c3fedea5a288410ebc41f2e';
+const PIN_B = '4b5eb5dfe7cf4611f195d729f6ff52f0d76f397e71dbe3a4076baa733b1a019770c3958577759c637a85bb68ee65abc045b8edb937694f9c2b1f01bc26a58fda';
+ok((await CryptoEngine.deriveGhostIdentity([...FIXTURE_A])).nodeIdHex === PIN_A, 'pin: a checksum-less (older mobile) phrase derives the same NodeID as before');
+ok((await CryptoEngine.deriveGhostIdentity([...FIXTURE_B])).nodeIdHex === PIN_B, 'pin: a checksummed phrase derives the same NodeID as before');
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

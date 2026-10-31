@@ -1,5 +1,5 @@
 // WorkspaceManager — Encrypted collaborative workspaces for GhostLink Pro
-// Each workspace has its own blockchain chain, encryption context, and member permissions
+// Each workspace has its own hash chain, encryption context, and member permissions
 (function(exports) {
   'use strict';
 
@@ -659,7 +659,7 @@
       if (chain.length === 0) return true;
 
       // Check chain links are valid
-      // In production, would check hash chain like main blockchain
+      // In production, would check the hash chain like the main message chain
       for (let i = 1; i < chain.length; i++) {
         if (chain[i].previousHash !== chain[i - 1].hash) {
           return false;

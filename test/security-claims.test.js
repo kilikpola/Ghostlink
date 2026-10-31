@@ -311,6 +311,94 @@ ok(/No messages yet/.test(rendered), 'the empty state now reads the honest "No m
     ok(group && peerLiveSecurityTags(group).length === 0, 'the group entry gets no E2E ENCRYPTED tag (no group key agreement exists)');
   }
 
+  console.log('\n=== B5: every tracked document and UI surface ===');
+  {
+    // Every tracked Markdown file, the static pages, and the strings mobile/src
+    // renders (string literals and JSX text; comments and identifiers are not UI).
+    const { execFileSync } = require('child_process');
+    const tracked = (spec) => execFileSync('git', ['ls-files', '-z', '--', spec], { cwd: repoRoot }).toString('utf8').split('\0').filter(Boolean);
+    const DOCS = [...tracked('*.md'), 'setup.html', '404.html', 'index.html', 'landing.html', 'src/license/workspace-manager.js', 'src/license/workspace-components.js'];
+    const MOBILE_UI = tracked('mobile/src').filter((f) => /\.(js|jsx|ts|tsx)$/.test(f));
+    const CLAIMS = [
+      ...REMOVED,
+      // B5: the message history is a per-conversation SHA-256 hash chain, not a blockchain.
+      ['blockchain', /block[\s-]*chain/i],
+    ];
+    // A BIP-39 claim about the mobile app must say what is true: the shared BIP-39
+    // word list, or the checksum (new phrases checksummed; old ones accepted without).
+    const MOBILE_BIP39 = ['BIP-39 claim about mobile', /BIP-?\s?39/i];
+    const qualifiedBip39 = /word ?list|checksum/i;
+    // History lines that describe a removal, by exact text.
+    const ALLOWED = new Set([
+      'CHANGELOG.md\t- Removed misleading UI: a false "Double Ratchet ACTIVE" panel and false',
+    ]);
+    /** Strings a mobile screen can render: literals and JSX text, with comments removed. */
+    const uiStrings = (src) => {
+      const out = [];
+      const re = /(\/\*[\s\S]*?\*\/)|(\/\/[^\n]*)|('(?:\\.|[^'\\\n])*')|("(?:\\.|[^"\\\n])*")|(`(?:\\.|[^`\\])*`)/g;
+      let code = '', last = 0, m;
+      while ((m = re.exec(src)) !== null) {
+        code += src.slice(last, m.index);
+        last = re.lastIndex;
+        if (m[3] || m[4] || m[5]) { out.push(m[0].slice(1, -1)); code += '""'; }
+      }
+      code += src.slice(last);
+      for (const t of code.matchAll(/>([^<>{}]+)</g)) if (t[1].trim()) out.push(t[1].trim());
+      return out.join('\n');
+    };
+    const findIn = (rel, text, mobile) => {
+      const found = [];
+      text.split('\n').forEach((line, i) => {
+        if (ALLOWED.has(`${rel}\t${line}`)) return;
+        for (const [label, re] of CLAIMS) if (re.test(line)) found.push(`${label}@${i + 1}`);
+        const aboutMobile = mobile || rel.startsWith('mobile/') || /mobile/i.test(line);
+        if (aboutMobile && MOBILE_BIP39[1].test(line) && !qualifiedBip39.test(line)) found.push(`${MOBILE_BIP39[0]}@${i + 1}`);
+      });
+      return found;
+    };
+    const surfaces = [
+      ...DOCS.map((rel) => ({ rel, read: (r) => readScanned(r, rel), mobile: false })),
+      ...MOBILE_UI.map((rel) => ({ rel, read: (r) => uiStrings(readScanned(r, rel)), mobile: true })),
+    ];
+    const plantB5 = fs.mkdtempSync(path.join(os.tmpdir(), 'gl-claims-b5-'));
+    const PLANT = [...CLAIMS.map(([p]) => p), 'Your BIP-39 phrase'];
+    const expectLabels = [...CLAIMS.map(([l]) => l), MOBILE_BIP39[0]];
+    let scanned = 0;
+    try {
+      for (const s of surfaces) {
+        if (!fs.existsSync(path.join(repoRoot, s.rel))) {
+          console.log(`  - skipped: ${s.rel} is not in this checkout — not scanned`);
+          continue;
+        }
+        scanned++;
+        const raw = readScanned(repoRoot, s.rel);
+        const planted = s.mobile
+          ? raw + '\n' + PLANT.map((p) => `const planted = <Text>${p} on mobile</Text>;`).join('\n') + '\n'
+          : raw + '\n' + PLANT.map((p) => `${p} on mobile`).join('\n') + '\n';
+        fs.mkdirSync(path.dirname(path.join(plantB5, s.rel)), { recursive: true });
+        fs.writeFileSync(path.join(plantB5, s.rel), planted);
+        const real = findIn(s.rel, s.read(repoRoot), s.mobile);
+        assertAbsent({
+          channel: `B5 scan of ${s.rel}`,
+          controlMessage: `every claim planted in a temp copy of ${s.rel} is found`,
+          control: () => {
+            const labels = new Set(findIn(s.rel, s.read(plantB5), s.mobile).map((h) => h.split('@')[0]));
+            return expectLabels.every((l) => labels.has(l)) ? [...labels] : [];
+          },
+          absent: () => real.length === 0,
+          message: `${s.rel}: no removed claim, no "blockchain", no unqualified BIP-39 claim about mobile${real.length ? ` (found: ${real.join(', ')})` : ''}`,
+        });
+      }
+    } finally {
+      fs.rmSync(plantB5, { recursive: true, force: true });
+    }
+    ok(scanned >= 40, `B5 scanned ${scanned} surfaces (every tracked .md, the static pages, ${MOBILE_UI.length} mobile/src files)`);
+    // The whitelist is exact: an allowed history line with a claim appended is still found.
+    ok(findIn('CHANGELOG.md', '- Removed misleading UI: a false "Double Ratchet ACTIVE" panel and false', false).length === 0
+      && findIn('CHANGELOG.md', '- Removed misleading UI: a false "Double Ratchet ACTIVE" panel and false; now with Double Ratchet', false).length > 0,
+      'the CHANGELOG allowance matches one exact line and nothing else');
+  }
+
   console.log(`\nResults: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -2,7 +2,7 @@
 
 **No company server — network hosts are replaceable peers that see only ciphertext**
 
-A peer-to-peer encrypted communication platform with no company server: the hosts that help peers find each other, relay traffic or hold sealed messages for offline contacts are replaceable peers that see only ciphertext. Messages, files, calls, and meetings are end-to-end encrypted, blockchain-chained for tamper detection, and distributed exclusively across connected peers.
+A peer-to-peer encrypted communication platform with no company server: the hosts that help peers find each other, relay traffic or hold sealed messages for offline contacts are replaceable peers that see only ciphertext. Messages, files, calls, and meetings are end-to-end encrypted, hash-chained per conversation for tamper detection, and distributed exclusively across connected peers.
 
 > Your data lives on your device. Your backups live with your peers. No one else has access — not even us.
 
@@ -57,10 +57,10 @@ Every major messaging app — even the “secure” ones — stores metadata on 
 |Key Exchange      |ECDH P-256                             |Derive shared secrets between peers                   |
 |Message Encryption|AES-256-GCM                            |Encrypt every message with unique IV                  |
 |Link sessions     |X25519 ephemeral + static (GMP)        |Fresh session keys per mesh connection                |
-|Hashing           |SHA-256                                |Blockchain integrity, fingerprints                    |
+|Hashing           |SHA-256                                |Hash-chain integrity, fingerprints                    |
 |Key Derivation    |PBKDF2 (100,000 iterations)            |Derive master key from seed phrase                    |
 |Identity Recovery |Shamir’s Secret Sharing GF(256)        |Split identity into 7 shares, any 3 recover it        |
-|Seed Backup       |BIP39-style 12-word phrase             |Human-readable identity backup                        |
+|Seed Backup       |BIP-39 12-word phrase (checksummed)    |Human-readable identity backup                        |
 
 -----
 
@@ -72,7 +72,7 @@ Single HTML file with React 18 + Babel transpilation. No build step needed.
 
 **Screens:** 
 - **Splash**: Flying ghosts animation + dynamic logo loading.
-- **Onboarding (v0.0.1)**: 3-step interactive walkthrough explaining E2EE, P2P architecture, and blockchain integrity BEFORE account setup.
+- **Onboarding (v0.0.1)**: 3-step interactive walkthrough explaining E2EE, P2P architecture, and hash-chain integrity BEFORE account setup.
 - **Setup**: No account — your identity is a key you hold (name + BIP-39 recovery phrase).
 - **Main Chat**: Full direct-communication interface with multi-theme support.
 
@@ -84,7 +84,7 @@ Single HTML file with React 18 + Babel transpilation. No build step needed.
 - Emoji picker (30 curated emojis)
 - Self-destruct messages (30s / 60s / 5min)
 - Reply threading and pinned messages
-- Blockchain explorer (view SHA-256 chain per conversation)
+- Hash-chain explorer (view SHA-256 chain per conversation)
 - QR code invite generation (pure SVG, Reed-Solomon error correction)
 - **Manual Signaling (v0.0.1)**: QR/paste handshake with Unicode-safe Base64 encoding.
 - **Account Deletion (v0.0.1)**: 2-step secure wipe of private keys and local data.
@@ -259,7 +259,7 @@ All media streams encrypted via SRTP (built into WebRTC).
 
 -----
 
-## Message Blockchain
+## Message Hash Chain
 
 Every message creates a SHA-256 linked block:
 
@@ -315,7 +315,7 @@ Layer 3: P2P recovery
 │        AES-GCM decrypt                      │
 │              │                              │
 │  Full restore: keys, chats, files,          │
-│  contacts, settings, blockchain             │
+│  contacts, settings, hash chain             │
 └────────────────────────────────────────────┘
 ```
 
@@ -338,13 +338,12 @@ Layer 3: P2P recovery
 |---------------------|----------------------------------------------------|
 |Server breach        |No company server; hosts see only ciphertext        |
 |Man-in-the-middle    |ECDH key exchange + message authentication          |
-|Message tampering    |SHA-256 blockchain chain verification               |
+|Message tampering    |SHA-256 hash-chain verification                     |
 |Data theft (device)  |AES-256-GCM encryption at rest with key wrapping    |
 |Backup compromise    |Shamir’s Secret Sharing — single fragment is useless|
 |Identity theft       |The phrase derives the mesh identity and the storage keys; the chat key is random, wrapped under a phrase-derived key|
 |Data destruction     |2-step secure Account Deletion (wipes hardware storage)|
 |Metadata surveillance|Partial: no accounts; hosts see IPs and timing      |
-|Replay attacks       |Unique IV per message + blockchain ordering         |
 
 ### What GhostLink does NOT protect against
 
@@ -362,7 +361,7 @@ Layer 3: P2P recovery
 |Key agreement       |ECDH                 |P-256 (secp256r1)             |
 |Symmetric encryption|AES-GCM              |256-bit key, 96-bit IV        |
 |Key derivation      |PBKDF2               |SHA-256, 100K iterations      |
-|Message integrity   |SHA-256              |Chained hashes (blockchain)   |
+|Message integrity   |SHA-256              |Chained hashes (hash chain)   |
 |Backup splitting    |Shamir SSS           |GF(256), 7 shares, threshold 3|
 |Identity seed       |BIP39                |128-bit entropy, 12 words     |
 |Signing             |ECDSA                |P-256                         |

@@ -46,8 +46,6 @@ const TABS = ['Backup', 'Verify', 'Restore'];
 // off-palette neons (#00ffa3, #44ddff, #ff00ff) that read as three states.
 const LAYER_BADGES = ['Recovery phrase', 'Shamir shares', 'Peer recovery'];
 
-// Lightweight BIP39-style word list (same as AppContext uses)
-
 // ─── Component ──────────────────────────────────────────────────
 export default function RecoveryScreen({navigation}) {
   const {theme} = useTheme();

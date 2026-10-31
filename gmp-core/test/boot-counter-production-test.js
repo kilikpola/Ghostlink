@@ -65,18 +65,19 @@ console.log('\n=== 2. existing counter file that does not parse -> refused ===')
 }
 
 console.log('\n=== 3. existing counter file that cannot be read -> refused ===');
-if (process.getuid && process.getuid() === 0) {
-  console.log('  ~ running as root: permission bits do not block reads; skipped');
-} else {
+{
+  // D2: the read failure is injected at the reader. Permission bits do not stop
+  // root (CI), and the old root check skipped this case there silently.
   const f = path.join(tmp, 'unreadable', 'boot-counter');
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, '41\n');
-  fs.chmodSync(f, 0o000);
+  const unreadable = () => { throw Object.assign(new Error('EACCES: injected read failure'), { code: 'EACCES' }); };
   let err = null, got = null;
-  try { got = advanceBootCounter(f); } catch (e) { err = e; }
-  fs.chmodSync(f, 0o600);
+  try { got = advanceBootCounter(f, { readFile: unreadable }); } catch (e) { err = e; }
   assert(err instanceof BootCounterError, `an unreadable counter throws BootCounterError instead of restarting at 0 (got ${err ? err.name : `value ${got}`})`);
   assert(fs.readFileSync(f, 'utf8') === '41\n', 'the unreadable file is left untouched');
+  const ok2 = advanceBootCounter(f);
+  assert(ok2 === 42n, `control: the same file read normally advances to 42 (got ${ok2})`);
 }
 
 console.log('\n=== 4. concurrent processes sharing one counter file -> all values distinct ===');

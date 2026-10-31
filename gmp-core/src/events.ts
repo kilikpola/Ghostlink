@@ -134,7 +134,8 @@ export interface RoutingTableEvents {
 }
 
 export interface ReputationEvents {
-  ban: [info: { nodeId: string | null; ip: string | null; expiresAt: number; reason: string }];
+  /** D2: a NodeID refused for expiresAt; never an address. */
+  ban: [info: { nodeId: string; expiresAt: number; reason: string }];
 }
 
 export interface PeerExchangeEvents {

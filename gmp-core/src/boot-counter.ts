@@ -27,14 +27,18 @@ export class BootCounterError extends Error {
  * invalid (left untouched for inspection), the write fails, or the lock cannot
  * be taken.
  */
-export function advanceBootCounter(file: string): bigint {
+export function advanceBootCounter(
+  file: string,
+  /** Test-only fault injection (D2): the reader (default fs.readFileSync). Root ignores permission bits. */
+  { readFile = (f: string) => fs.readFileSync(f, 'utf8') }: { readFile?: (f: string) => string } = {},
+): bigint {
   try {
     return withFileLock(file, () => {
       let current = 0n;
       if (fs.existsSync(file)) {
         let raw: string;
         try {
-          raw = fs.readFileSync(file, 'utf8').trim();
+          raw = readFile(file).trim();
         } catch (e) {
           throw refuse(file, `could not be read (${(e as Error).message})`, e);
         }

@@ -118,13 +118,22 @@ export class ClaimLog {
   private checkpointTimer: NodeJS.Timeout | null;
   private readonly strictState: boolean;
 
-  constructor({ filePath, encryptionKey = null, lockTimeoutMs = 5000, strictState }: {
+  /** Opens the log for reading (default fs.openSync(f, 'r')); test-only fault injection (D2). */
+  private readonly openForRead: (file: string) => number;
+
+  constructor({ filePath, encryptionKey = null, lockTimeoutMs = 5000, strictState, openForRead }: {
     filePath: string;
     encryptionKey?: Buffer | null;
     lockTimeoutMs?: number;
     /** Refuse a log that fails authentication instead of quarantining it (GMP_STRICT_STATE). */
     strictState?: boolean;
+    /**
+     * Test-only (D2): every read of the log opens it through this. Root (CI)
+     * ignores permission bits, so tests inject an unreadable log here.
+     */
+    openForRead?: (file: string) => number;
   }) {
+    this.openForRead = openForRead ?? ((f) => fs.openSync(f, 'r'));
     this.strictState = strictState ?? DEFAULTS.GMP_STRICT_STATE;
     this.basePath = filePath;
     this.filePath = filePath;
@@ -387,7 +396,7 @@ export class ClaimLog {
     if (length <= 0) return null;
     try {
       const buffer = Buffer.allocUnsafe(length);
-      const fd = fs.openSync(this.filePath, 'r');
+      const fd = this.openForRead(this.filePath);
       let read: number;
       try {
         read = fs.readSync(fd, buffer, 0, length, offset);
@@ -407,7 +416,7 @@ export class ClaimLog {
   private _walkFramingTo(limit: number, size: number): number {
     let buffer: Buffer;
     try {
-      buffer = fs.readFileSync(this.filePath);
+      buffer = this._readWhole();
     } catch {
       return limit; // cannot read it; the other checks stand on their own
     }
@@ -433,7 +442,7 @@ export class ClaimLog {
 
     let buffer: Buffer;
     try {
-      const fd = fs.openSync(this.filePath, 'r');
+      const fd = this.openForRead(this.filePath);
       try {
         const length = size - this.consumedBytes;
         buffer = Buffer.allocUnsafe(length);
@@ -788,7 +797,7 @@ export class ClaimLog {
     const length = Math.min(CHECKPOINT_ANCHOR_BYTES, upTo);
     try {
       const window = Buffer.allocUnsafe(length);
-      const fd = fs.openSync(this.filePath, 'r');
+      const fd = this.openForRead(this.filePath);
       let read: number;
       try {
         read = fs.readSync(fd, window, 0, length, upTo - length);
@@ -1062,11 +1071,20 @@ export class ClaimLog {
     return true;
   }
 
+  private _readWhole(): Buffer {
+    const fd = this.openForRead(this.filePath);
+    try {
+      return fs.readFileSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   /** Every record in the log, or null if it cannot be read in full. */
   private _readAll(): ClaimRecord[] | null {
     let buffer: Buffer;
     try {
-      buffer = fs.readFileSync(this.filePath);
+      buffer = this._readWhole();
     } catch {
       return null;
     }

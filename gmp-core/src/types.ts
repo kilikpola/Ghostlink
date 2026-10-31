@@ -510,7 +510,9 @@ export interface PeerCacheLike {
 
 /** The ReputationManager surface reachable through GMPNodeLike.reputation. */
 export interface ReputationManagerLike {
-  isBanned(nodeIdHex: string, ip?: string | null): boolean;
+  isBanned(nodeIdHex: string | null): boolean;
+  /** Routed packets carry 32-byte prefixes (D2). */
+  isBannedPrefix(prefixHex: string): boolean;
 }
 
 /** The BootstrapManager surface reachable through GMPNodeLike.bootstrap. */

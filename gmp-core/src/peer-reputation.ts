@@ -17,7 +17,6 @@ export class ReputationManager extends EventEmitter<ReputationEvents> {
   private banDurationMs: number;
   private scores: Map<string, number>;
   private bannedPeers: Map<string, number>;
-  private bannedIps: Map<string, number>;
   private recoveryTimer: ReturnType<typeof setInterval>;
   readonly recoveryIntervalMs: number;
 
@@ -31,7 +30,6 @@ export class ReputationManager extends EventEmitter<ReputationEvents> {
 
     this.scores = new Map();
     this.bannedPeers = new Map();
-    this.bannedIps = new Map();
 
     this.recoveryTimer = setInterval(() => {
       this.recoverScores();
@@ -56,7 +54,13 @@ export class ReputationManager extends EventEmitter<ReputationEvents> {
     return 100;
   }
 
-  penalize(nodeId: string, points: number, reason: string = '', ip: string | null = null): void {
+  /**
+   * D2: a penalty is about one identity. `offendingLink` is the link that
+   * misbehaved; at score 0 it is closed and the NodeID refused (time-boxed).
+   * Before an identity is proven (nodeId null) nothing is recorded: the caller
+   * closes that link itself.
+   */
+  penalize(nodeId: string | null, points: number, reason: string = '', offendingLink: { destroy(err?: Error): void } | null = null): void {
     if (!nodeId) return;
     const currentScore = this.getScore(nodeId);
     const newScore = Math.max(0, currentScore - points);
@@ -66,65 +70,60 @@ export class ReputationManager extends EventEmitter<ReputationEvents> {
       nodeId,
       points,
       reason,
-      ip,
       newScore
     });
 
     if (newScore === 0) {
-      this.ban(nodeId, ip, reason);
+      this.ban(nodeId, reason, offendingLink);
     }
   }
 
-  ban(nodeId: string, ip: string | null, reason: string = ''): void {
+  /**
+   * Refuse this NodeID for banDurationMs and close the offender's links: the
+   * offending link, and any other link whose handshake proved this same NodeID.
+   * Never by address (D2): an address is shared by everyone behind the same
+   * CGNAT, and a mesh-routed link has none. Address-level protection is the
+   * admission token bucket — a rate, never a ban (rate-limiter.ts).
+   */
+  ban(nodeId: string | null, reason: string = '', offendingLink: { destroy(err?: Error): void } | null = null): void {
+    if (!nodeId) return;
     const expiresAt = Date.now() + this.banDurationMs;
-    if (nodeId) {
-      this.bannedPeers.set(nodeId, expiresAt);
-    }
-    if (ip) {
-      this.bannedIps.set(ip, expiresAt);
-    }
+    this.bannedPeers.set(nodeId, expiresAt);
 
-    logger.error('reputation', 'banned', `BANNED peer ${nodeId ? nodeId.slice(0, 8) : 'unknown'} (IP: ${ip || 'unknown'}) for ${this.banDurationMs}ms (Reason: ${reason})`, {
+    logger.error('reputation', 'banned', `BANNED peer ${nodeId.slice(0, 8)} for ${this.banDurationMs}ms (Reason: ${reason})`, {
       nodeId,
-      ip,
       banDurationMs: this.banDurationMs,
       reason
     });
 
-    this.emit('ban', { nodeId, ip, expiresAt, reason });
+    this.emit('ban', { nodeId, expiresAt, reason });
 
+    const err = new Error(`Peer reputation reduced to 0: banned (Reason: ${reason})`);
+    if (offendingLink) offendingLink.destroy(err);
     if (this.node) {
       for (const link of this.node.links.values()) {
-        const linkIp = link.socket ? link.socket.remoteAddress : null;
+        if (link === offendingLink) continue;
         const linkNodeIdHex = link.remoteNodeId ? Buffer.from(link.remoteNodeId).toString('hex') : null;
-        if ((nodeId && linkNodeIdHex === nodeId) || (ip && linkIp === ip)) {
-          link.destroy(new Error(`Peer reputation reduced to 0: banned (Reason: ${reason})`));
-        }
+        if (linkNodeIdHex === nodeId) link.destroy(err);
       }
     }
   }
 
-  isBanned(nodeId: string, ip: string | null = null): boolean {
+  isBanned(nodeId: string | null): boolean {
+    if (!nodeId || !this.bannedPeers.has(nodeId)) return false;
+    if (Date.now() < this.bannedPeers.get(nodeId)!) return true;
+    this.bannedPeers.delete(nodeId);
+    return false;
+  }
+
+  /** Routed packets name 32-byte NodeID prefixes (64 hex): is any banned NodeID one with this prefix? */
+  isBannedPrefix(prefixHex: string): boolean {
+    if (!prefixHex) return false;
     const now = Date.now();
-
-    if (nodeId && this.bannedPeers.has(nodeId)) {
-      const expiresAt = this.bannedPeers.get(nodeId)!;
-      if (now < expiresAt) {
-        return true;
-      } else {
-        this.bannedPeers.delete(nodeId);
-      }
+    for (const [id, expiresAt] of this.bannedPeers) {
+      if (now >= expiresAt) { this.bannedPeers.delete(id); continue; }
+      if (id.startsWith(prefixHex)) return true;
     }
-
-    if (ip && this.bannedIps.has(ip)) {
-      const expiresAt = this.bannedIps.get(ip)!;
-      if (now < expiresAt) {
-        return true;
-      } else {
-        this.bannedIps.delete(ip);
-      }
-    }
-
     return false;
   }
 

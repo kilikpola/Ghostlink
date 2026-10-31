@@ -12,7 +12,7 @@
 
 import { MESSAGETYPES } from '../link/frame.js';
 import type { GMPLink } from '../link/link.js';
-import { subnetKey } from '../relay/relay-protocol.js';
+import { rateKey } from '../relay/relay-protocol.js';
 import { SubnetTokenBucket } from '../relay/token-bucket.js';
 import { STORAGE_BUCKETS, RELEASE_BUCKET_SCHEDULE, maxActiveBucketCount, type BucketEpoch } from './sf-crypto.js';
 import { BlobStore } from './blob-store.js';
@@ -91,7 +91,7 @@ export class StorageServer {
     const reply = { requestId: c.requestId };
     if (!this._validBucket(c.bucket)) return this._ack(link, reply, 'bad-bucket');
     if (!(STORAGE_BUCKETS as readonly number[]).includes(blob.length)) return this._ack(link, reply, 'bad-size');
-    const subnet = subnetKey(link.socket ? link.socket.remoteAddress : null);
+    const subnet = rateKey(link);
     if (!this.tokens.take(subnet)) return this._ack(link, reply, 'rate-limited');
     let res;
     try {

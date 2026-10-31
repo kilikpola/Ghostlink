@@ -83,7 +83,9 @@ class VirtualSocket extends EventEmitter {
     this.node = node;
     this.sourceNodeId = sourceNodeId;
     this.destNodeId = destNodeId;
-    this.remoteAddress = '127.0.0.1';
+    // D2: a mesh-routed link has no network address. It used to claim
+    // 127.0.0.1, and a ban on one such link destroyed every other one.
+    this.remoteAddress = null;
     this.remotePort = 0;
   }
 
@@ -377,7 +379,7 @@ class GMPNode extends EventEmitter {
       if (this.reputation) {
         const sourceNodeId = 'sourceNodeId' in info ? info.sourceNodeId : null;
         const nodeIdHex = sourceNodeId ? Buffer.from(sourceNodeId).toString('hex') : null;
-        if (nodeIdHex) this.reputation.ban(nodeIdHex, null, 'Rate limit exceeded');
+        if (nodeIdHex) this.reputation.ban(nodeIdHex, 'Rate limit exceeded');
       }
     });
 
@@ -959,10 +961,10 @@ class GMPNode extends EventEmitter {
   }
 
   _acceptConnection(socket) {
-    if (this.reputation && this.reputation.isBanned(null, socket.remoteAddress)) {
-      socket.destroy();
-      return;
-    }
+    // D2: no address ban here. Before the handshake there is no identity to
+    // refuse, and an address is shared (CGNAT); the admission token bucket below
+    // is the address-level control — a rate. Banned NodeIDs are refused in the
+    // handshake (link.ts).
 
     let activeLimiter = this.rateLimiter;
     if (this.isPublicPeer && this.bindingRateLimiter) {
@@ -1075,8 +1077,9 @@ class GMPNode extends EventEmitter {
 
   async dial(address, port = DEFAULT_PORT, options = {}) {
     if (!this.identity) throw new Error('Identity not loaded');
-    if (this.reputation && this.reputation.isBanned(null, address)) {
-      throw new Error(`Target IP ${address} is banned`);
+    // D2: refuse a banned NodeID we are asked to dial; never an address.
+    if (this.reputation && options.nodeId && this.reputation.isBanned(String(options.nodeId).toLowerCase())) {
+      throw new Error(`Target peer NodeID ${String(options.nodeId).slice(0, 16)}… is banned`);
     }
 
     // Never show the real identity to a host holding one of our reservations:

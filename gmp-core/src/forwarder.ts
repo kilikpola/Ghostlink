@@ -63,7 +63,9 @@ export class Forwarder {
     const sourceNodeIdHex = Buffer.from(sourceNodeId).toString('hex');
 
     if (this.node.reputation) {
-      if (this.node.reputation.isBanned(sourceNodeIdHex) || this.node.reputation.isBanned(finalDestHex)) {
+      // D2: routed fields are 32-byte prefixes; bans are full NodeIDs (this compared
+      // the two directly and never matched).
+      if (this.node.reputation.isBannedPrefix(sourceNodeIdHex) || this.node.reputation.isBannedPrefix(finalDestHex)) {
         logger.warn('forwarder', 'dropped-banned-packet', `Dropping packet between banned peers: ${sourceNodeIdHex.slice(0, 8)} -> ${finalDestHex.slice(0, 8)}`, {
           sourceNodeId: sourceNodeIdHex,
           destinationNodeId: finalDestHex
@@ -80,10 +82,17 @@ export class Forwarder {
       };
     }
 
-    if (sourceNodeIdHex === ourNodeIdHex) {
-      if (incomingLink) {
-        incomingLink._penalizeBanned('Routing loop detected: received our own authored packet');
-      }
+    // D2: a packet we authored has come back to us: a routing loop. Compare the
+    // routed 32-byte prefix with OUR prefix (this compared it with the full
+    // NodeID and never fired). Drop it, so it cannot circulate until its TTL.
+    // No penalty: the neighbour handing it back is usually an honest node in a
+    // transient loop, and the source field is unauthenticated, so anyone could
+    // fake one to get that neighbour banned.
+    if (sourceNodeIdHex === ourNodeIdHex.slice(0, 64)) {
+      logger.warn('forwarder', 'routing-loop-dropped', 'Dropped a routed packet carrying our own source: a routing loop (or a forged source); nobody penalized', {
+        destinationNodeId: finalDestHex.slice(0, 16),
+        viaNodeId: incomingLink && incomingLink.remoteNodeId ? toHex(incomingLink.remoteNodeId).slice(0, 16) : null,
+      });
       return { local: false, error: 'routing-loop' };
     }
 

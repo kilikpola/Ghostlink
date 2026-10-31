@@ -339,23 +339,16 @@ function testUnreadableLogIsNotCorruption() {
   a.close();
 
   const before = fs.readFileSync(claims);
-  fs.chmodSync(claims, 0o000);
-  // Running as root ignores the mode bits, in which case this cannot be tested
-  // this way; skip rather than assert something untrue.
-  let readable = true;
-  try { fs.readFileSync(claims); } catch { readable = false; }
-  if (readable) {
-    console.log('  — skipped: the file is readable despite mode 000 (running as root?)');
-    fs.chmodSync(claims, 0o600);
-    dropDir();
-    return;
-  }
+  // D2: the failure is injected where the claim log opens the file to read it,
+  // as mode 000 did for a normal user. Permission bits do not stop root (CI),
+  // where this case used to be skipped silently.
+  const unreadable = (f) => { if (f === claims) throw Object.assign(new Error('EACCES: injected open failure'), { code: 'EACCES' }); return fs.openSync(f, 'r'); };
 
   const seen = [];
   const realErr = console.error;
   console.error = (...x) => { seen.push(x.join(' ')); };
   try {
-    const b = new NonceStore({ stateFile, seedPhrase: SEED, strictState: false });
+    const b = new NonceStore({ stateFile, seedPhrase: SEED, strictState: false, claimLogOpenForRead: unreadable });
     b.load();
     b.close();
   } finally { console.error = realErr; }
@@ -367,7 +360,6 @@ function testUnreadableLogIsNotCorruption() {
     'No .corrupt- rename happened'
   );
 
-  fs.chmodSync(claims, 0o600);
   assert(fs.readFileSync(claims).equals(before), 'The log is byte-identical: nothing was rebuilt over it');
 
   // And the claims are all still there once it can be read again.
@@ -376,16 +368,14 @@ function testUnreadableLogIsNotCorruption() {
   c.close();
 
   // Strict mode must refuse rather than run without a replay record.
-  fs.chmodSync(claims, 0o000);
   let threw = null;
   try {
     const realErr2 = console.error;
     console.error = () => {};
-    try { new NonceStore({ stateFile, seedPhrase: SEED, strictState: true }).load(); } finally { console.error = realErr2; }
+    try { new NonceStore({ stateFile, seedPhrase: SEED, strictState: true, claimLogOpenForRead: unreadable }).load(); } finally { console.error = realErr2; }
   } catch (e) { threw = e; }
   assertEqual(threw && threw.name, 'StateAuthenticationError', 'Strict mode refuses to start');
 
-  fs.chmodSync(claims, 0o600);
   dropDir();
 }
 

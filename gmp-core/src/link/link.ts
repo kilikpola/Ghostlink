@@ -120,8 +120,8 @@ export interface LinkHost {
   now(): number;
   timestampWindowMs: number;
   reputation?: {
-    isBanned(nodeIdHex: string | null, ip?: string | null): boolean;
-    penalize(nodeIdHex: string | null, points: number, reason?: string, ip?: string | null): void;
+    isBanned(nodeIdHex: string | null): boolean;
+    penalize(nodeIdHex: string | null, points: number, reason?: string, offendingLink?: { destroy(err?: Error): void } | null): void;
   } | null;
   forwarder?: { processIncoming(plaintext: Uint8Array, link: GMPLink): RoutedResult } | null;
   handleIncomingRoutedPayload(sourceNodeId: Uint8Array, payload: Uint8Array): void;
@@ -505,9 +505,8 @@ export class GMPLink extends EventEmitter<GMPLinkEvents> {
     if (!this._checkNotSelf(hello.nodeId, 'HELLO')) return;
 
     const initiatorNodeIdHex = Buffer.from(hello.nodeId).toString('hex');
-    const remoteIp = this.socket ? this.socket.remoteAddress : null;
 
-    if (this.node && this.node.reputation && this.node.reputation.isBanned(initiatorNodeIdHex, remoteIp)) {
+    if (this.node && this.node.reputation && this.node.reputation.isBanned(initiatorNodeIdHex)) {
       this.destroy(new Error('Peer is banned'));
       return;
     }
@@ -586,9 +585,8 @@ export class GMPLink extends EventEmitter<GMPLinkEvents> {
     if (!this._checkNotSelf(ack.nodeId, 'HELLO_ACK')) return;
 
     const responderNodeIdHex = Buffer.from(ack.nodeId).toString('hex');
-    const remoteIp = this.socket ? this.socket.remoteAddress : null;
 
-    if (this.node && this.node.reputation && this.node.reputation.isBanned(responderNodeIdHex, remoteIp)) {
+    if (this.node && this.node.reputation && this.node.reputation.isBanned(responderNodeIdHex)) {
       this.destroy(new Error('Peer is banned'));
       return;
     }
@@ -814,6 +812,8 @@ export class GMPLink extends EventEmitter<GMPLinkEvents> {
 
   _sendBINDING_RESPONSE(): void {
     const remoteAddress = this.socket.remoteAddress;
+    // D2: a mesh-routed or relayed link has no address to report.
+    if (!remoteAddress) return;
     const remotePort = this.socket.remotePort;
     const dataBuf = Buffer.from(JSON.stringify({ address: remoteAddress, port: remotePort }), 'utf8');
     this._sendRawNoEncrypt(MESSAGETYPES.BINDING_RESPONSE, this._sealPayload(MESSAGETYPES.BINDING_RESPONSE, dataBuf));
@@ -1057,8 +1057,8 @@ export class GMPLink extends EventEmitter<GMPLinkEvents> {
   private _penalize(points: number, reason: string): void {
     if (this.node && this.node.reputation) {
       const peerHex = this.remoteNodeId ? Buffer.from(this.remoteNodeId).toString('hex') : null;
-      const remoteIp = this.socket ? this.socket.remoteAddress : null;
-      this.node.reputation.penalize(peerHex, points, reason, remoteIp);
+      // D2: the identity and this link — never the address (shared behind CGNAT; none on a mesh-routed link).
+      this.node.reputation.penalize(peerHex, points, reason, this);
     }
   }
 }

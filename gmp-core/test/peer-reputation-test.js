@@ -152,17 +152,22 @@ async function testBanListBlocking() {
   await nodeA.listen();
   await nodeB.listen();
 
-  // Ban Node B's IP and NodeID on Node A
-  nodeA.reputation.ban(nodeB.identity.nodeIdHex, '127.0.0.1', 'Banned prior to dialing');
+  // Ban Node B's NodeID on Node A. Never its address (D2): others share it.
+  nodeA.reputation.ban(nodeB.identity.nodeIdHex, 'Banned prior to dialing');
 
-  // Outgoing dial from A to B should throw error immediately
+  // Outgoing dial from A to B, naming B's NodeID, throws before connecting
   let dialError = null;
   try {
-    await nodeA.dial('127.0.0.1', 49965);
+    await nodeA.dial('127.0.0.1', 49965, { nodeId: nodeB.identity.nodeIdHex });
   } catch (e) {
     dialError = e;
   }
-  assert(dialError !== null, "Outgoing dial to banned IP throws error");
+  assert(dialError !== null && /banned/.test(dialError.message), "Outgoing dial to a banned NodeID throws error");
+
+  // Without the NodeID, A learns it in the handshake and refuses there
+  try { await nodeA.dial('127.0.0.1', 49965); } catch (e) { /* refused in the handshake */ }
+  await delay(200);
+  assert(!nodeA.getLinkByNodeId(nodeB.identity.nodeIdHex), "Outgoing dial to the banned peer's address is refused once its NodeID is known");
 
   // Incoming dial from B to A should connect socket but get immediately closed at TCP listen or HELLO handler
   let bDialSuccess = true;
@@ -175,8 +180,18 @@ async function testBanListBlocking() {
 
   assertEqual(bDialSuccess, false, "Incoming dial from banned peer was rejected");
 
+  // Control (D2): another peer at the same address (127.0.0.1) is not refused
+  const nodeC = createGMPNode({ port: 49969, peerCachePath: tempCacheCPath, disableBootstrap: true });
+  await nodeC.loadIdentity('rep C 3');
+  await nodeC.listen();
+  let cErr = null;
+  try { await nodeC.dial('127.0.0.1', 49964); } catch (e) { cErr = e; }
+  await delay(200);
+  assert(cErr === null && nodeA.getLinkByNodeId(nodeC.identity.nodeIdHex)?.state === 'connected', "A different peer from the banned peer's address connects");
+
   nodeA.close();
   nodeB.close();
+  nodeC.close();
 }
 
 async function testRelayingForBannedNodeDropped() {
@@ -205,7 +220,7 @@ async function testRelayingForBannedNodeDropped() {
   nodeA.routingTable.addRoute(nodeC.identity.nodeId, nodeB.identity.nodeId, 1);
 
   // Ban Node C on Node B (the relay)
-  nodeB.reputation.ban(nodeC.identity.nodeIdHex, '127.0.0.1', 'Ban C on B');
+  nodeB.reputation.ban(nodeC.identity.nodeIdHex, 'Ban C on B');
 
   // Attempt to dial virtual connection A -> C (will route through B)
   let virtualDialFailed = false;

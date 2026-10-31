@@ -139,12 +139,14 @@ console.log('\n=== 6. running out of tokens refuses new connections — it bans 
   const stillOpen = admitted.filter((c) => !c.closed).length;
   console.log(`  ${conns.length} from one address: ${stillOpen}/${BURST} admitted still open, ${conns.slice(BURST).filter((c) => c.closed).length}/20 over budget refused`);
   assert(stillOpen === BURST, `every admitted connection stays open when the address runs out of tokens (${stillOpen}/${BURST})`);
+  // D2: reputation keeps no address bans at all; an address control is a rate.
+  const planted = 'ab'.repeat(64);
   assertAbsent({
-    channel: 'reputation.isBanned',
-    control: () => { server.reputation.ban(null, '198.51.100.9', 'positive control'); return server.reputation.isBanned(null, '198.51.100.9'); },
-    controlMessage: 'isBanned reports an address that IS banned',
-    absent: () => !server.reputation.isBanned(null, 'memory.local'),
-    message: 'the address is not banned',
+    channel: 'reputation ban list',
+    control: () => { server.reputation.ban(planted, 'positive control'); return server.reputation.isBanned(planted); },
+    controlMessage: 'isBanned reports a NodeID that IS banned',
+    absent: () => [...server.reputation.bannedPeers.keys()].every((k) => k === planted) && !(server.reputation.bannedIps && server.reputation.bannedIps.size),
+    message: 'nothing about the address, or anyone behind it, is banned',
   });
   clock += 60_000; // a minute of refill
   const later = await client.dial({ host: 'memory', port: server.port });

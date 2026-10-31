@@ -172,7 +172,11 @@ console.log('\n=== 2. persist failure releases nothing ===');
   const env = fresh('persist-fail');
   const a = fileAnchor(env.anchorFile);
   let { alice, bob } = sessionPair();
-  const st = open(env, { anchor: a }); st.put(B_ID, alice);
+  // D2: the write failure is injected at the store's writer (permission bits do not stop root, i.e. CI).
+  const { writeFileAtomicSync } = await import('../dist/atomic-file.js');
+  let failWrites = false;
+  const writeFile = (f, b) => { if (failWrites) throw Object.assign(new Error('EIO: injected state-file write failure'), { code: 'EIO' }); return writeFileAtomicSync(f, b); };
+  const st = open(env, { anchor: a, writeFile }); st.put(B_ID, alice);
   const stateBefore = R.serializeState(st.get(B_ID));
   a.box.failSaves = true;
   let got = null;
@@ -183,10 +187,10 @@ console.log('\n=== 2. persist failure releases nothing ===');
   const okSend = st.send(B_ID, te('after anchor recovers'), deps());
   ok(okSend instanceof Uint8Array && R.decrypt(bob, okSend, deps()).ok, 'control: once the anchor accepts writes, sending works (nothing was poisoned: no key had been derived)');
   // State-file write fails after the key was derived: no ciphertext, and the session is poisoned.
-  fs.chmodSync(env.dir, 0o500);
+  failWrites = true;
   got = null;
   const e2 = caught(() => { got = st.send(B_ID, te('never either'), deps()); });
-  fs.chmodSync(env.dir, 0o700);
+  failWrites = false;
   ok(e2?.name === 'RatchetPersistError' && got === null, `state file write fails: ${e2?.name}, no ciphertext released`);
   const e3 = caught(() => st.send(B_ID, te('retry'), deps()));
   ok(e3?.name === 'RatchetSessionPoisonedError', `the derived-but-unpersisted key is never used again in this run (${e3?.name})`);

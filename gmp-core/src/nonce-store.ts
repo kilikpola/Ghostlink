@@ -103,12 +103,14 @@ export class NonceStore extends EventEmitter<NoEvents> {
   private claimLog: ClaimLog;
   private readonly strictState: boolean;
 
-  constructor({ stateFile = DEFAULT_STATE_FILE, pruneAgeMs, seedPhrase, lockTimeoutMs, claimsFile, strictState }: {
+  constructor({ stateFile = DEFAULT_STATE_FILE, pruneAgeMs, seedPhrase, lockTimeoutMs, claimsFile, strictState, claimLogOpenForRead }: {
     stateFile?: string;
     pruneAgeMs?: number;
     seedPhrase?: string;
     lockTimeoutMs?: number;
     claimsFile?: string;
+    /** Test-only (D2): opens the claim log for reading, for injecting an unreadable log (root ignores permission bits). */
+    claimLogOpenForRead?: (file: string) => number;
     /** Refuse unauthenticated state instead of discarding it (GMP_STRICT_STATE). */
     strictState?: boolean;
   } = {}) {
@@ -140,6 +142,7 @@ export class NonceStore extends EventEmitter<NoEvents> {
       encryptionKey: this.encryptionKey,
       lockTimeoutMs: this.lockTimeoutMs,
       strictState: this.strictState,
+      openForRead: claimLogOpenForRead,
     });
   }
 

@@ -213,6 +213,12 @@ export interface RatchetStoreOptions {
   identity?: StoreIdentity;
   /** Test-only: a smaller dedup cap (default MAX_DEDUP_ENTRIES), so eviction can be exercised on a sealed store quickly. */
   maxDedupEntries?: number;
+  /**
+   * Test-only fault injection (D2): the state-file writer (default
+   * writeFileAtomicSync). Permission bits cannot simulate a failed write: root
+   * (CI) ignores them. Never set from the environment.
+   */
+  writeFile?: (file: string, bytes: Buffer) => void;
 }
 
 /** #34 from the mesh seed. */
@@ -767,7 +773,7 @@ export class RatchetStore extends EventEmitter<RatchetStoreEvents> {
       const bytes = this.seal(peer, record, gen, anchor.installId);
       withFileLock(file, () => {
         if (this.readOwner()?.token !== this.token) throw new RatchetStoreInUseError('this process no longer owns the ratchet store');
-        writeFileAtomicSync(file, bytes);
+        (this.opts!.writeFile ?? writeFileAtomicSync)(file, bytes);
       }, { timeoutMs: this.opts.lockTimeoutMs ?? 5000 });
     } catch (e) {
       if (compute) this.poisoned.add(peer);              // keys exist that no file covers

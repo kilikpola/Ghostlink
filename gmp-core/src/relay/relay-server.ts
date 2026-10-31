@@ -19,7 +19,7 @@ import {
   encodeControl,
   encodeRelayData,
   signVoucher,
-  subnetKey,
+  rateKey,
   type RelayStopReason,
   type Voucher,
 } from './relay-protocol.js';
@@ -165,7 +165,7 @@ export class RelayServer {
     if (this.reservations.size >= this.quotas.maxReservations) {
       return this._reject(link, { op: 'reserve' }, 'reservation-limit');
     }
-    const subnet = subnetKey(link.socket ? link.socket.remoteAddress : null);
+    const subnet = rateKey(link);
     // Sybil control is a rate, not a head count: CGNAT puts hundreds of
     // legitimate subscribers behind one /24, and they are the population the
     // relay exists for. Renewals (above) never spend a token.

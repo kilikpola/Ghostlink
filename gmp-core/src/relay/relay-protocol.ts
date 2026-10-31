@@ -109,6 +109,17 @@ export function decodeControl(payload: Buffer): Record<string, unknown> | null {
  * Anti-Sybil bucket: IPv4 /24 (IPv4-mapped included), IPv6 /48; anything else
  * by its whole string.
  */
+/**
+ * D2: the rate key for a link. Its /24 (or /64) when it has an address; its
+ * proven NodeID when it has none (mesh-routed, relayed): those used to share
+ * one 'unknown' / '127.0.0.0/24' bucket, so one heavy user throttled all of them.
+ */
+export function rateKey(link: { socket?: { remoteAddress?: string | null } | null; remoteNodeId?: Uint8Array | null } | null): string {
+  const address = link && link.socket ? link.socket.remoteAddress : null;
+  if (address) return subnetKey(address);
+  return link && link.remoteNodeId ? `node:${Buffer.from(link.remoteNodeId).toString('hex')}` : 'unknown';
+}
+
 export function subnetKey(address: string | null | undefined): string {
   if (!address) return 'unknown';
   const v4 = address.replace(/^::ffff:/i, '');
